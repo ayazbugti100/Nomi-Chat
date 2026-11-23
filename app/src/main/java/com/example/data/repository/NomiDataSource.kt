@@ -6,6 +6,7 @@ import com.example.data.model.ChatThread
 import com.example.data.model.DirectoryLookupResult
 import com.example.data.model.IncomingMessageAlert
 import com.example.data.model.ReportOutcome
+import com.example.data.model.StoryItem
 import com.example.data.model.ThemeMode
 import com.example.data.model.UserProfile
 import com.example.data.model.UserSetupOutcome
@@ -21,6 +22,21 @@ interface NomiDataSource {
     fun observeContacts(userId: String): Flow<List<ChatThread>>
 
     fun observeMessages(userId: String, contactId: String): Flow<List<ChatMessage>>
+
+    fun observeStories(userId: String): Flow<List<StoryItem>> = emptyFlow()
+
+    suspend fun postStory(
+        userId: String,
+        mediaData: String,
+        caption: String = ""
+    ): Result<String> = Result.success("")
+
+    suspend fun deleteStory(
+        userId: String,
+        storyId: String
+    ): Result<Unit> = Result.success(Unit)
+
+    suspend fun purgeExpiredStories(userId: String) {}
 
     suspend fun ensureInitialUserSetup(
         userId: String,

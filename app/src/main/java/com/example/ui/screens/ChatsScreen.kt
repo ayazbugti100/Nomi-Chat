@@ -30,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.CallMade
 import androidx.compose.material.icons.automirrored.filled.CallReceived
 import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Close
@@ -70,12 +71,15 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.data.model.ChatPillFilter
 import com.example.data.model.ChatThread
+import com.example.data.model.StoryItem
 import com.example.data.model.UiState
+import com.example.data.model.UserProfile
 import com.example.data.network.NetworkStatus
 import com.example.ui.components.AvatarCircle
 import com.example.ui.components.EmeraldWaveHeader
@@ -91,10 +95,13 @@ import com.example.ui.theme.EmeraldMid
 import com.example.ui.theme.EmeraldVibrant
 import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.LightOnSurface
+import kotlin.math.max
 
 @Composable
 fun ChatsScreen(
     contactsState: UiState<List<ChatThread>>,
+    profile: UserProfile? = null,
+    activeStories: List<StoryItem> = emptyList(),
     selectedFilter: ChatPillFilter,
     isSearchVisible: Boolean,
     searchQuery: String,
@@ -111,9 +118,31 @@ fun ChatsScreen(
     onToggleBlockChat: (ChatThread) -> Unit,
     onDeleteChat: (ChatThread) -> Unit,
     onAddContactClick: () -> Unit,
+    onPostStoryClick: () -> Unit = {},
+    onOpenStoryGroup: (List<StoryItem>) -> Unit = {},
     networkStatus: NetworkStatus = NetworkStatus(),
     modifier: Modifier = Modifier
 ) {
+    val myUserId = profile?.userId.orEmpty()
+    val storiesByAuthor = remember(activeStories) {
+        activeStories.groupBy { it.userId.ifBlank { it.authorUsername } }
+    }
+    val myStories = remember(storiesByAuthor, myUserId, profile?.username) {
+        activeStories.filter { story ->
+            (myUserId.isNotBlank() && story.userId == myUserId) ||
+                (!profile?.username.isNullOrBlank() && story.authorUsername.equals(profile?.username, ignoreCase = true))
+        }
+    }
+    val activeStoryAuthorUids = remember(activeStories) {
+        activeStories.mapNotNull { it.userId.takeIf(String::isNotBlank) }.toSet()
+    }
+    val activeStoryUsernames = remember(activeStories) {
+        activeStories.mapNotNull { it.authorUsername.takeIf(String::isNotBlank)?.lowercase() }.toSet()
+    }
+    fun threadHasActiveStory(thread: ChatThread): Boolean {
+        return (thread.peerUid.isNotBlank() && activeStoryAuthorUids.contains(thread.peerUid)) ||
+            (thread.username.isNotBlank() && activeStoryUsernames.contains(thread.username.lowercase()))
+    }
     Box(modifier = modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
             EmeraldWaveHeader(modifier = Modifier.fillMaxWidth()) {
@@ -263,16 +292,33 @@ fun ChatsScreen(
 
                     Spacer(modifier = Modifier.height(6.dp))
 
+                    if (selectedFilter == ChatPillFilter.CHATS && activeStories.isNotEmpty()) {
+                        StoriesStripRow(
+                            profile = profile,
+                            myStories = myStories,
+                            allStories = activeStories,
+                            onPostStoryClick = onPostStoryClick,
+                            onOpenStoryGroup = onOpenStoryGroup
+                        )
+                    }
+
                     when (selectedFilter) {
                         ChatPillFilter.STATUS -> {
                             StatusOverviewList(
+                                profile = profile,
+                                myStories = myStories,
+                                allStories = activeStories,
                                 contacts = (contactsState as? UiState.Success)?.data.orEmpty(),
+                                threadHasStory = ::threadHasActiveStory,
+                                onPostStoryClick = onPostStoryClick,
+                                onOpenStoryGroup = onOpenStoryGroup,
                                 onOpenChat = onOpenChat
                             )
                         }
                         ChatPillFilter.CALLS -> {
                             CallsOverviewList(
                                 contacts = (contactsState as? UiState.Success)?.data.orEmpty(),
+                                threadHasStory = ::threadHasActiveStory,
                                 onOpenChat = onOpenChat
                             )
                         }
@@ -316,6 +362,7 @@ fun ChatsScreen(
                                             items(contactsState.data, key = { it.id }) { thread ->
                                                 ChatListRow(
                                                     thread = thread,
+                                                    hasActiveStory = threadHasActiveStory(thread),
                                                     onOpenChat = { onOpenChat(thread.id) },
                                                     onAvatarClick = { onAvatarClick(thread) },
                                                     onRenameChat = { onRenameChat(thread) },
@@ -441,6 +488,7 @@ private fun FilterPillChip(
 @Composable
 private fun ChatListRow(
     thread: ChatThread,
+    hasActiveStory: Boolean = false,
     onOpenChat: () -> Unit,
     onAvatarClick: () -> Unit,
     onRenameChat: () -> Unit,
@@ -476,9 +524,11 @@ private fun ChatListRow(
             ) {
                 AvatarCircle(
                     name = thread.name,
+                    photoData = thread.photoData,
                     isGroup = isGroup,
                     isChannel = isChannel,
                     showOnlineDot = thread.online && !thread.blocked,
+                    hasStoryRing = hasActiveStory && !thread.blocked,
                     size = 52.dp
                 )
             }
@@ -751,17 +801,240 @@ private fun ChatListRow(
 }
 
 @Composable
+private fun StoriesStripRow(
+    profile: UserProfile?,
+    myStories: List<StoryItem>,
+    allStories: List<StoryItem>,
+    onPostStoryClick: () -> Unit,
+    onOpenStoryGroup: (List<StoryItem>) -> Unit
+) {
+    val myUserId = profile?.userId.orEmpty()
+    val peerGroups = remember(allStories, myUserId, profile?.username) {
+        allStories
+            .filterNot { story ->
+                (myUserId.isNotBlank() && story.userId == myUserId) ||
+                    (!profile?.username.isNullOrBlank() && story.authorUsername.equals(profile?.username, ignoreCase = true))
+            }
+            .groupBy { it.userId.ifBlank { it.authorUsername } }
+            .values
+            .toList()
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .testTag("stories_strip_row"),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(
+            modifier = Modifier
+                .width(62.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .clickable {
+                    if (myStories.isNotEmpty()) onOpenStoryGroup(myStories) else onPostStoryClick()
+                }
+                .testTag("my_story_strip_item"),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Box {
+                AvatarCircle(
+                    name = profile?.displayName?.ifBlank { "My Story" } ?: "My Story",
+                    photoData = profile?.photoData,
+                    hasStoryRing = myStories.isNotEmpty(),
+                    size = 54.dp
+                )
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .size(20.dp)
+                        .clip(CircleShape)
+                        .background(EmeraldDark)
+                        .clickable(onClick = onPostStoryClick),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = "Add 24-hour story",
+                        tint = Color.White,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "My Story",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center
+            )
+        }
+
+        peerGroups.forEach { group ->
+            val first = group.firstOrNull() ?: return@forEach
+            Column(
+                modifier = Modifier
+                    .width(62.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { onOpenStoryGroup(group) }
+                    .testTag("peer_story_item_${first.authorUsername}"),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                AvatarCircle(
+                    name = first.authorName,
+                    photoData = first.authorPhotoData,
+                    hasStoryRing = true,
+                    size = 54.dp
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = first.authorName.substringBefore(" "),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun StatusOverviewList(
+    profile: UserProfile?,
+    myStories: List<StoryItem>,
+    allStories: List<StoryItem>,
     contacts: List<ChatThread>,
+    threadHasStory: (ChatThread) -> Boolean,
+    onPostStoryClick: () -> Unit,
+    onOpenStoryGroup: (List<StoryItem>) -> Unit,
     onOpenChat: (String) -> Unit
 ) {
+    val myUserId = profile?.userId.orEmpty()
+    val peerStoryGroups = remember(allStories, myUserId, profile?.username) {
+        allStories
+            .filterNot { story ->
+                (myUserId.isNotBlank() && story.userId == myUserId) ||
+                    (!profile?.username.isNullOrBlank() && story.authorUsername.equals(profile?.username, ignoreCase = true))
+            }
+            .groupBy { it.userId.ifBlank { it.authorUsername } }
+            .values
+            .toList()
+    }
     val activeStatuses = contacts.filter { it.online }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 104.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "24-Hour Stories",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Button(
+                    onClick = onPostStoryClick,
+                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldDark),
+                    shape = RoundedCornerShape(18.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    modifier = Modifier.testTag("status_add_story_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Add Story", color = Color.White, style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+
+        item {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .clickable {
+                        if (myStories.isNotEmpty()) onOpenStoryGroup(myStories) else onPostStoryClick()
+                    }
+                    .padding(vertical = 8.dp, horizontal = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                AvatarCircle(
+                    name = profile?.displayName?.ifBlank { "My Story" } ?: "My Story",
+                    photoData = profile?.photoData,
+                    hasStoryRing = myStories.isNotEmpty(),
+                    size = 50.dp
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "My Story",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = if (myStories.isNotEmpty()) {
+                            "${myStories.size} active • Tap to view (24h)"
+                        } else {
+                            "Tap '+' or here to share a 24h photo story"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        items(peerStoryGroups, key = { it.first().id }) { group ->
+            val first = group.first()
+            val remainingHrs = max(1, ((first.expiresAtMs - System.currentTimeMillis()) / 3_600_000L).toInt())
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .clickable { onOpenStoryGroup(group) }
+                    .padding(vertical = 8.dp, horizontal = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                AvatarCircle(
+                    name = first.authorName,
+                    photoData = first.authorPhotoData,
+                    hasStoryRing = true,
+                    size = 50.dp
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = first.authorName,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "${group.size} story update • ${remainingHrs}h left",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        item {
+            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
             Text(
                 text = "Online Contacts",
                 style = MaterialTheme.typography.titleMedium,
@@ -791,8 +1064,10 @@ private fun StatusOverviewList(
             ) {
                 AvatarCircle(
                     name = thread.name,
+                    photoData = thread.photoData,
                     isGroup = thread.threadType == "group",
-                    borderColor = EmeraldBright,
+                    borderColor = if (threadHasStory(thread)) null else EmeraldBright,
+                    hasStoryRing = threadHasStory(thread),
                     showOnlineDot = true,
                     size = 50.dp
                 )
@@ -816,6 +1091,7 @@ private fun StatusOverviewList(
 @Composable
 private fun CallsOverviewList(
     contacts: List<ChatThread>,
+    threadHasStory: (ChatThread) -> Boolean,
     onOpenChat: (String) -> Unit
 ) {
     val callEntries = contacts.filter { it.threadType == "chat" }
@@ -844,6 +1120,8 @@ private fun CallsOverviewList(
             ) {
                 AvatarCircle(
                     name = thread.name,
+                    photoData = thread.photoData,
+                    hasStoryRing = threadHasStory(thread),
                     showOnlineDot = thread.online,
                     size = 48.dp
                 )

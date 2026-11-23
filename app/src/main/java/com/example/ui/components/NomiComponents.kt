@@ -121,6 +121,8 @@ fun AvatarCircle(
     isGroup: Boolean = false,
     isChannel: Boolean = false,
     showOnlineDot: Boolean = false,
+    hasStoryRing: Boolean = false,
+    storyRingSeen: Boolean = false,
     size: Dp = 50.dp,
     borderColor: Color? = null,
     modifier: Modifier = Modifier
@@ -138,10 +140,36 @@ fun AvatarCircle(
         else -> MintLight
     }
 
-    Box(modifier = modifier.size(size)) {
+    val ringBrush = remember(storyRingSeen) {
+        if (storyRingSeen) {
+            Brush.linearGradient(listOf(Color(0xFF9EACA6), Color(0xFFB8C4BF)))
+        } else {
+            Brush.sweepGradient(
+                listOf(EmeraldVibrant, EmeraldBright, GoldCrown.copy(alpha = 0.85f), EmeraldMid, EmeraldVibrant)
+            )
+        }
+    }
+    val innerSize = if (hasStoryRing) (size - 6.dp).coerceAtLeast(24.dp) else size
+
+    Box(
+        modifier = modifier.size(size),
+        contentAlignment = Alignment.Center
+    ) {
+        if (hasStoryRing) {
+            Box(
+                modifier = Modifier
+                    .size(size)
+                    .clip(CircleShape)
+                    .border(2.2.dp, ringBrush, CircleShape)
+                    .padding(2.5.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surface)
+            )
+        }
+
         Box(
             modifier = Modifier
-                .size(size)
+                .size(innerSize)
                 .clip(CircleShape)
                 .background(containerColor)
                 .then(
@@ -156,7 +184,7 @@ fun AvatarCircle(
                     contentDescription = "$name avatar",
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
-                        .size(size)
+                        .size(innerSize)
                         .clip(CircleShape)
                 )
             } else if (isChannel) {
@@ -164,19 +192,19 @@ fun AvatarCircle(
                     imageVector = Icons.Default.Campaign,
                     contentDescription = "$name channel",
                     tint = Color.White,
-                    modifier = Modifier.size(size * 0.52f)
+                    modifier = Modifier.size(innerSize * 0.52f)
                 )
             } else if (isGroup) {
                 Icon(
                     imageVector = Icons.Default.Group,
                     contentDescription = "$name group",
                     tint = Color.White,
-                    modifier = Modifier.size(size * 0.52f)
+                    modifier = Modifier.size(innerSize * 0.52f)
                 )
             } else {
                 Text(
                     text = name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "N",
-                    style = if (size >= 80.dp) MaterialTheme.typography.headlineMedium else MaterialTheme.typography.titleMedium,
+                    style = if (innerSize >= 80.dp) MaterialTheme.typography.headlineMedium else MaterialTheme.typography.titleMedium,
                     color = EmeraldDeep,
                     fontWeight = FontWeight.Bold
                 )
@@ -324,7 +352,7 @@ fun NomiBottomBar(
             ) {
                 Icon(
                     imageVector = Icons.Default.Add,
-                    contentDescription = "Add chat by username",
+                    contentDescription = "Post 24-hour story",
                     tint = Color.White,
                     modifier = Modifier.size(26.dp)
                 )

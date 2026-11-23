@@ -9,6 +9,8 @@ import com.example.data.model.ChatThread
 import com.example.data.model.DirectoryLookupResult
 import com.example.data.model.IncomingMessageAlert
 import com.example.data.model.ReportOutcome
+import com.example.data.model.STORY_DURATION_MS
+import com.example.data.model.StoryItem
 import com.example.data.model.UserDirectoryEntry
 import com.example.data.model.UserProfile
 import com.example.data.model.UserSetupOutcome
@@ -263,6 +265,114 @@ class NomiChatRepository(
         )
     }
 
+    override fun observeStories(userId: String): Flow<List<StoryItem>> = flow {
+        val uid = requireUserId()
+        check(uid == userId) { "Authenticated user mismatch." }
+        val path = "stories"
+        emitAll(
+            db.collection("stories")
+                .orderBy("createdAtMs", Query.Direction.DESCENDING)
+                .limit(100)
+                .snapshots()
+                .map { snapshot ->
+                    val nowMs = System.currentTimeMillis()
+                    snapshot.toObjects(
+                        StoryItem::class.java,
+                        DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                    ).filter { it.expiresAtMs > nowMs }
+                }
+                .catch { error ->
+                    val firestoreError = generateSequence(error) { it.cause }
+                        .filterIsInstance<FirebaseFirestoreException>()
+                        .firstOrNull()
+                    if (firestoreError == null && error is CancellationException) throw error
+                    val toLog = firestoreError ?: (error as? Exception)
+                    if (toLog != null && auth.currentUser?.uid == uid) {
+                        handleFirestoreError(toLog, OperationType.LIST, path)
+                    }
+                    throw error
+                }
+        )
+    }
+
+    override suspend fun postStory(
+        userId: String,
+        mediaData: String,
+        caption: String
+    ): Result<String> {
+        val storyRef = db.collection("stories").document()
+        return try {
+            val uid = requireUserId()
+            check(uid == userId) { "Signed-in user mismatch." }
+            require(mediaData.isNotBlank() && mediaData.length <= 240000) { "Story image is invalid or too large." }
+            val cleanCaption = caption.trim().take(140)
+            val userSnap = db.collection("users").document(uid).get().await()
+            val authorName = userSnap.getString("displayName").orEmpty().ifBlank { "Nomi User" }.take(60)
+            val authorUsername = sanitizeHandle(userSnap.getString("username").orEmpty())
+            val authorPhotoData = userSnap.getString("photoData")?.takeIf { it.isNotBlank() && it.length <= 150000 }
+            val nowMs = System.currentTimeMillis()
+            val expiresAtMs = nowMs + STORY_DURATION_MS
+
+            val payload = mutableMapOf<String, Any>(
+                "userId" to uid,
+                "authorName" to authorName,
+                "authorUsername" to authorUsername,
+                "mediaData" to mediaData,
+                "caption" to cleanCaption,
+                "createdAtMs" to nowMs,
+                "expiresAtMs" to expiresAtMs,
+                "createdAt" to FieldValue.serverTimestamp()
+            )
+            if (authorPhotoData != null) {
+                payload["authorPhotoData"] = authorPhotoData
+            }
+            storyRef.set(payload).await()
+            Result.success(storyRef.id)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, storyRef.path)
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun deleteStory(userId: String, storyId: String): Result<Unit> {
+        val path = "stories/$storyId"
+        return try {
+            val uid = requireUserId()
+            check(uid == userId) { "Signed-in user mismatch." }
+            require(storyId.isNotBlank()) { "storyId cannot be blank." }
+            db.collection("stories").document(storyId).delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, path)
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun purgeExpiredStories(userId: String) {
+        val uid = auth.currentUser?.uid ?: return
+        if (uid != userId) return
+        runCatching {
+            val nowMs = System.currentTimeMillis()
+            val ownStories = db.collection("stories")
+                .whereEqualTo("userId", uid)
+                .get()
+                .await()
+            val expiredDocs = ownStories.documents.filter { doc ->
+                val exp = doc.getLong("expiresAtMs") ?: 0L
+                exp in 1..nowMs
+            }
+            if (expiredDocs.isNotEmpty()) {
+                val batch = db.batch()
+                expiredDocs.forEach { batch.delete(it.reference) }
+                batch.commit().await()
+            }
+        }
+    }
+
     override suspend fun ensureInitialUserSetup(
         userId: String,
         googleDisplayName: String?,
@@ -289,10 +399,25 @@ class NomiChatRepository(
                 }
                 val existingHandle = sanitizeHandle(existingUser.getString("username").orEmpty())
                 val existingDisplayName = existingUser.getString("displayName").orEmpty()
+                val existingPhotoData = existingUser.getString("photoData")?.takeIf { it.isNotBlank() && it.length <= 150000 }
                 if (existingHandle.isNotBlank()) {
                     val existingDirSnap = db.collection("directory").document(existingHandle).get().await()
                     if (existingDirSnap.exists() && existingDirSnap.getString("accountStatus") == "banned") {
                         return Result.success(UserSetupOutcome.Banned)
+                    }
+                    if (existingDirSnap.exists() &&
+                        existingDirSnap.getString("ownerUid") == uid &&
+                        existingDirSnap.getString("photoData").isNullOrBlank() &&
+                        existingPhotoData != null
+                    ) {
+                        runCatching {
+                            existingDirSnap.reference.update(
+                                mapOf(
+                                    "photoData" to existingPhotoData,
+                                    "updatedAt" to FieldValue.serverTimestamp()
+                                )
+                            ).await()
+                        }
                     }
                 }
 
@@ -693,38 +818,44 @@ class NomiChatRepository(
             val currentHandle = currentUserSnap.getString("username").orEmpty()
             val currentDisplayName = currentUserSnap.getString("displayName").orEmpty().ifBlank { "Nomi User" }
             val currentProvider = currentUserSnap.getString("provider").orEmpty().ifBlank { "google" }
+            val currentPhotoData = currentUserSnap.getString("photoData")?.takeIf { it.isNotBlank() && it.length <= 150000 }
 
             userRef.update(updates).await()
 
-            // Keep public directory entry synced whenever displayName or username changes
+            // Keep public directory entry synced whenever displayName, photoData, or username changes
             val updatedHandle = (updates["username"] as? String) ?: currentHandle
             val updatedName = (updates["displayName"] as? String) ?: currentDisplayName
+            val updatedPhotoData = (updates["photoData"] as? String) ?: currentPhotoData
             if (updatedHandle.isNotBlank() && updatedName.isNotBlank()) {
                 val dirRef = db.collection("directory").document(updatedHandle)
                 val dirSnap = dirRef.get().await()
                 if (!dirSnap.exists()) {
-                    dirRef.set(
-                        mapOf(
-                            "ownerUid" to uid,
-                            "username" to updatedHandle,
-                            "displayName" to updatedName.take(60),
-                            "provider" to currentProvider,
-                            "online" to true,
-                            "accountStatus" to "active",
-                            "reportCount" to 0L,
-                            "reportedByUids" to emptyList<String>(),
-                            "createdAt" to FieldValue.serverTimestamp(),
-                            "updatedAt" to FieldValue.serverTimestamp()
-                        )
-                    ).await()
+                    val dirPayload = mutableMapOf<String, Any>(
+                        "ownerUid" to uid,
+                        "username" to updatedHandle,
+                        "displayName" to updatedName.take(60),
+                        "provider" to currentProvider,
+                        "online" to true,
+                        "accountStatus" to "active",
+                        "reportCount" to 0L,
+                        "reportedByUids" to emptyList<String>(),
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                    if (!updatedPhotoData.isNullOrBlank()) {
+                        dirPayload["photoData"] = updatedPhotoData
+                    }
+                    dirRef.set(dirPayload).await()
                 } else if (dirSnap.getString("ownerUid") == uid) {
-                    dirRef.update(
-                        mapOf(
-                            "displayName" to updatedName.take(60),
-                            "online" to true,
-                            "updatedAt" to FieldValue.serverTimestamp()
-                        )
-                    ).await()
+                    val dirUpdates = mutableMapOf<String, Any>(
+                        "displayName" to updatedName.take(60),
+                        "online" to true,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                    if (!updatedPhotoData.isNullOrBlank()) {
+                        dirUpdates["photoData"] = updatedPhotoData
+                    }
+                    dirRef.update(dirUpdates).await()
                 }
             }
 
@@ -750,11 +881,13 @@ class NomiChatRepository(
             val storedHandle = snap.getString("username").orEmpty().ifBlank { cleanHandle }
             if (!storedHandle.equals(cleanHandle, ignoreCase = true)) return Result.success(null)
             val displayName = snap.getString("displayName").orEmpty().ifBlank { storedHandle }
+            val photoData = snap.getString("photoData")?.takeIf { it.isNotBlank() }
             Result.success(
                 DirectoryLookupResult(
                     username = storedHandle,
                     displayName = displayName,
-                    ownerUid = ownerUid
+                    ownerUid = ownerUid,
+                    photoData = photoData
                 )
             )
         } catch (e: CancellationException) {
@@ -786,6 +919,7 @@ class NomiChatRepository(
             var resolvedIsPeer = isRegisteredPeer
             var resolvedDirName = ""
             var resolvedOnline = false
+            var resolvedPhotoData: String? = null
             val finalName: String
 
             if (validType == "chat") {
@@ -806,6 +940,7 @@ class NomiChatRepository(
                 resolvedPeerUid = owner
                 resolvedIsPeer = true
                 resolvedDirName = dirSnap.getString("displayName").orEmpty()
+                resolvedPhotoData = dirSnap.getString("photoData")?.takeIf { it.isNotBlank() && it.length <= 150000 }
                 val updatedTs = dirSnap.getTimestamp("updatedAt")?.toDate()?.time
                 val fresh = updatedTs == null || (System.currentTimeMillis() - updatedTs) <= PRESENCE_STALE_MS
                 resolvedOnline = (dirSnap.getBoolean("online") == true) && fresh
@@ -827,47 +962,53 @@ class NomiChatRepository(
                     .await()
                 val existingDoc = existingSnap.documents.firstOrNull()
                 if (existingDoc != null) {
-                    existingDoc.reference.update(
-                        mapOf(
-                            "name" to finalName,
-                            "peerUid" to resolvedPeerUid,
-                            "isRegisteredPeer" to resolvedIsPeer,
-                            "online" to resolvedOnline,
-                            "updatedAt" to FieldValue.serverTimestamp()
-                        )
-                    ).await()
+                    val existingUpdates = mutableMapOf<String, Any>(
+                        "peerUid" to resolvedPeerUid,
+                        "isRegisteredPeer" to resolvedIsPeer,
+                        "online" to resolvedOnline,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                    if (existingDoc.getBoolean("customRenamed") != true) {
+                        existingUpdates["name"] = finalName
+                    }
+                    if (!resolvedPhotoData.isNullOrBlank()) {
+                        existingUpdates["photoData"] = resolvedPhotoData
+                    }
+                    existingDoc.reference.update(existingUpdates).await()
                     return Result.success(existingDoc.id)
                 }
             }
 
             val contactRef = db.collection("users").document(uid).collection("contacts").document()
             path = contactRef.path
-            contactRef.set(
-                mapOf(
-                    "userId" to uid,
-                    "name" to finalName,
-                    "username" to cleanHandle,
-                    "phone" to cleanPhone,
-                    "threadType" to validType,
-                    "online" to resolvedOnline,
-                    "typing" to false,
-                    "unreadCount" to 0L,
-                    "lastMessageText" to "",
-                    "lastMessageFromMe" to false,
-                    "lastMessageTimeLabel" to "",
-                    "pinned" to false,
-                    "locked" to false,
-                    "blocked" to false,
-                    "customRenamed" to false,
-                    "peerUid" to resolvedPeerUid,
-                    "isRegisteredPeer" to resolvedIsPeer,
-                    "accountStatus" to "active",
-                    "reportCount" to 0L,
-                    "reportedBy" to emptyList<String>(),
-                    "createdAt" to FieldValue.serverTimestamp(),
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            ).await()
+            val contactPayload = mutableMapOf<String, Any>(
+                "userId" to uid,
+                "name" to finalName,
+                "username" to cleanHandle,
+                "phone" to cleanPhone,
+                "threadType" to validType,
+                "online" to resolvedOnline,
+                "typing" to false,
+                "unreadCount" to 0L,
+                "lastMessageText" to "",
+                "lastMessageFromMe" to false,
+                "lastMessageTimeLabel" to "",
+                "pinned" to false,
+                "locked" to false,
+                "blocked" to false,
+                "customRenamed" to false,
+                "peerUid" to resolvedPeerUid,
+                "isRegisteredPeer" to resolvedIsPeer,
+                "accountStatus" to "active",
+                "reportCount" to 0L,
+                "reportedBy" to emptyList<String>(),
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if (!resolvedPhotoData.isNullOrBlank()) {
+                contactPayload["photoData"] = resolvedPhotoData
+            }
+            contactRef.set(contactPayload).await()
             Result.success(contactRef.id)
         } catch (e: CancellationException) {
             throw e
@@ -1080,6 +1221,12 @@ class NomiChatRepository(
                             return@runCatching true
                         }
 
+                        val peerDirSnap = runCatching {
+                            db.collection("directory").document(fromUsername).get().await()
+                        }.getOrNull()
+                        val peerPhotoData = peerDirSnap?.getString("photoData")
+                            ?.takeIf { it.isNotBlank() && it.length <= 150000 }
+
                         val batch = db.batch()
                         val targetContactId: String
                         var isBlockedContact = false
@@ -1088,32 +1235,34 @@ class NomiChatRepository(
                             targetContactId = newContactRef.id
                             val msgRef = newContactRef.collection("messages").document()
                             val isActiveOpen = activeContactIdProvider() == targetContactId
-                            batch.set(
-                                newContactRef,
-                                mapOf(
-                                    "userId" to uid,
-                                    "name" to fromDisplayName,
-                                    "username" to fromUsername,
-                                    "phone" to "@$fromUsername",
-                                    "threadType" to "chat",
-                                    "online" to false,
-                                    "typing" to false,
-                                    "unreadCount" to if (isActiveOpen) 0L else 1L,
-                                    "lastMessageText" to text.take(1000),
-                                    "lastMessageFromMe" to false,
-                                    "lastMessageTimeLabel" to timeLabel,
-                                    "pinned" to false,
-                                    "locked" to false,
-                                    "blocked" to false,
-                                    "peerUid" to fromUid,
-                                    "isRegisteredPeer" to true,
-                                    "accountStatus" to "active",
-                                    "reportCount" to 0L,
-                                    "reportedBy" to emptyList<String>(),
-                                    "createdAt" to FieldValue.serverTimestamp(),
-                                    "updatedAt" to FieldValue.serverTimestamp()
-                                )
+                            val newContactPayload = mutableMapOf<String, Any>(
+                                "userId" to uid,
+                                "name" to fromDisplayName,
+                                "username" to fromUsername,
+                                "phone" to "@$fromUsername",
+                                "threadType" to "chat",
+                                "online" to false,
+                                "typing" to false,
+                                "unreadCount" to if (isActiveOpen) 0L else 1L,
+                                "lastMessageText" to text.take(1000),
+                                "lastMessageFromMe" to false,
+                                "lastMessageTimeLabel" to timeLabel,
+                                "pinned" to false,
+                                "locked" to false,
+                                "blocked" to false,
+                                "customRenamed" to false,
+                                "peerUid" to fromUid,
+                                "isRegisteredPeer" to true,
+                                "accountStatus" to "active",
+                                "reportCount" to 0L,
+                                "reportedBy" to emptyList<String>(),
+                                "createdAt" to FieldValue.serverTimestamp(),
+                                "updatedAt" to FieldValue.serverTimestamp()
                             )
+                            if (!peerPhotoData.isNullOrBlank()) {
+                                newContactPayload["photoData"] = peerPhotoData
+                            }
+                            batch.set(newContactRef, newContactPayload)
                             batch.set(
                                 msgRef,
                                 mapOf(
@@ -1129,6 +1278,7 @@ class NomiChatRepository(
                         } else {
                             targetContactId = existingDoc.id
                             isBlockedContact = existingDoc.getBoolean("blocked") == true
+                            val isCustomRenamed = existingDoc.getBoolean("customRenamed") == true
                             val contactRef = existingDoc.reference
                             val msgRef = contactRef.collection("messages").document()
                             val isActiveOpen = activeContactIdProvider() == targetContactId
@@ -1144,21 +1294,24 @@ class NomiChatRepository(
                                     "createdAt" to FieldValue.serverTimestamp()
                                 )
                             )
-                            batch.update(
-                                contactRef,
-                                mapOf(
-                                    "name" to fromDisplayName,
-                                    "username" to fromUsername,
-                                    "peerUid" to fromUid,
-                                    "isRegisteredPeer" to true,
-                                    "lastMessageText" to text.take(1000),
-                                    "lastMessageFromMe" to false,
-                                    "lastMessageTimeLabel" to timeLabel,
-                                    "unreadCount" to if (isActiveOpen) 0L else FieldValue.increment(1L),
-                                    "typing" to false,
-                                    "updatedAt" to FieldValue.serverTimestamp()
-                                )
+                            val existingContactUpdates = mutableMapOf<String, Any>(
+                                "username" to fromUsername,
+                                "peerUid" to fromUid,
+                                "isRegisteredPeer" to true,
+                                "lastMessageText" to text.take(1000),
+                                "lastMessageFromMe" to false,
+                                "lastMessageTimeLabel" to timeLabel,
+                                "unreadCount" to if (isActiveOpen) 0L else FieldValue.increment(1L),
+                                "typing" to false,
+                                "updatedAt" to FieldValue.serverTimestamp()
                             )
+                            if (!isCustomRenamed) {
+                                existingContactUpdates["name"] = fromDisplayName
+                            }
+                            if (!peerPhotoData.isNullOrBlank()) {
+                                existingContactUpdates["photoData"] = peerPhotoData
+                            }
+                            batch.update(contactRef, existingContactUpdates)
                         }
                         batch.delete(doc.reference)
                         batch.commit().await()
@@ -1509,11 +1662,13 @@ class NomiChatRepository(
                 entry.displayName.trim().ifBlank { thread.name }
             }
             val syncedStatus = if (entry.accountStatus == "banned") "banned" else thread.accountStatus
+            val syncedPhoto = entry.photoData?.takeIf { it.isNotBlank() } ?: thread.photoData
             val updatedMs = entry.updatedAt?.toDate()?.time
             val withinWindow = updatedMs == null || (nowMillis - updatedMs) <= PRESENCE_STALE_MS
             val realOnline = entry.online && syncedStatus != "banned" && withinWindow
             return thread.copy(
                 name = syncedName,
+                photoData = syncedPhoto,
                 online = realOnline,
                 accountStatus = syncedStatus,
                 peerUid = thread.peerUid.ifBlank { entry.ownerUid.orEmpty() },

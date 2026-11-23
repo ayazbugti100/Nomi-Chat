@@ -10,17 +10,39 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -32,7 +54,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.credentials.CredentialManager
@@ -50,6 +77,7 @@ import com.example.data.local.LocalAuthStore
 import com.example.data.local.LocalNomiRepository
 import com.example.data.model.AuthFlowMode
 import com.example.data.model.ChatPillFilter
+import com.example.data.model.IncomingMessageAlert
 import com.example.data.model.MainBottomTab
 import com.example.data.model.ThemeMode
 import com.example.data.model.UiState
@@ -77,7 +105,13 @@ import com.example.ui.screens.EditSingleFieldDialog
 import com.example.ui.screens.PremiumFeaturesDialog
 import com.example.ui.screens.ProfileScreen
 import com.example.ui.screens.ReportAccountDialog
+import com.example.ui.screens.StoryPickerDialog
+import com.example.ui.screens.StoryViewerDialog
+import com.example.ui.theme.EmeraldDark
+import com.example.ui.theme.EmeraldDeep
 import com.example.ui.theme.EmeraldMid
+import com.example.ui.theme.MintLight
+import com.example.ui.theme.MintOnlineGlow
 import com.example.ui.theme.NomiChatTheme
 import com.example.ui.viewmodel.NomiChatViewModel
 import com.google.firebase.Firebase
@@ -135,6 +169,7 @@ private enum class ActiveModal {
     EDIT_USERNAME,
     EDIT_DOB,
     ADD_CONTACT,
+    POST_STORY,
     APPEARANCE,
     PASSCODE,
     PREMIUM
@@ -440,8 +475,12 @@ private fun NomiChatMainShell(
     val totalUnreadCount by viewModel.totalUnreadCount.collectAsStateWithLifecycle()
     val usernameSearchState by viewModel.usernameSearchState.collectAsStateWithLifecycle()
     val networkStatus by viewModel.networkStatus.collectAsStateWithLifecycle()
+    val activeStories by viewModel.activeStoriesState.collectAsStateWithLifecycle()
+    val isPostingStory by viewModel.isPostingStory.collectAsStateWithLifecycle()
+    val inAppAlertBanner by viewModel.inAppAlertBanner.collectAsStateWithLifecycle()
 
     var activeModal by remember { mutableStateOf(ActiveModal.NONE) }
+    var activeStoryAuthorKey by remember { mutableStateOf<String?>(null) }
     var avatarPreviewThreadId by remember { mutableStateOf<String?>(null) }
     var viewContactThreadId by remember { mutableStateOf<String?>(null) }
     var renameThreadId by remember { mutableStateOf<String?>(null) }
@@ -449,10 +488,27 @@ private fun NomiChatMainShell(
     val snackbarHostState = remember { SnackbarHostState() }
 
     val allThreads = (contactsState as? UiState.Success)?.data.orEmpty()
+    val activeStoryGroup = remember(activeStoryAuthorKey, activeStories) {
+        val key = activeStoryAuthorKey ?: return@remember emptyList()
+        activeStories.filter { it.userId.ifBlank { it.authorUsername } == key }
+    }
     val avatarPreviewThread = avatarPreviewThreadId?.let { id -> allThreads.firstOrNull { it.id == id } }
     val viewContactThread = viewContactThreadId?.let { id -> allThreads.firstOrNull { it.id == id } }
     val renameThread = renameThreadId?.let { id -> allThreads.firstOrNull { it.id == id } }
     val reportThread = reportThreadId?.let { id -> allThreads.firstOrNull { it.id == id } }
+
+    LaunchedEffect(activeStoryAuthorKey, activeStoryGroup) {
+        if (activeStoryAuthorKey != null && activeStoryGroup.isEmpty()) {
+            activeStoryAuthorKey = null
+        }
+    }
+
+    LaunchedEffect(inAppAlertBanner) {
+        if (inAppAlertBanner != null) {
+            delay(4000L)
+            viewModel.dismissInAppAlertBanner()
+        }
+    }
 
     LaunchedEffect(snackbarMessage) {
         val msg = snackbarMessage
@@ -531,8 +587,7 @@ private fun NomiChatMainShell(
                             }
                         },
                         onPlusClick = {
-                            viewModel.resetUsernameSearch()
-                            activeModal = ActiveModal.ADD_CONTACT
+                            activeModal = ActiveModal.POST_STORY
                         }
                     )
                 }
@@ -629,6 +684,8 @@ private fun NomiChatMainShell(
                 } else {
                     ChatsScreen(
                         contactsState = contactsState,
+                        profile = profile,
+                        activeStories = activeStories,
                         selectedFilter = selectedFilter,
                         isSearchVisible = isSearchVisible,
                         searchQuery = searchQuery,
@@ -657,9 +714,35 @@ private fun NomiChatMainShell(
                             viewModel.resetUsernameSearch()
                             activeModal = ActiveModal.ADD_CONTACT
                         },
+                        onPostStoryClick = { activeModal = ActiveModal.POST_STORY },
+                        onOpenStoryGroup = { group ->
+                            activeStoryAuthorKey = group.firstOrNull()?.let { it.userId.ifBlank { it.authorUsername } }
+                        },
                         networkStatus = networkStatus
                     )
                 }
+            }
+        }
+
+        AnimatedVisibility(
+            visible = inAppAlertBanner != null,
+            enter = fadeIn() + slideInVertically { -it },
+            exit = fadeOut() + slideOutVertically { -it },
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(horizontal = 14.dp, vertical = 10.dp)
+                .widthIn(max = 560.dp)
+        ) {
+            inAppAlertBanner?.let { alert ->
+                InAppMessageBanner(
+                    alert = alert,
+                    onClick = {
+                        viewModel.dismissInAppAlertBanner()
+                        viewModel.openConversation(alert.contactId)
+                    },
+                    onDismiss = viewModel::dismissInAppAlertBanner
+                )
             }
         }
     }
@@ -730,6 +813,18 @@ private fun NomiChatMainShell(
                 )
             }
         )
+        ActiveModal.POST_STORY -> StoryPickerDialog(
+            isPosting = isPostingStory,
+            onDismiss = { activeModal = ActiveModal.NONE },
+            onPostStory = { uri, caption ->
+                viewModel.postStoryFromUri(
+                    context = context,
+                    uri = uri,
+                    caption = caption,
+                    onSuccess = { activeModal = ActiveModal.NONE }
+                )
+            }
+        )
         ActiveModal.APPEARANCE -> AppearanceDialog(
             currentMode = currentThemeMode,
             onSelectMode = viewModel::setThemeMode,
@@ -747,9 +842,25 @@ private fun NomiChatMainShell(
         )
     }
 
+    if (activeStoryAuthorKey != null && activeStoryGroup.isNotEmpty()) {
+        StoryViewerDialog(
+            stories = activeStoryGroup,
+            currentUserId = profile?.userId.orEmpty(),
+            onDismiss = { activeStoryAuthorKey = null },
+            onDeleteStory = viewModel::deleteStory
+        )
+    }
+
     avatarPreviewThread?.let { thread ->
+        val threadStories = remember(activeStories, thread.peerUid, thread.username) {
+            activeStories.filter { story ->
+                (thread.peerUid.isNotBlank() && story.userId == thread.peerUid) ||
+                    (thread.username.isNotBlank() && story.authorUsername.equals(thread.username, ignoreCase = true))
+            }
+        }
         AvatarPreviewDialog(
             thread = thread,
+            hasActiveStory = threadStories.isNotEmpty(),
             onDismiss = { avatarPreviewThreadId = null },
             onOpenChat = {
                 avatarPreviewThreadId = null
@@ -758,6 +869,10 @@ private fun NomiChatMainShell(
             onViewContact = {
                 avatarPreviewThreadId = null
                 viewContactThreadId = thread.id
+            },
+            onViewStory = {
+                avatarPreviewThreadId = null
+                activeStoryAuthorKey = threadStories.firstOrNull()?.let { it.userId.ifBlank { it.authorUsername } }
             },
             onToggleBlock = {
                 avatarPreviewThreadId = null
@@ -804,5 +919,78 @@ private fun NomiChatMainShell(
                 renameThreadId = null
             }
         )
+    }
+}
+
+@Composable
+private fun InAppMessageBanner(
+    alert: IncomingMessageAlert,
+    onClick: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .clickable(onClick = onClick)
+            .testTag("in_app_message_banner"),
+        shape = RoundedCornerShape(18.dp),
+        color = EmeraldDeep,
+        shadowElevation = 10.dp
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .background(EmeraldDark),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.NotificationsActive,
+                    contentDescription = "New message",
+                    tint = MintOnlineGlow,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = if (alert.senderHandle.isNotBlank()) {
+                        "${alert.senderName} (@${alert.senderHandle})"
+                    } else {
+                        alert.senderName
+                    },
+                    style = MaterialTheme.typography.titleSmall,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = alert.text,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MintLight,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier.testTag("dismiss_in_app_banner")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Dismiss notification",
+                    tint = Color.White.copy(alpha = 0.85f),
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
     }
 }

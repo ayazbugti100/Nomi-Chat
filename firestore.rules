@@ -43,6 +43,7 @@ service cloud.firestore {
              data.username is string && data.username.size() >= 1 && data.username.size() <= 40 &&
              data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60 &&
              (!('provider' in data) || data.provider in ['google', 'username']) &&
+             (!('photoData' in data) || (data.photoData is string && data.photoData.size() <= 150000)) &&
              (!('online' in data) || data.online is bool) &&
              data.accountStatus in ['active', 'banned'] &&
              data.reportCount is int && data.reportCount >= 0 && data.reportCount <= 50 &&
@@ -59,6 +60,7 @@ service cloud.firestore {
              data.username is string && data.username.size() >= 1 && data.username.size() <= 40 &&
              data.phone is string && data.phone.size() <= 30 &&
              data.threadType in ['chat', 'group'] &&
+             (!('photoData' in data) || (data.photoData is string && data.photoData.size() <= 150000)) &&
              data.online is bool &&
              data.typing is bool &&
              data.unreadCount is int && data.unreadCount >= 0 && data.unreadCount <= 99999 &&
@@ -87,6 +89,18 @@ service cloud.firestore {
              data.text is string && data.text.size() >= 1 && data.text.size() <= 2000 &&
              data.timeLabel is string && data.timeLabel.size() >= 1 && data.timeLabel.size() <= 30 &&
              data.aiGenerated is bool;
+    }
+
+    function isValidStory(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 60 &&
+             data.authorUsername is string && data.authorUsername.size() >= 1 && data.authorUsername.size() <= 40 &&
+             (!('authorPhotoData' in data) || (data.authorPhotoData is string && data.authorPhotoData.size() <= 150000)) &&
+             data.mediaData is string && data.mediaData.size() >= 1 && data.mediaData.size() <= 240000 &&
+             data.caption is string && data.caption.size() <= 140 &&
+             data.createdAtMs is int && data.createdAtMs > 0 &&
+             data.expiresAtMs is int && data.expiresAtMs > data.createdAtMs &&
+             (data.expiresAtMs - data.createdAtMs) <= 86400000;
     }
 
     function isValidCredentialRecord(data) {
@@ -157,7 +171,7 @@ service cloud.firestore {
                            'createdAt', 'updatedAt'
                          ]) &&
                          incoming().keys().hasOnly([
-                           'userId', 'name', 'username', 'phone', 'threadType',
+                           'userId', 'name', 'username', 'phone', 'threadType', 'photoData',
                            'online', 'typing', 'unreadCount', 'lastMessageText',
                            'lastMessageFromMe', 'lastMessageTimeLabel', 'pinned',
                            'locked', 'blocked', 'customRenamed', 'peerUid', 'isRegisteredPeer',
@@ -177,7 +191,7 @@ service cloud.firestore {
                          incoming().createdAt == existing().createdAt &&
                          incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                          incoming().diff(existing()).affectedKeys().hasOnly([
-                           'name', 'username', 'phone', 'threadType', 'online', 'typing',
+                           'name', 'username', 'phone', 'threadType', 'photoData', 'online', 'typing',
                            'unreadCount', 'lastMessageText', 'lastMessageFromMe',
                            'lastMessageTimeLabel', 'pinned', 'locked', 'blocked',
                            'customRenamed', 'peerUid', 'isRegisteredPeer',
@@ -277,8 +291,8 @@ service cloud.firestore {
                          'reportCount', 'reportedByUids', 'createdAt', 'updatedAt'
                        ]) &&
                        incoming().keys().hasOnly([
-                         'ownerUid', 'username', 'displayName', 'provider', 'online', 'accountStatus',
-                         'reportCount', 'reportedByUids', 'createdAt', 'updatedAt'
+                         'ownerUid', 'username', 'displayName', 'provider', 'photoData', 'online',
+                         'accountStatus', 'reportCount', 'reportedByUids', 'createdAt', 'updatedAt'
                        ]) &&
                        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
@@ -295,10 +309,10 @@ service cloud.firestore {
                        incoming().createdAt == existing().createdAt &&
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                        (
-                         // Owner updating display name or presence without altering moderation state
+                         // Owner updating display name, photo, or presence without altering moderation state
                          ('ownerUid' in existing() &&
                           existing().ownerUid == request.auth.uid &&
-                          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'online', 'updatedAt'])) ||
+                          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoData', 'online', 'updatedAt'])) ||
                          // Any signed-in reporter appending their own unique UID once
                          (!(request.auth.uid in existing().reportedByUids) &&
                           request.auth.uid in incoming().reportedByUids &&
@@ -310,6 +324,30 @@ service cloud.firestore {
                        );
 
       allow delete: if false;
+    }
+
+    match /stories/{storyId} {
+      allow get, list: if isSignedIn();
+
+      allow create: if isSignedIn() &&
+                       isValidId(storyId) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll([
+                         'userId', 'authorName', 'authorUsername', 'mediaData',
+                         'caption', 'createdAtMs', 'expiresAtMs', 'createdAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'authorName', 'authorUsername', 'authorPhotoData',
+                         'mediaData', 'caption', 'createdAtMs', 'expiresAtMs', 'createdAt'
+                       ]) &&
+                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                       isValidStory(incoming());
+
+      allow update: if false;
+
+      allow delete: if isSignedIn() &&
+                       isValidId(storyId) &&
+                       existing().userId == request.auth.uid;
     }
 
     match /direct_messages/{messageId} {

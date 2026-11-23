@@ -327,3 +327,68 @@ test("Credentials subcollection enforces owner-only access and valid salted SHA-
   await assertFails(aliceDb.collection("users").doc(ALICE_UID).collection("credentials").get());
 });
 
+test("Directory supports owner photoData sync and Stories enforce 24h validity and owner-only deletion", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const created = new Date(Date.now() - 5000);
+
+  await assertSucceeds(
+    aliceDb.collection("directory").doc("alice_photo").set({
+      ownerUid: ALICE_UID,
+      username: "alice_photo",
+      displayName: "Alice",
+      provider: "username",
+      photoData: "data:image/jpeg;base64,AAA",
+      online: true,
+      accountStatus: "active",
+      reportCount: 0,
+      reportedByUids: [],
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  await assertSucceeds(
+    aliceDb.collection("directory").doc("alice_photo").update({
+      photoData: "data:image/jpeg;base64,BBB",
+      updatedAt: new Date(Date.now() - 1000),
+    })
+  );
+
+  const nowMs = Date.now();
+  await assertSucceeds(
+    aliceDb.collection("stories").doc("story_1").set({
+      userId: ALICE_UID,
+      authorName: "Alice",
+      authorUsername: "alice_photo",
+      authorPhotoData: "data:image/jpeg;base64,BBB",
+      mediaData: "data:image/jpeg;base64,STORY",
+      caption: "Hello 24h",
+      createdAtMs: nowMs,
+      expiresAtMs: nowMs + 86400000,
+      createdAt: created,
+    })
+  );
+
+  // Exceeding 24 hours must fail
+  await assertFails(
+    aliceDb.collection("stories").doc("story_too_long").set({
+      userId: ALICE_UID,
+      authorName: "Alice",
+      authorUsername: "alice_photo",
+      mediaData: "data:image/jpeg;base64,STORY",
+      caption: "Too long",
+      createdAtMs: nowMs,
+      expiresAtMs: nowMs + 86400001,
+      createdAt: created,
+    })
+  );
+
+  await assertFails(unauthDb.collection("stories").doc("story_1").get());
+  await assertSucceeds(bobDb.collection("stories").doc("story_1").get());
+  await assertFails(bobDb.collection("stories").doc("story_1").delete());
+  await assertSucceeds(aliceDb.collection("stories").doc("story_1").delete());
+});
+
+

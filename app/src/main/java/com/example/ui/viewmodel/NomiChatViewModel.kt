@@ -14,6 +14,7 @@ import com.example.data.model.ChatPillFilter
 import com.example.data.model.ChatThread
 import com.example.data.model.DirectoryLookupResult
 import com.example.data.model.IncomingMessageAlert
+import com.example.data.model.StoryItem
 import com.example.data.model.ThemeMode
 import com.example.data.model.UiState
 import com.example.data.model.UserProfile
@@ -125,6 +126,14 @@ class NomiChatViewModel(
 
     private val _usernameSearchState = MutableStateFlow<UsernameSearchState>(UsernameSearchState.Idle)
     val usernameSearchState: StateFlow<UsernameSearchState> = _usernameSearchState.asStateFlow()
+
+    private val _isPostingStory = MutableStateFlow(false)
+    val isPostingStory: StateFlow<Boolean> = _isPostingStory.asStateFlow()
+
+    private val _inAppAlertBanner = MutableStateFlow<IncomingMessageAlert?>(null)
+    val inAppAlertBanner: StateFlow<IncomingMessageAlert?> = _inAppAlertBanner.asStateFlow()
+
+    private val storyNowTickMs = MutableStateFlow(System.currentTimeMillis())
 
     private var lastSuggestedMessageId: String? = null
 
@@ -263,18 +272,81 @@ class NomiChatViewModel(
             initialValue = UiState.Loading
         )
 
+    val activeStoriesState: StateFlow<List<StoryItem>> = combine(
+        repository.observeStories(currentUserId)
+            .catch { error ->
+                if (error is CancellationException) throw error
+                Log.w(TAG, "Error observing stories", error)
+                emit(emptyList())
+            },
+        allContactsState,
+        profileState,
+        storyNowTickMs
+    ) { rawStories, contactsState, profState, nowMs ->
+        val myProfile = (profState as? UiState.Success)?.data
+        val contacts = (contactsState as? UiState.Success)?.data.orEmpty()
+        rawStories.filter { story ->
+            if (story.expiresAtMs <= nowMs) return@filter false
+            if (story.userId == currentUserId) return@filter true
+            contacts.any { c ->
+                !c.blocked &&
+                    c.accountStatus != "banned" &&
+                    c.threadType == "chat" &&
+                    (c.peerUid == story.userId ||
+                        (story.authorUsername.isNotBlank() && c.username.equals(story.authorUsername, ignoreCase = true)))
+            }
+        }.map { story ->
+            if (story.userId == currentUserId && myProfile != null) {
+                story.copy(
+                    authorName = myProfile.displayName.ifBlank { story.authorName },
+                    authorUsername = myProfile.username.ifBlank { story.authorUsername },
+                    authorPhotoData = myProfile.photoData ?: story.authorPhotoData
+                )
+            } else {
+                val matchingContact = contacts.firstOrNull { c ->
+                    c.peerUid == story.userId ||
+                        (story.authorUsername.isNotBlank() && c.username.equals(story.authorUsername, ignoreCase = true))
+                }
+                if (matchingContact != null) {
+                    story.copy(
+                        authorName = matchingContact.name.ifBlank { story.authorName },
+                        authorPhotoData = matchingContact.photoData ?: story.authorPhotoData
+                    )
+                } else {
+                    story
+                }
+            }
+        }
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
+        initialValue = emptyList()
+    )
+
     init {
         ensureInitialSetup()
         observeAutoSmartSuggestions()
         startIncomingSyncLoop()
         observeIncomingMessageAlerts()
         observeNetworkRecovery()
+        startStoryExpiryLoop()
     }
 
     private fun startIncomingSyncLoop() {
         incomingSyncJob?.cancel()
         incomingSyncJob = viewModelScope.launch {
             repository.startIncomingSync(currentUserId) { _activeContactId.value }
+        }
+    }
+
+    private fun startStoryExpiryLoop() {
+        viewModelScope.launch {
+            repository.purgeExpiredStories(currentUserId)
+            while (isActive) {
+                delay(STORY_EXPIRY_CHECK_MS)
+                storyNowTickMs.value = System.currentTimeMillis()
+                repository.purgeExpiredStories(currentUserId)
+            }
         }
     }
 
@@ -287,17 +359,28 @@ class NomiChatViewModel(
                 val viewingSameThreadInForeground = isAppInForeground && _activeContactId.value == alert.contactId
                 if (!viewingSameThreadInForeground) {
                     _incomingNotificationEvents.tryEmit(alert)
+                    if (isAppInForeground) {
+                        _inAppAlertBanner.value = alert
+                    }
                 }
             }
         }
     }
 
+    fun dismissInAppAlertBanner() {
+        _inAppAlertBanner.value = null
+    }
+
     fun setAppForeground(inForeground: Boolean) {
         isAppInForeground = inForeground
+        if (inForeground) {
+            storyNowTickMs.value = System.currentTimeMillis()
+        }
         presenceHeartbeatJob?.cancel()
         if (inForeground) {
             presenceHeartbeatJob = viewModelScope.launch {
                 repository.setUserPresence(currentUserId, true)
+                repository.purgeExpiredStories(currentUserId)
                 while (isActive) {
                     delay(PRESENCE_HEARTBEAT_MS)
                     repository.setUserPresence(currentUserId, true)
@@ -778,6 +861,53 @@ class NomiChatViewModel(
         return ok
     }
 
+    fun postStoryFromUri(
+        context: Context,
+        uri: Uri,
+        caption: String,
+        onSuccess: () -> Unit
+    ) {
+        if (_isPostingStory.value) return
+        viewModelScope.launch {
+            _isPostingStory.value = true
+            try {
+                val encoded = withContext(Dispatchers.IO) {
+                    encodeStoryMediaDataUri(context, uri)
+                }
+                if (encoded == null) {
+                    _snackbarMessage.value = "Unable to process selected image."
+                    return@launch
+                }
+                repository.postStory(
+                    userId = currentUserId,
+                    mediaData = encoded,
+                    caption = caption
+                ).onSuccess {
+                    storyNowTickMs.value = System.currentTimeMillis()
+                    _popupMessage.value = "Story posted for 24 hours"
+                    onSuccess()
+                }.onFailure { err ->
+                    _snackbarMessage.value = err.localizedMessage ?: "Failed to post story."
+                }
+            } finally {
+                _isPostingStory.value = false
+            }
+        }
+    }
+
+    fun deleteStory(story: StoryItem) {
+        viewModelScope.launch {
+            repository.deleteStory(currentUserId, story.id)
+                .onSuccess {
+                    storyNowTickMs.value = System.currentTimeMillis()
+                    _popupMessage.value = "Story deleted"
+                }
+                .onFailure { err ->
+                    _snackbarMessage.value = err.localizedMessage ?: "Failed to delete story."
+                }
+        }
+    }
+
     fun clearSnackbar() {
         _snackbarMessage.value = null
     }
@@ -809,9 +939,43 @@ class NomiChatViewModel(
         }
     }
 
+    private fun encodeStoryMediaDataUri(context: Context, uri: Uri): String? {
+        return try {
+            val input = context.contentResolver.openInputStream(uri) ?: return null
+            val original = input.use { BitmapFactory.decodeStream(it) } ?: return null
+            var maxDim = 720
+            var quality = 74
+            var dataUri: String? = null
+            while (maxDim >= 320) {
+                val scale = maxDim.toFloat() / max(original.width, original.height).toFloat()
+                val targetW = if (scale < 1f) (original.width * scale).toInt().coerceAtLeast(1) else original.width
+                val targetH = if (scale < 1f) (original.height * scale).toInt().coerceAtLeast(1) else original.height
+                val scaled = Bitmap.createScaledBitmap(original, targetW, targetH, true)
+                while (quality >= 45) {
+                    val baos = ByteArrayOutputStream()
+                    scaled.compress(Bitmap.CompressFormat.JPEG, quality, baos)
+                    val candidate = "data:image/jpeg;base64," + Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
+                    if (candidate.length <= 220_000) {
+                        dataUri = candidate
+                        break
+                    }
+                    quality -= 12
+                }
+                if (dataUri != null) break
+                maxDim = (maxDim * 3) / 4
+                quality = 68
+            }
+            dataUri
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to encode story media", e)
+            null
+        }
+    }
+
     private companion object {
         const val TAG = "NomiChatVM"
         const val STOP_TIMEOUT_MILLIS = 5000L
         const val PRESENCE_HEARTBEAT_MS = 60_000L
+        const val STORY_EXPIRY_CHECK_MS = 30_000L
     }
 }

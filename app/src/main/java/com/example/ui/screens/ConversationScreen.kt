@@ -167,6 +167,7 @@ fun ConversationScreen(
                 ) {
                     AvatarCircle(
                         name = contact.name,
+                        photoData = contact.photoData,
                         isGroup = contact.threadType == "group",
                         showOnlineDot = contact.online && !isContactBanned && !isContactBlocked,
                         size = 40.dp

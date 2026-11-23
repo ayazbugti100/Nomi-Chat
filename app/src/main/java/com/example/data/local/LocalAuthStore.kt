@@ -7,6 +7,8 @@ import com.example.data.model.ChatThread
 import com.example.data.model.DirectoryLookupResult
 import com.example.data.model.IncomingMessageAlert
 import com.example.data.model.ReportOutcome
+import com.example.data.model.STORY_DURATION_MS
+import com.example.data.model.StoryItem
 import com.example.data.model.ThemeMode
 import com.example.data.model.UserProfile
 import com.example.data.repository.NomiChatRepository
@@ -121,6 +123,7 @@ class LocalAuthStore(context: Context) {
                 put("contacts", JSONArray())
                 put("messages", JSONObject())
                 put("deletedIds", JSONArray())
+                put("stories", JSONArray())
             }
 
             root.put(user, accountJson)
@@ -275,10 +278,159 @@ class LocalAuthStore(context: Context) {
                         } else {
                             false
                         }
-                        list.add(thread.copy(online = realOnline))
+                        val peerPhoto = if (thread.threadType == "chat" && peerAccount != null && !peerAccount.isNull("photoData")) {
+                            peerAccount.optString("photoData").takeIf { it.isNotBlank() }
+                        } else null
+                        list.add(
+                            thread.copy(
+                                online = realOnline,
+                                photoData = peerPhoto ?: thread.photoData
+                            )
+                        )
                     }
                 }
                 list.sortedByDescending { it.updatedAt?.seconds ?: 0L }
+            }
+        }
+    }
+
+    fun observeStories(usernameKey: String): Flow<List<StoryItem>> = changeTick.map {
+        withContext(Dispatchers.IO) {
+            mutex.withLock {
+                val root = readRootUnlocked()
+                val nowMs = System.currentTimeMillis()
+                val active = mutableListOf<StoryItem>()
+                val keys = root.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    val acc = root.optJSONObject(key) ?: continue
+                    if (acc.optString("accountStatus", "active") == "banned") continue
+                    val accName = acc.optString("displayName", key)
+                    val accHandle = acc.optString("username", key)
+                    val accPhoto = if (acc.isNull("photoData")) null else acc.optString("photoData").takeIf { it.isNotBlank() }
+                    val storiesArr = acc.optJSONArray("stories") ?: continue
+                    for (i in 0 until storiesArr.length()) {
+                        val sObj = storiesArr.optJSONObject(i) ?: continue
+                        val exp = sObj.optLong("expiresAtMs", 0L)
+                        if (exp > nowMs) {
+                            active.add(
+                                jsonToStoryItem(
+                                    obj = sObj,
+                                    fallbackName = accName,
+                                    fallbackUsername = accHandle,
+                                    fallbackPhoto = accPhoto
+                                )
+                            )
+                        }
+                    }
+                }
+                active.sortedByDescending { it.createdAtMs }
+            }
+        }
+    }
+
+    suspend fun postStory(
+        usernameKey: String,
+        mediaData: String,
+        caption: String = "",
+        createdAtMs: Long = System.currentTimeMillis()
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            require(mediaData.isNotBlank() && mediaData.length <= 240000) { "Story image is invalid or too large." }
+            val cleanCaption = caption.trim().take(140)
+            mutex.withLock {
+                val root = readRootUnlocked()
+                val accountKey = findAccountKeyByUsernameUnlocked(root, usernameKey)
+                    ?: throw IllegalStateException("Account not found.")
+                val account = root.optJSONObject(accountKey)
+                    ?: throw IllegalStateException("Account not found.")
+                val storyId = "st_${UUID.randomUUID().toString().take(10)}"
+                val expiresAtMs = createdAtMs + STORY_DURATION_MS
+                val authorPhoto = if (account.isNull("photoData")) null else account.optString("photoData").takeIf { it.isNotBlank() }
+
+                val existingStories = account.optJSONArray("stories") ?: JSONArray()
+                val nowMs = System.currentTimeMillis()
+                val keptStories = JSONArray()
+                val newObj = JSONObject().apply {
+                    put("id", storyId)
+                    put("userId", accountKey)
+                    put("authorName", account.optString("displayName", accountKey).take(60))
+                    put("authorUsername", account.optString("username", accountKey).take(40))
+                    if (authorPhoto != null) put("authorPhotoData", authorPhoto) else put("authorPhotoData", JSONObject.NULL)
+                    put("mediaData", mediaData)
+                    put("caption", cleanCaption)
+                    put("createdAtMs", createdAtMs)
+                    put("expiresAtMs", expiresAtMs)
+                }
+                keptStories.put(newObj)
+                for (i in 0 until existingStories.length()) {
+                    val item = existingStories.optJSONObject(i) ?: continue
+                    if (item.optLong("expiresAtMs", 0L) > nowMs) {
+                        keptStories.put(item)
+                    }
+                }
+                account.put("stories", keptStories)
+                root.put(accountKey, account)
+                writeRootUnlocked(root)
+                storyId
+            }
+        }
+    }
+
+    suspend fun deleteStory(usernameKey: String, storyId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            mutex.withLock {
+                val root = readRootUnlocked()
+                val accountKey = findAccountKeyByUsernameUnlocked(root, usernameKey) ?: return@withLock
+                val account = root.optJSONObject(accountKey) ?: return@withLock
+                val existingStories = account.optJSONArray("stories") ?: return@withLock
+                val kept = JSONArray()
+                var changed = false
+                for (i in 0 until existingStories.length()) {
+                    val item = existingStories.optJSONObject(i) ?: continue
+                    if (item.optString("id") == storyId) {
+                        changed = true
+                    } else {
+                        kept.put(item)
+                    }
+                }
+                if (changed) {
+                    account.put("stories", kept)
+                    root.put(accountKey, account)
+                    writeRootUnlocked(root)
+                }
+            }
+        }
+    }
+
+    suspend fun purgeExpiredStories(usernameKey: String) = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val root = readRootUnlocked()
+            val nowMs = System.currentTimeMillis()
+            var anyChanged = false
+            val keys = root.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                val acc = root.optJSONObject(key) ?: continue
+                val existingStories = acc.optJSONArray("stories") ?: continue
+                val kept = JSONArray()
+                var accChanged = false
+                for (i in 0 until existingStories.length()) {
+                    val item = existingStories.optJSONObject(i) ?: continue
+                    if (item.optLong("expiresAtMs", 0L) > nowMs) {
+                        kept.put(item)
+                    } else {
+                        accChanged = true
+                    }
+                }
+                if (accChanged) {
+                    acc.put("stories", kept)
+                    root.put(key, acc)
+                    anyChanged = true
+                }
+            }
+            if (anyChanged) {
+                writeRootUnlocked(root)
             }
         }
     }
@@ -368,6 +520,7 @@ class LocalAuthStore(context: Context) {
 
                 val finalDisplayName = account.optString("displayName", "")
                 val finalUsername = account.optString("username", currentKey)
+                val finalPhotoData = if (account.isNull("photoData")) null else account.optString("photoData").takeIf { it.isNotBlank() }
 
                 if (movedUsername != null) {
                     root.remove(currentKey)
@@ -376,7 +529,7 @@ class LocalAuthStore(context: Context) {
                     root.put(currentKey, account)
                 }
 
-                // Propagate updated displayName/username to matching peer contacts on other local accounts
+                // Propagate updated displayName/username/photoData to matching peer contacts on other local accounts
                 val allAccountKeys = root.keys()
                 while (allAccountKeys.hasNext()) {
                     val otherKey = allAccountKeys.next()
@@ -389,10 +542,15 @@ class LocalAuthStore(context: Context) {
                         if (c.optString("threadType", "chat") == "chat" &&
                             (c.optString("peerUid") == currentKey || c.optString("username") == currentKey)
                         ) {
-                            if (finalDisplayName.isNotBlank()) c.put("name", finalDisplayName)
+                            if (finalDisplayName.isNotBlank() && !c.optBoolean("customRenamed", false)) {
+                                c.put("name", finalDisplayName)
+                            }
                             c.put("username", finalUsername)
                             if (c.optString("phone").startsWith("@") || c.optString("phone").isBlank()) {
                                 c.put("phone", "@$finalUsername")
+                            }
+                            if (finalPhotoData != null) {
+                                c.put("photoData", finalPhotoData)
                             }
                             c.put("peerUid", finalUsername)
                             c.put("isRegisteredPeer", true)
@@ -420,10 +578,12 @@ class LocalAuthStore(context: Context) {
                 if (obj.optString("accountStatus", "active") == "banned") return@runCatching null
                 val storedUsername = obj.optString("username", key)
                 if (!storedUsername.equals(cleanHandle, ignoreCase = true)) return@runCatching null
+                val rawPhoto = if (obj.isNull("photoData")) null else obj.optString("photoData").takeIf { it.isNotBlank() }
                 DirectoryLookupResult(
                     username = storedUsername,
                     displayName = obj.optString("displayName", storedUsername),
-                    ownerUid = key
+                    ownerUid = key,
+                    photoData = rawPhoto
                 )
             }
         }
@@ -452,6 +612,7 @@ class LocalAuthStore(context: Context) {
                 val resolvedPeerUid: String
                 val resolvedIsPeer: Boolean
                 val peerOnline: Boolean
+                val peerPhotoData: String?
                 val finalName: String
 
                 if (validType == "chat") {
@@ -473,6 +634,8 @@ class LocalAuthStore(context: Context) {
                     resolvedIsPeer = true
                     val registeredPeerDisplayName = candidateObj.optString("displayName").trim()
                     peerOnline = candidateObj.optBoolean("online", false)
+                    peerPhotoData = if (candidateObj.isNull("photoData")) null
+                        else candidateObj.optString("photoData").takeIf { it.isNotBlank() }
                     finalName = registeredPeerDisplayName.ifBlank { cleanHandle }.take(60)
                 } else {
                     cleanHandle = NomiChatRepository.normalizeUsername(rawHandle.ifBlank { name })
@@ -480,6 +643,7 @@ class LocalAuthStore(context: Context) {
                     resolvedPeerUid = peerUid
                     resolvedIsPeer = isRegisteredPeer
                     peerOnline = false
+                    peerPhotoData = null
                     finalName = name.trim().ifBlank { cleanHandle }.take(60)
                     require(finalName.isNotEmpty()) { "Group name cannot be empty." }
                 }
@@ -489,7 +653,12 @@ class LocalAuthStore(context: Context) {
                 for (i in 0 until existingContacts.length()) {
                     val existingObj = existingContacts.optJSONObject(i) ?: continue
                     if (existingObj.optString("username") == cleanHandle && validType == "chat") {
-                        existingObj.put("name", finalName)
+                        if (!existingObj.optBoolean("customRenamed", false)) {
+                            existingObj.put("name", finalName)
+                        }
+                        if (peerPhotoData != null) {
+                            existingObj.put("photoData", peerPhotoData)
+                        }
                         existingObj.put("peerUid", resolvedPeerUid)
                         existingObj.put("isRegisteredPeer", resolvedIsPeer)
                         existingObj.put("online", peerOnline)
@@ -509,6 +678,7 @@ class LocalAuthStore(context: Context) {
                         put("username", cleanHandle)
                         put("phone", cleanPhone)
                         put("threadType", validType)
+                        if (peerPhotoData != null) put("photoData", peerPhotoData) else put("photoData", JSONObject.NULL)
                         put("online", peerOnline)
                         put("typing", false)
                         put("unreadCount", 0L)
@@ -635,11 +805,14 @@ class LocalAuthStore(context: Context) {
                     if (peerKey != null && peerKey != usernameKey) {
                         val peerAccount = root.optJSONObject(peerKey)
                         if (peerAccount != null && peerAccount.optString("accountStatus", "active") != "banned") {
+                            val senderPhoto = if (account.isNull("photoData")) null
+                                else account.optString("photoData").takeIf { it.isNotBlank() }
                             deliverToLocalPeerUnlocked(
                                 peerKey = peerKey,
                                 peerAccount = peerAccount,
                                 senderHandle = account.optString("username", usernameKey),
                                 senderDisplayName = account.optString("displayName", usernameKey),
+                                senderPhotoData = senderPhoto,
                                 senderKey = usernameKey,
                                 text = cleanText,
                                 timeLabel = timeLabel,
@@ -660,6 +833,7 @@ class LocalAuthStore(context: Context) {
         peerAccount: JSONObject,
         senderHandle: String,
         senderDisplayName: String,
+        senderPhotoData: String?,
         senderKey: String,
         text: String,
         timeLabel: String,
@@ -691,6 +865,7 @@ class LocalAuthStore(context: Context) {
                 put("username", senderHandle)
                 put("phone", "@$senderHandle")
                 put("threadType", "chat")
+                if (senderPhotoData != null) put("photoData", senderPhotoData) else put("photoData", JSONObject.NULL)
                 put("online", false)
                 put("typing", false)
                 put("unreadCount", 1L)
@@ -716,7 +891,12 @@ class LocalAuthStore(context: Context) {
             peerAccount.put("contacts", updatedContacts)
         } else {
             val prevUnread = peerContactObj.optLong("unreadCount", 0L)
-            peerContactObj.put("name", senderDisplayName)
+            if (!peerContactObj.optBoolean("customRenamed", false)) {
+                peerContactObj.put("name", senderDisplayName)
+            }
+            if (senderPhotoData != null) {
+                peerContactObj.put("photoData", senderPhotoData)
+            }
             peerContactObj.put("lastMessageText", text.take(1000))
             peerContactObj.put("lastMessageFromMe", false)
             peerContactObj.put("lastMessageTimeLabel", timeLabel)
@@ -989,6 +1169,7 @@ class LocalAuthStore(context: Context) {
     private fun jsonToChatThread(obj: JSONObject): ChatThread {
         val reportedArr = obj.optJSONArray("reportedBy") ?: JSONArray()
         val reporters = List(reportedArr.length()) { idx -> reportedArr.optString(idx) }
+        val rawPhoto = if (obj.isNull("photoData")) null else obj.optString("photoData").takeIf { it.isNotBlank() }
         return ChatThread(
             id = obj.optString("id", ""),
             userId = obj.optString("userId", ""),
@@ -996,6 +1177,7 @@ class LocalAuthStore(context: Context) {
             username = obj.optString("username", ""),
             phone = obj.optString("phone", ""),
             threadType = obj.optString("threadType", "chat"),
+            photoData = rawPhoto,
             online = obj.optBoolean("online", false),
             typing = obj.optBoolean("typing", false),
             unreadCount = obj.optLong("unreadCount", 0L),
@@ -1013,6 +1195,28 @@ class LocalAuthStore(context: Context) {
             reportedBy = reporters,
             createdAt = Timestamp(obj.optLong("createdAtSec", 0L), 0),
             updatedAt = Timestamp(obj.optLong("updatedAtSec", 0L), 0)
+        )
+    }
+
+    private fun jsonToStoryItem(
+        obj: JSONObject,
+        fallbackName: String,
+        fallbackUsername: String,
+        fallbackPhoto: String?
+    ): StoryItem {
+        val rawAuthorPhoto = if (obj.isNull("authorPhotoData")) null else obj.optString("authorPhotoData").takeIf { it.isNotBlank() }
+        val createdMs = obj.optLong("createdAtMs", 0L)
+        return StoryItem(
+            id = obj.optString("id", ""),
+            userId = obj.optString("userId", ""),
+            authorName = obj.optString("authorName", fallbackName).ifBlank { fallbackName },
+            authorUsername = obj.optString("authorUsername", fallbackUsername).ifBlank { fallbackUsername },
+            authorPhotoData = fallbackPhoto ?: rawAuthorPhoto,
+            mediaData = obj.optString("mediaData", ""),
+            caption = obj.optString("caption", ""),
+            createdAtMs = createdMs,
+            expiresAtMs = obj.optLong("expiresAtMs", createdMs + STORY_DURATION_MS),
+            createdAt = Timestamp(createdMs / 1000L, 0)
         )
     }
 
@@ -1050,6 +1254,21 @@ class LocalNomiRepository(private val store: LocalAuthStore) : NomiDataSource {
 
     override fun observeMessages(userId: String, contactId: String): Flow<List<ChatMessage>> =
         store.observeMessages(userId, contactId)
+
+    override fun observeStories(userId: String): Flow<List<StoryItem>> =
+        store.observeStories(userId)
+
+    override suspend fun postStory(
+        userId: String,
+        mediaData: String,
+        caption: String
+    ): Result<String> = store.postStory(userId, mediaData, caption)
+
+    override suspend fun deleteStory(userId: String, storyId: String): Result<Unit> =
+        store.deleteStory(userId, storyId)
+
+    override suspend fun purgeExpiredStories(userId: String) =
+        store.purgeExpiredStories(userId)
 
     override suspend fun updateProfile(
         userId: String,

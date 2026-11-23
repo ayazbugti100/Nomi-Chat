@@ -7,6 +7,7 @@ import com.google.firebase.firestore.IgnoreExtraProperties
 import com.google.firebase.firestore.ServerTimestamp
 
 const val BAN_REPORT_LIMIT = 10L
+const val STORY_DURATION_MS = 86_400_000L
 
 @Keep
 @IgnoreExtraProperties
@@ -37,6 +38,7 @@ data class UserDirectoryEntry(
     val username: String = "",
     val displayName: String = "",
     val provider: String = "google",
+    val photoData: String? = null,
     val online: Boolean = false,
     val accountStatus: String = "active",
     val reportCount: Long = 0L,
@@ -54,6 +56,7 @@ data class ChatThread(
     val username: String = "",
     val phone: String = "",
     val threadType: String = "chat",
+    val photoData: String? = null,
     val online: Boolean = false,
     val typing: Boolean = false,
     val unreadCount: Long = 0L,
@@ -76,7 +79,23 @@ data class ChatThread(
 data class DirectoryLookupResult(
     val username: String,
     val displayName: String,
-    val ownerUid: String = ""
+    val ownerUid: String = "",
+    val photoData: String? = null
+)
+
+@Keep
+@IgnoreExtraProperties
+data class StoryItem(
+    @DocumentId val id: String = "",
+    val userId: String = "",
+    val authorName: String = "",
+    val authorUsername: String = "",
+    val authorPhotoData: String? = null,
+    val mediaData: String = "",
+    val caption: String = "",
+    val createdAtMs: Long = 0L,
+    val expiresAtMs: Long = 0L,
+    @ServerTimestamp val createdAt: Timestamp? = null
 )
 
 @Keep

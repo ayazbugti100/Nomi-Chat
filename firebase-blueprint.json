@@ -104,6 +104,10 @@
           "enum": ["google", "username"],
           "description": "Auth provider associated with this username."
         },
+        "photoData": {
+          "type": "string",
+          "description": "Optional compressed JPEG data URI for profile avatar."
+        },
         "online": {
           "type": "boolean",
           "description": "Real-time online presence indicator for the handle owner."
@@ -167,6 +171,10 @@
           "type": "string",
           "enum": ["chat", "group"],
           "description": "Whether this thread is a 1:1 chat or group."
+        },
+        "photoData": {
+          "type": "string",
+          "description": "Optional compressed JPEG data URI for peer avatar."
         },
         "online": {
           "type": "boolean",
@@ -346,6 +354,60 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "StoryItem": {
+      "title": "StoryItem",
+      "description": "24-hour expiring photo story/status posted by an authenticated user.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Author Firebase Auth UID."
+        },
+        "authorName": {
+          "type": "string",
+          "description": "Author display name."
+        },
+        "authorUsername": {
+          "type": "string",
+          "description": "Author handle."
+        },
+        "authorPhotoData": {
+          "type": "string",
+          "description": "Optional author avatar JPEG data URI."
+        },
+        "mediaData": {
+          "type": "string",
+          "description": "Compressed story image JPEG data URI."
+        },
+        "caption": {
+          "type": "string",
+          "description": "Optional story caption."
+        },
+        "createdAtMs": {
+          "type": "integer",
+          "description": "Epoch milliseconds when posted."
+        },
+        "expiresAtMs": {
+          "type": "integer",
+          "description": "Epoch milliseconds when story auto-expires (createdAtMs + 86400000)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "authorName",
+        "authorUsername",
+        "mediaData",
+        "caption",
+        "createdAtMs",
+        "expiresAtMs",
+        "createdAt"
+      ]
     }
   },
   "firestore": {
@@ -368,6 +430,10 @@
     "/users/{userId}/contacts/{contactId}/messages/{messageId}": {
       "schema": { "$ref": "#/entities/ChatMessage" },
       "description": "Messages inside a contact or group thread."
+    },
+    "/stories/{storyId}": {
+      "schema": { "$ref": "#/entities/StoryItem" },
+      "description": "24-hour user stories/statuses."
     }
   }
 }

@@ -6,6 +6,7 @@ import com.example.data.local.LocalAuthOutcome
 import com.example.data.local.LocalAuthStore
 import com.example.data.model.ChatThread
 import com.example.data.model.IncomingMessageAlert
+import com.example.data.model.STORY_DURATION_MS
 import com.example.data.model.ThemeMode
 import com.example.data.model.UserDirectoryEntry
 import com.example.data.network.NetworkConnectivityObserver
@@ -417,6 +418,149 @@ class ExampleRobolectricTest {
     val observer = NetworkConnectivityObserver(context)
     val status = observer.currentStatus()
     assertTrue(status.transportLabel.isNotBlank())
+  }
+
+  @Test
+  fun `added user syncs existing and updated peer profile photo and respects customRenamed`() = runTest {
+    val store = LocalAuthStore(context)
+    store.signUpUser("Nomi One", "nomi_photo", "2000-01-01", "pass123", "pass123")
+    store.signUpUser("Sara Khan", "sara_k", "1999-09-09", "pass123", "pass123")
+
+    val initialPhoto = "data:image/jpeg;base64,/9j/INITIAL_PHOTO"
+    val updatedPhoto = "data:image/jpeg;base64,/9j/UPDATED_PHOTO"
+    store.updateProfile(usernameKey = "sara_k", photoData = initialPhoto)
+
+    val found = store.lookupUserByUsername("@sara_k").getOrNull()
+    assertNotNull(found)
+    assertEquals(initialPhoto, found?.photoData)
+
+    val saraContactId = store.addContact(
+      usernameKey = "nomi_photo",
+      name = "",
+      contactUsername = "@sara_k",
+      phone = "",
+      threadType = "chat"
+    ).getOrThrow()
+
+    var contacts = store.observeContacts("nomi_photo").first()
+    val addedSara = contacts.first { it.id == saraContactId }
+    assertEquals(initialPhoto, addedSara.photoData)
+
+    // Rename chat on Nomi's side -> customRenamed = true
+    store.renameChat("nomi_photo", saraContactId, "My Sister")
+
+    // Sara updates her displayName & photo -> photo updates on Nomi's side, customRenamed is preserved
+    store.updateProfile(usernameKey = "sara_k", displayName = "Sara Pro", photoData = updatedPhoto)
+    contacts = store.observeContacts("nomi_photo").first()
+    val updatedSara = contacts.first { it.id == saraContactId }
+    assertEquals("My Sister", updatedSara.name)
+    assertTrue(updatedSara.customRenamed)
+    assertEquals(updatedPhoto, updatedSara.photoData)
+
+    // Directory merge also propagates photoData while preserving customRenamed
+    val nowMs = 1_000_000_000L
+    val merged = NomiChatRepository.mergeThreadWithDirectory(
+      addedSara.copy(name = "Custom Alias", customRenamed = true),
+      UserDirectoryEntry(
+        id = "sara_k",
+        ownerUid = addedSara.peerUid,
+        username = "sara_k",
+        displayName = "Sara Directory",
+        photoData = updatedPhoto,
+        online = true,
+        accountStatus = "active",
+        updatedAt = Timestamp((nowMs - 5_000L) / 1000L, 0)
+      ),
+      nowMs
+    )
+    assertEquals("Custom Alias", merged.name)
+    assertEquals(updatedPhoto, merged.photoData)
+  }
+
+  @Test
+  fun `stories enforce 24-hour expiry and owner deletion`() = runTest {
+    val store = LocalAuthStore(context)
+    store.signUpUser("Nomi Story", "nomi_story", "2000-01-01", "pass123", "pass123")
+    val avatar = "data:image/jpeg;base64,/9j/AVATAR"
+    store.updateProfile(usernameKey = "nomi_story", photoData = avatar)
+
+    val nowMs = System.currentTimeMillis()
+    val freshMedia = "data:image/jpeg;base64,/9j/FRESH_STORY"
+    val expiredMedia = "data:image/jpeg;base64,/9j/EXPIRED_STORY"
+
+    val freshId = store.postStory(
+      usernameKey = "nomi_story",
+      mediaData = freshMedia,
+      caption = "Hello 24h",
+      createdAtMs = nowMs
+    ).getOrThrow()
+
+    // Old story posted 25 hours ago -> already expired
+    store.postStory(
+      usernameKey = "nomi_story",
+      mediaData = expiredMedia,
+      caption = "Yesterday",
+      createdAtMs = nowMs - (STORY_DURATION_MS + 3_600_000L)
+    ).getOrThrow()
+
+    val activeStories = store.observeStories("nomi_story").first()
+    assertEquals(1, activeStories.size)
+    val story = activeStories.first()
+    assertEquals(freshId, story.id)
+    assertEquals(STORY_DURATION_MS, story.expiresAtMs - story.createdAtMs)
+    assertEquals(avatar, story.authorPhotoData)
+    assertEquals("Hello 24h", story.caption)
+
+    // Purge cleans expired records and delete removes active owner story
+    store.purgeExpiredStories("nomi_story")
+    assertEquals(1, store.observeStories("nomi_story").first().size)
+
+    store.deleteStory("nomi_story", freshId)
+    assertTrue(store.observeStories("nomi_story").first().isEmpty())
+  }
+
+  @Test
+  fun `sending Hi cross-account delivers photo, preserves customRenamed, and emits alert`() = runTest {
+    val store = LocalAuthStore(context)
+    store.signUpUser("Sender User", "sender_u", "2000-01-01", "pass123", "pass123")
+    store.signUpUser("Receiver User", "receiver_u", "2000-01-01", "pass123", "pass123")
+
+    val senderPhoto = "data:image/jpeg;base64,/9j/SENDER_AVATAR"
+    store.updateProfile(usernameKey = "sender_u", photoData = senderPhoto)
+
+    // Receiver adds sender and renames the chat locally
+    val receiverContactId = store.addContact(
+      usernameKey = "receiver_u",
+      name = "",
+      contactUsername = "@sender_u",
+      phone = "",
+      threadType = "chat"
+    ).getOrThrow()
+    store.renameChat("receiver_u", receiverContactId, "Office Friend")
+
+    // Sender adds receiver and sends "Hi"
+    val senderContactId = store.addContact(
+      usernameKey = "sender_u",
+      name = "",
+      contactUsername = "@receiver_u",
+      phone = "",
+      threadType = "chat"
+    ).getOrThrow()
+
+    val alertDeferred = async { store.incomingAlerts.first() }
+    store.sendMessage("sender_u", senderContactId, "me", "Hi", aiGenerated = false)
+    val alert = alertDeferred.await()
+
+    assertEquals("receiver_u", alert.recipientUserId)
+    assertEquals("sender_u", alert.senderHandle)
+    assertEquals("Hi", alert.text)
+
+    val receiverThread = store.observeContacts("receiver_u").first().first { it.id == receiverContactId }
+    assertEquals("Office Friend", receiverThread.name)
+    assertTrue(receiverThread.customRenamed)
+    assertEquals(senderPhoto, receiverThread.photoData)
+    assertEquals(1L, receiverThread.unreadCount)
+    assertEquals("Hi", receiverThread.lastMessageText)
   }
 }
 

@@ -1,5 +1,10 @@
 package com.example.ui.screens
 
+import android.net.Uri
+import android.util.Base64
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -11,6 +16,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -19,9 +25,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDone
+import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.DonutLarge
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Shield
@@ -36,6 +47,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
@@ -44,6 +56,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -52,6 +65,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -61,9 +75,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import coil.compose.AsyncImage
 import com.example.R
 import com.example.data.model.BAN_REPORT_LIMIT
 import com.example.data.model.ChatThread
+import com.example.data.model.StoryItem
 import com.example.data.model.ThemeMode
 import com.example.ui.components.AvatarCircle
 import com.example.ui.theme.EmeraldBright
@@ -76,6 +92,7 @@ import com.example.ui.theme.GoldCrown
 import com.example.ui.theme.MintLight
 import com.example.ui.theme.MintOnlineGlow
 import com.example.ui.viewmodel.UsernameSearchState
+import kotlin.math.max
 
 @Composable
 fun EditSingleFieldDialog(
@@ -239,9 +256,14 @@ fun AddContactDialog(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .padding(horizontal = 12.dp, vertical = 10.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
+                                    AvatarCircle(
+                                        name = usernameSearchState.result.displayName,
+                                        photoData = usernameSearchState.result.photoData,
+                                        size = 40.dp
+                                    )
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
                                             text = usernameSearchState.result.displayName,
@@ -617,9 +639,11 @@ fun AppLockOverlay(
 @Composable
 fun AvatarPreviewDialog(
     thread: ChatThread,
+    hasActiveStory: Boolean = false,
     onDismiss: () -> Unit,
     onOpenChat: () -> Unit,
     onViewContact: () -> Unit,
+    onViewStory: () -> Unit = {},
     onToggleBlock: () -> Unit
 ) {
     val isChannel = thread.name.contains("Channel", ignoreCase = true)
@@ -659,9 +683,11 @@ fun AvatarPreviewDialog(
                     ) {
                         AvatarCircle(
                             name = thread.name,
+                            photoData = thread.photoData,
                             isGroup = isGroup,
                             isChannel = isChannel,
                             showOnlineDot = isOnline,
+                            hasStoryRing = hasActiveStory,
                             size = 132.dp,
                             borderColor = Color.White.copy(alpha = 0.7f)
                         )
@@ -713,7 +739,7 @@ fun AvatarPreviewDialog(
 
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
 
-                // Bottom quick-action icon row (Open Chat, View Contact, Block)
+                // Bottom quick-action icon row (Open Chat, View Contact, optional View Story, Block)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -740,6 +766,18 @@ fun AvatarPreviewDialog(
                             contentDescription = "View contact",
                             tint = EmeraldDark
                         )
+                    }
+                    if (hasActiveStory) {
+                        IconButton(
+                            onClick = onViewStory,
+                            modifier = Modifier.testTag("avatar_preview_view_story")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.DonutLarge,
+                                contentDescription = "View 24h story",
+                                tint = EmeraldBright
+                            )
+                        }
                     }
                     IconButton(
                         onClick = onToggleBlock,
@@ -791,6 +829,7 @@ fun ContactProfileDialog(
             ) {
                 AvatarCircle(
                     name = contact.name,
+                    photoData = contact.photoData,
                     isGroup = contact.threadType == "group",
                     showOnlineDot = contact.online && !contact.blocked && contact.accountStatus != "banned",
                     size = 64.dp
@@ -946,3 +985,439 @@ fun ReportAccountDialog(
         }
     )
 }
+
+@Composable
+fun StoryPickerDialog(
+    isPosting: Boolean,
+    onDismiss: () -> Unit,
+    onPostStory: (uri: Uri, caption: String) -> Unit
+) {
+    var selectedUri by remember { mutableStateOf<Uri?>(null) }
+    var caption by remember { mutableStateOf("") }
+
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) selectedUri = uri
+    }
+
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) selectedUri = uri
+    }
+
+    Dialog(onDismissRequest = { if (!isPosting) onDismiss() }) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("story_picker_dialog"),
+            shape = RoundedCornerShape(24.dp),
+            color = MaterialTheme.colorScheme.surface,
+            shadowElevation = 12.dp
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                                .background(MintLight),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.DonutLarge,
+                                contentDescription = null,
+                                tint = EmeraldDark,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        Column {
+                            Text(
+                                text = "Post 24-Hour Story",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = EmeraldDeep,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Auto-expires after 24 hours",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    IconButton(
+                        onClick = { if (!isPosting) onDismiss() },
+                        modifier = Modifier.testTag("story_picker_close")
+                    ) {
+                        Icon(Icons.Default.Close, contentDescription = "Close")
+                    }
+                }
+
+                if (selectedUri == null) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(148.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable(enabled = !isPosting) {
+                                photoPickerLauncher.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                )
+                            }
+                            .testTag("story_pick_gallery_box"),
+                        shape = RoundedCornerShape(16.dp),
+                        color = MintLight.copy(alpha = 0.65f),
+                        border = BorderStroke(1.dp, EmeraldMid.copy(alpha = 0.35f))
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AddPhotoAlternate,
+                                contentDescription = "Choose photo",
+                                tint = EmeraldDark,
+                                modifier = Modifier.size(36.dp)
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Tap to choose a photo for your story",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = EmeraldDeep,
+                                fontWeight = FontWeight.SemiBold,
+                                textAlign = TextAlign.Center
+                            )
+                            Text(
+                                text = "Uses system photo picker — no extra permissions needed",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(190.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(Color.Black.copy(alpha = 0.08f))
+                    ) {
+                        AsyncImage(
+                            model = selectedUri,
+                            contentDescription = "Selected story preview",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            photoPickerLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                            )
+                        },
+                        enabled = !isPosting,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("story_pick_photos_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AddPhotoAlternate,
+                            contentDescription = null,
+                            tint = EmeraldDark,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Photos", color = EmeraldDark, maxLines = 1)
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            filePickerLauncher.launch(arrayOf("image/*"))
+                        },
+                        enabled = !isPosting,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("story_pick_files_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.FolderOpen,
+                            contentDescription = null,
+                            tint = EmeraldDark,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Files", color = EmeraldDark, maxLines = 1)
+                    }
+                }
+
+                OutlinedTextField(
+                    value = caption,
+                    onValueChange = { if (it.length <= 140) caption = it },
+                    enabled = !isPosting,
+                    label = { Text("Caption (Optional)") },
+                    placeholder = { Text("Share a status note...") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("story_caption_input")
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(
+                        onClick = onDismiss,
+                        enabled = !isPosting
+                    ) {
+                        Text("Cancel")
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = {
+                            val uri = selectedUri ?: return@Button
+                            onPostStory(uri, caption)
+                        },
+                        enabled = selectedUri != null && !isPosting,
+                        colors = ButtonDefaults.buttonColors(containerColor = EmeraldDark),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.testTag("story_post_button")
+                    ) {
+                        if (isPosting) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                                color = Color.White
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                        }
+                        Text(if (isPosting) "Posting..." else "Post Story", color = Color.White)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun StoryViewerDialog(
+    stories: List<StoryItem>,
+    currentUserId: String,
+    onDismiss: () -> Unit,
+    onDeleteStory: (StoryItem) -> Unit
+) {
+    if (stories.isEmpty()) {
+        onDismiss()
+        return
+    }
+    var currentIndex by remember(stories) { mutableIntStateOf(0) }
+    val safeIndex = currentIndex.coerceIn(0, stories.lastIndex)
+    val story = stories[safeIndex]
+
+    val decodedMedia = remember(story.id, story.mediaData) {
+        if (story.mediaData.startsWith("data:image")) {
+            val b64 = story.mediaData.substringAfter("base64,", "")
+            runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull()
+        } else null
+    }
+
+    val remainingMs = max(0L, story.expiresAtMs - System.currentTimeMillis())
+    val remainingHours = (remainingMs / 3_600_000L).toInt()
+    val remainingMinutes = ((remainingMs % 3_600_000L) / 60_000L).toInt()
+    val expiryLabel = when {
+        remainingHours >= 1 -> "${remainingHours}h left"
+        remainingMinutes >= 1 -> "${remainingMinutes}m left"
+        else -> "Expiring soon"
+    }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 420.dp, max = 560.dp)
+                .testTag("story_viewer_dialog"),
+            shape = RoundedCornerShape(22.dp),
+            color = Color(0xFF0E1713),
+            shadowElevation = 16.dp
+        ) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                if (decodedMedia != null) {
+                    AsyncImage(
+                        model = decodedMedia,
+                        contentDescription = "Story by ${story.authorName}",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+
+                // Invisible tap zones for previous / next story
+                Row(modifier = Modifier.fillMaxSize()) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxSize()
+                            .clickable {
+                                if (safeIndex > 0) currentIndex = safeIndex - 1
+                            }
+                    )
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxSize()
+                            .clickable {
+                                if (safeIndex < stories.lastIndex) {
+                                    currentIndex = safeIndex + 1
+                                } else {
+                                    onDismiss()
+                                }
+                            }
+                    )
+                }
+
+                // Top progress & author header
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .align(Alignment.TopCenter)
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color.Black.copy(alpha = 0.72f), Color.Transparent)
+                            )
+                        )
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        stories.forEachIndexed { idx, _ ->
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(3.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(
+                                        if (idx <= safeIndex) EmeraldBright else Color.White.copy(alpha = 0.35f)
+                                    )
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            AvatarCircle(
+                                name = story.authorName,
+                                photoData = story.authorPhotoData,
+                                hasStoryRing = true,
+                                size = 38.dp
+                            )
+                            Column {
+                                Text(
+                                    text = story.authorName,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "@${story.authorUsername} • $expiryLabel",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MintOnlineGlow,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (story.userId == currentUserId) {
+                                IconButton(
+                                    onClick = {
+                                        onDeleteStory(story)
+                                        if (stories.size <= 1) onDismiss()
+                                    },
+                                    modifier = Modifier.testTag("story_viewer_delete")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.DeleteOutline,
+                                        contentDescription = "Delete story",
+                                        tint = Color.White
+                                    )
+                                }
+                            }
+                            IconButton(
+                                onClick = onDismiss,
+                                modifier = Modifier.testTag("story_viewer_close")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Close story",
+                                    tint = Color.White
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (story.caption.isNotBlank()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .align(Alignment.BottomCenter)
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(Color.Transparent, Color.Black.copy(alpha = 0.78f))
+                                )
+                            )
+                            .padding(horizontal = 18.dp, vertical = 18.dp)
+                    ) {
+                        Text(
+                            text = story.caption,
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Color.White,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
