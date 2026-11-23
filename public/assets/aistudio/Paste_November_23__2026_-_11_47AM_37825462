@@ -1,0 +1,1412 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Nomi Chat</title>
+  <style>
+    :root {
+      --green-dark: #065f3c;
+      --green-mid: #0b8753;
+      --green-bright: #19c37d;
+      --green-light: #e6f7ef;
+      --bg-gray: #f2f5f3;
+      --text-dark: #111b21;
+      --text-muted: #667781;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    }
+
+    body {
+      background: #dce5e0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+
+    /* Mobile Frame */
+    .phone-frame {
+      width: 100%;
+      max-width: 410px;
+      height: 840px;
+      max-height: 96vh;
+      background: var(--bg-gray);
+      border-radius: 34px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25);
+      overflow: hidden;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      border: 6px solid #1a2421;
+    }
+
+    /* Glassy Green Wave Header */
+    .glass-header {
+      background: linear-gradient(135deg, #055233 0%, #0c8a56 55%, #17b978 100%);
+      color: white;
+      padding: 18px 20px 22px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .glass-header::before {
+      content: "";
+      position: absolute;
+      top: -40px;
+      right: -30px;
+      width: 160px;
+      height: 160px;
+      background: rgba(255, 255, 255, 0.12);
+      border-radius: 50%;
+      backdrop-filter: blur(8px);
+    }
+
+    .glass-header::after {
+      content: "";
+      position: absolute;
+      bottom: -50px;
+      left: 20%;
+      width: 220px;
+      height: 110px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 50%;
+    }
+
+    /* AUTH SCREEN (Login / Register) */
+    .auth-screen {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      background: #ffffff;
+      overflow-y: auto;
+    }
+
+    .auth-top {
+      background: linear-gradient(135deg, #055233, #0e945d);
+      color: white;
+      padding: 40px 24px 35px;
+      text-align: center;
+      border-bottom-left-radius: 30px;
+      border-bottom-right-radius: 30px;
+    }
+
+    .logo-badge {
+      width: 64px;
+      height: 64px;
+      background: rgba(255, 255, 255, 0.2);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255, 255, 255, 0.35);
+      border-radius: 20px;
+      margin: 0 auto 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 30px;
+      font-weight: bold;
+    }
+
+    .auth-form {
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .input-group label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+      display: block;
+      margin-bottom: 5px;
+    }
+
+    .input-group input {
+      width: 100%;
+      padding: 12px 14px;
+      border: 1.5px solid #dce3df;
+      border-radius: 12px;
+      font-size: 14px;
+      outline: none;
+      transition: 0.2s;
+    }
+
+    .input-group input:focus {
+      border-color: var(--green-mid);
+      background: #f9fcfa;
+    }
+
+    .remember-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #0b8753, #19c37d);
+      color: white;
+      border: none;
+      padding: 13px;
+      border-radius: 14px;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 6px 16px rgba(11, 135, 83, 0.3);
+    }
+
+    .btn-primary:active {
+      transform: scale(0.98);
+    }
+
+    /* MAIN APP SCREENS */
+    .main-app {
+      display: none;
+      flex-direction: column;
+      height: 100%;
+    }
+
+    /* Top Bar */
+    .top-nav {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      position: relative;
+      z-index: 2;
+    }
+
+    .brand-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 22px;
+      font-weight: 700;
+    }
+
+    .brand-icon {
+      width: 34px;
+      height: 34px;
+      background: #25d366;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      box-shadow: 0 3px 10px rgba(0,0,0,0.2);
+    }
+
+    .top-icons {
+      display: flex;
+      gap: 14px;
+      font-size: 18px;
+      cursor: pointer;
+    }
+
+    /* Search Input Bar */
+    .search-box {
+      display: none;
+      margin-top: 12px;
+      position: relative;
+      z-index: 2;
+    }
+
+    .search-box input {
+      width: 100%;
+      padding: 9px 14px;
+      border-radius: 20px;
+      border: none;
+      background: rgba(255, 255, 255, 0.22);
+      backdrop-filter: blur(8px);
+      color: white;
+      outline: none;
+    }
+
+    .search-box input::placeholder {
+      color: rgba(255, 255, 255, 0.8);
+    }
+
+    /* White Curved Content Sheet */
+    .content-sheet {
+      flex: 1;
+      background: #ffffff;
+      border-top-left-radius: 26px;
+      border-top-right-radius: 26px;
+      margin-top: -12px;
+      z-index: 3;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Filter Pills */
+    .filter-pills {
+      display: flex;
+      gap: 8px;
+      padding: 14px 16px 10px;
+      overflow-x: auto;
+    }
+
+    .pill {
+      padding: 7px 14px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      background: #f0f3f1;
+      color: var(--text-dark);
+      border: none;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .pill.active {
+      background: var(--green-dark);
+      color: white;
+    }
+
+    /* Go Premium Glass Banner */
+    .premium-banner {
+      margin: 4px 16px 10px;
+      padding: 12px 16px;
+      border-radius: 16px;
+      background: linear-gradient(135deg, #064e32, #0d7a4c);
+      color: white;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      box-shadow: 0 6px 15px rgba(6, 78, 50, 0.2);
+      cursor: pointer;
+    }
+
+    .premium-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .crown {
+      font-size: 24px;
+    }
+
+    .premium-left h4 {
+      font-size: 14px;
+    }
+
+    .premium-left p {
+      font-size: 11px;
+      opacity: 0.85;
+    }
+
+    /* Chat List */
+    .chat-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 4px 12px 80px;
+    }
+
+    .chat-item {
+      display: flex;
+      align-items: center;
+      padding: 10px 8px;
+      border-radius: 14px;
+      gap: 12px;
+      cursor: pointer;
+      transition: 0.15s;
+    }
+
+    .chat-item:hover {
+      background: #f4f8f6;
+    }
+
+    .avatar-wrap {
+      position: relative;
+      width: 50px;
+      height: 50px;
+      flex-shrink: 0;
+    }
+
+    .avatar-img {
+      width: 50px;
+      height: 50px;
+      border-radius: 50%;
+      object-fit: cover;
+      background: #d8efe4;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      color: var(--green-dark);
+      font-size: 18px;
+    }
+
+    .online-dot {
+      width: 12px;
+      height: 12px;
+      background: #25d366;
+      border: 2px solid white;
+      border-radius: 50%;
+      position: absolute;
+      bottom: 1px;
+      right: 1px;
+    }
+
+    .chat-meta {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .chat-row-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 3px;
+    }
+
+    .chat-name {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text-dark);
+    }
+
+    .chat-time {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .chat-row-bottom {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .chat-preview {
+      font-size: 13px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .unread-badge {
+      background: #19c37d;
+      color: white;
+      font-size: 11px;
+      font-weight: bold;
+      min-width: 20px;
+      height: 20px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 6px;
+    }
+
+    /* Floating Pen Button */
+    .fab-pen {
+      position: absolute;
+      right: 20px;
+      bottom: 84px;
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      background: var(--green-dark);
+      color: white;
+      border: none;
+      font-size: 18px;
+      box-shadow: 0 6px 16px rgba(6, 95, 60, 0.35);
+      cursor: pointer;
+      z-index: 10;
+    }
+
+    /* Bottom Navigation Bar */
+    .bottom-nav {
+      position: absolute;
+      bottom: 0;
+      width: 100%;
+      height: 68px;
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(12px);
+      border-top: 1px solid #e6ece8;
+      display: flex;
+      justify-content: space-around;
+      align-items: center;
+      z-index: 15;
+    }
+
+    .nav-btn {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      font-size: 11px;
+      color: var(--text-muted);
+      background: none;
+      border: none;
+      cursor: pointer;
+      gap: 3px;
+    }
+
+    .nav-btn.active {
+      color: var(--green-dark);
+      font-weight: 700;
+    }
+
+    .nav-plus {
+      width: 50px;
+      height: 50px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #0b8753, #20d489);
+      color: white;
+      font-size: 26px;
+      border: none;
+      margin-top: -22px;
+      box-shadow: 0 6px 16px rgba(11, 135, 83, 0.4);
+      cursor: pointer;
+    }
+
+    /* PROFILE SCREEN (Matches Right Screen in Image) */
+    .profile-view {
+      display: none;
+      flex-direction: column;
+      height: 100%;
+      background: var(--bg-gray);
+    }
+
+    .profile-hero {
+      background: linear-gradient(135deg, #055233, #0d8a55, #18bc78);
+      color: white;
+      padding: 18px 20px 28px;
+      text-align: center;
+      position: relative;
+    }
+
+    .profile-top-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 14px;
+    }
+
+    .profile-pic-container {
+      position: relative;
+      width: 104px;
+      height: 104px;
+      margin: 0 auto 10px;
+    }
+
+    .profile-pic-large {
+      width: 104px;
+      height: 104px;
+      border-radius: 50%;
+      border: 3px solid rgba(255, 255, 255, 0.85);
+      object-fit: cover;
+      background: #064e32;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 36px;
+      font-weight: bold;
+    }
+
+    .cam-btn {
+      position: absolute;
+      bottom: 2px;
+      right: 2px;
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      background: white;
+      color: var(--green-dark);
+      border: none;
+      cursor: pointer;
+      font-size: 14px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+    }
+
+    .verified-name {
+      font-size: 20px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+
+    .verified-tick {
+      background: #25d366;
+      color: white;
+      font-size: 11px;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .online-status-text {
+      font-size: 13px;
+      color: #c8f7dc;
+      margin-top: 4px;
+    }
+
+    .settings-cards {
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px 16px 85px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .card-box {
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(10px);
+      border-radius: 18px;
+      padding: 6px 14px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.04);
+    }
+
+    .setting-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 4px;
+      border-bottom: 1px solid #f0f2f1;
+      cursor: pointer;
+    }
+
+    .setting-row:last-child {
+      border-bottom: none;
+    }
+
+    .setting-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .setting-icon {
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      background: var(--green-light);
+      color: var(--green-dark);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+    }
+
+    .setting-text h5 {
+      font-size: 14px;
+      color: var(--text-dark);
+    }
+
+    .setting-text p {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    /* ACTIVE CHAT CONVERSATION VIEW */
+    .conversation-view {
+      display: none;
+      flex-direction: column;
+      height: 100%;
+      background: #e9efe9;
+      position: absolute;
+      inset: 0;
+      z-index: 25;
+    }
+
+    .conv-header {
+      background: linear-gradient(135deg, #055233, #0d8a55);
+      color: white;
+      padding: 14px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .conv-messages {
+      flex: 1;
+      padding: 14px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .msg-bubble {
+      max-width: 78%;
+      padding: 10px 13px;
+      border-radius: 14px;
+      font-size: 14px;
+      line-height: 1.4;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+    }
+
+    .msg-bubble.me {
+      align-self: flex-end;
+      background: #d5f7e3;
+      border-bottom-right-radius: 2px;
+    }
+
+    .msg-bubble.them {
+      align-self: flex-start;
+      background: white;
+      border-bottom-left-radius: 2px;
+    }
+
+    .msg-time {
+      font-size: 10px;
+      color: var(--text-muted);
+      text-align: right;
+      margin-top: 3px;
+    }
+
+    .conv-input {
+      padding: 10px 12px;
+      background: white;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .conv-input input {
+      flex: 1;
+      padding: 10px 14px;
+      border-radius: 22px;
+      border: 1px solid #dce3df;
+      outline: none;
+    }
+
+    .conv-send {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: var(--green-dark);
+      color: white;
+      border: none;
+      cursor: pointer;
+    }
+
+    /* MODAL FOR EDITING / ADDING CONTACT / PASSWORD */
+    .modal-overlay {
+      display: none;
+      position: absolute;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.55);
+      backdrop-filter: blur(4px);
+      z-index: 40;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
+    }
+
+    .modal-card {
+      background: white;
+      width: 100%;
+      border-radius: 22px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .modal-card h4 {
+      color: var(--green-dark);
+      font-size: 17px;
+    }
+
+    .modal-card input {
+      width: 100%;
+      padding: 11px 12px;
+      border: 1px solid #d5ded9;
+      border-radius: 10px;
+      outline: none;
+    }
+
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 6px;
+    }
+
+    .btn-cancel {
+      padding: 9px 14px;
+      border-radius: 10px;
+      border: none;
+      background: #eef2f0;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="phone-frame">
+
+    <!-- 1. AUTH SCREEN (Login with Username + Password + Remember Me) -->
+    <div class="auth-screen" id="authScreen">
+      <div class="auth-top">
+        <div class="logo-badge">💬</div>
+        <h2>Nomi Chat</h2>
+        <p style="font-size:13px; opacity:0.9; margin-top:4px;">Fast, Smart & Secure Messaging</p>
+      </div>
+
+      <div class="auth-form">
+        <div class="input-group">
+          <label>पूरा नाम (Display Name)</label>
+          <input type="text" id="authName" placeholder="जैसे: Ayaz Bugti" />
+        </div>
+        <div class="input-group">
+          <label>यूज़रनेम (Username)</label>
+          <input type="text" id="authUsername" placeholder="जैसे: ayazbugti786" />
+        </div>
+        <div class="input-group">
+          <label>पासवर्ड (Password)</label>
+          <input type="password" id="authPassword" placeholder="अपना पासवर्ड डालें" />
+        </div>
+        <div class="remember-row">
+          <label><input type="checkbox" id="rememberMe" checked /> पासवर्ड और लॉगिन याद रखें</label>
+        </div>
+        <button class="btn-primary" onclick="handleLogin()">Nomi Chat में प्रवेश करें</button>
+        <p style="font-size:11px; color:#667781; text-align:center;">
+          नया यूज़रनेम डालने पर अपने आप नया अकाउंट बन जाएगा और डेटाबेस में सेव हो जाएगा।
+        </p>
+      </div>
+    </div>
+
+    <!-- 2. MAIN APP (Chats + Profile Tabs) -->
+    <div class="main-app" id="mainApp">
+
+      <!-- CHATS TAB VIEW -->
+      <div id="chatsTab" style="display:flex; flex-direction:column; height:100%;">
+        <div class="glass-header">
+          <div class="top-nav">
+            <div class="brand-title">
+              <div class="brand-icon">💬</div>
+              <span>Nomi Chat</span>
+            </div>
+            <div class="top-icons">
+              <span onclick="toggleSearch()">🔍</span>
+              <span onclick="switchTab('profile')">⋮</span>
+            </div>
+          </div>
+          <div class="search-box" id="searchBox">
+            <input type="text" id="searchInput" placeholder="नाम, नंबर या यूज़रनेम खोजें..." oninput="renderChats()" />
+          </div>
+        </div>
+
+        <div class="content-sheet">
+          <!-- Pills -->
+          <div class="filter-pills">
+            <button class="pill active" onclick="setFilter('all', this)">💬 Chats</button>
+            <button class="pill" onclick="setFilter('group', this)">👥 Groups</button>
+            <button class="pill" onclick="alert('Status फीचर जल्द आ रहा है!')">⭕ Status</button>
+            <button class="pill" onclick="alert('Voice & Video Calls सक्रिय हैं!')">📞 Calls</button>
+          </div>
+
+          <!-- Go Premium Banner -->
+          <div class="premium-banner" onclick="alert('Nomi Chat Premium: Smart AI Reply & Cloud Backup पहले से अनलॉक है!')">
+            <div class="premium-left">
+              <span class="crown">👑</span>
+              <div>
+                <h4>Go Premium</h4>
+                <p>Unlock smart algorithm & extra features</p>
+              </div>
+            </div>
+            <span>❯</span>
+          </div>
+
+          <!-- Chat List -->
+          <div class="chat-list" id="chatList"></div>
+        </div>
+
+        <!-- Floating Pen Button -->
+        <button class="fab-pen" onclick="openAddContactModal()" title="नया कॉन्टैक्ट जोड़ें">✏️</button>
+      </div>
+
+      <!-- PROFILE & SETTINGS TAB VIEW -->
+      <div class="profile-view" id="profileTab">
+        <div class="profile-hero">
+          <div class="profile-top-bar">
+            <span style="cursor:pointer; font-size:20px;" onclick="switchTab('chats')">←</span>
+            <strong>Profile</strong>
+            <span style="cursor:pointer;" onclick="openModal('password')">⋮</span>
+          </div>
+
+          <div class="profile-pic-container">
+            <img id="profileImg" class="profile-pic-large" src="" alt="Profile" style="display:none;" />
+            <div id="profileInitial" class="profile-pic-large">A</div>
+            <button class="cam-btn" onclick="openModal('photo')" title="फोटो बदलें">📷</button>
+          </div>
+
+          <div class="verified-name">
+            <span id="profDisplayName">Ayaz Bugti</span>
+            <span class="verified-tick">✓</span>
+          </div>
+          <div class="online-status-text">● Online</div>
+        </div>
+
+        <div class="settings-cards">
+          <div class="card-box">
+            <div class="setting-row" onclick="openModal('name')">
+              <div class="setting-left">
+                <div class="setting-icon">👤</div>
+                <div class="setting-text">
+                  <h5>Edit Profile</h5>
+                  <p>Change your name, photo and bio</p>
+                </div>
+              </div>
+              <span>❯</span>
+            </div>
+
+            <div class="setting-row" onclick="openModal('bio')">
+              <div class="setting-left">
+                <div class="setting-icon">✏️</div>
+                <div class="setting-text">
+                  <h5>Bio</h5>
+                  <p id="profBioText">Dream Big... 💚</p>
+                </div>
+              </div>
+              <span>❯</span>
+            </div>
+
+            <div class="setting-row" onclick="openModal('username')">
+              <div class="setting-left">
+                <div class="setting-icon">@</div>
+                <div class="setting-text">
+                  <h5>Username</h5>
+                  <p id="profUsernameText">ayazbugti786</p>
+                </div>
+              </div>
+              <span>❯</span>
+            </div>
+          </div>
+
+          <div class="card-box">
+            <div class="setting-row" onclick="openModal('password')">
+              <div class="setting-left">
+                <div class="setting-icon">🛡️</div>
+                <div class="setting-text">
+                  <h5>Account & Password</h5>
+                  <p>पासवर्ड बदलें (Change Password & Security)</p>
+                </div>
+              </div>
+              <span>❯</span>
+            </div>
+
+            <div class="setting-row" onclick="openAddContactModal()">
+              <div class="setting-left">
+                <div class="setting-icon">📇</div>
+                <div class="setting-text">
+                  <h5>Add Contact by Number</h5>
+                  <p>नंबर और यूज़रनेम से नया दोस्त जोड़ें</p>
+                </div>
+              </div>
+              <span>❯</span>
+            </div>
+          </div>
+
+          <div class="card-box">
+            <div class="setting-row" onclick="logoutUser()" style="justify-content:center; color:#d93025; font-weight:700;">
+              🚪 Log Out
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bottom Navigation Bar -->
+      <div class="bottom-nav">
+        <button class="nav-btn active" id="navChats" onclick="switchTab('chats')">💬<span>Chats</span></button>
+        <button class="nav-btn" onclick="setFilter('group')">👥<span>Groups</span></button>
+        <button class="nav-plus" onclick="openAddContactModal()" title="नया कॉन्टैक्ट जोड़ें">+</button>
+        <button class="nav-btn" onclick="alert('Recent Calls: कोई मिस्ड कॉल नहीं है')">📞<span>Calls</span></button>
+        <button class="nav-btn" id="navSettings" onclick="switchTab('profile')">⚙️<span>Settings</span></button>
+      </div>
+
+      <!-- 3. CONVERSATION SCREEN -->
+      <div class="conversation-view" id="convView">
+        <div class="conv-header">
+          <span style="cursor:pointer; font-size:20px;" onclick="closeChat()">←</span>
+          <div class="avatar-img" id="convAvatar" style="width:40px; height:40px;">A</div>
+          <div style="flex:1;">
+            <div style="font-weight:700; font-size:15px;" id="convName">Contact</div>
+            <div style="font-size:11px; color:#c8f7dc;" id="convStatus">● Online</div>
+          </div>
+        </div>
+        <div class="conv-messages" id="convMessages"></div>
+        <div class="conv-input">
+          <input type="text" id="msgInput" placeholder="मैसेज लिखें..." onkeypress="if(event.key==='Enter') sendMessage()" />
+          <button class="conv-send" onclick="sendMessage()">➤</button>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- MODAL FOR PROFILE / PASSWORD / CONTACT -->
+    <div class="modal-overlay" id="modalOverlay">
+      <div class="modal-card" id="modalContent"></div>
+    </div>
+
+  </div>
+
+  <script>
+    // =========================================================
+    // 1. DATABASE LAYER (LocalStorage + Ready for Firebase)
+    // =========================================================
+    const DB = {
+      getUser: () => JSON.parse(localStorage.getItem("nomi_user") || "null"),
+      saveUser: (user) => localStorage.setItem("nomi_user", JSON.stringify(user)),
+      getContacts: () => JSON.parse(localStorage.getItem("nomi_contacts") || "null"),
+      saveContacts: (list) => localStorage.setItem("nomi_contacts", JSON.stringify(list))
+    };
+
+    // Default Contacts (Matching your design)
+    const defaultContacts = [
+      {
+        id: "c1",
+        name: "Ayaz Bugti",
+        username: "ayazbugti786",
+        phone: "+92 300 1234567",
+        type: "chat",
+        online: true,
+        unread: 1,
+        photo: "",
+        lastTime: "9:41 PM",
+        messages: [
+          { from: "them", text: "Hi! How are you?", time: "9:41 PM" }
+        ]
+      },
+      {
+        id: "c2",
+        name: "Friends Group",
+        username: "friends_grp",
+        phone: "Group",
+        type: "group",
+        online: true,
+        unread: 12,
+        photo: "",
+        lastTime: "8:52 PM",
+        messages: [
+          { from: "them", text: "Best video ever! 🎬", time: "8:52 PM" }
+        ]
+      },
+      {
+        id: "c3",
+        name: "Sara Khan",
+        username: "sarakhan",
+        phone: "+92 321 9876543",
+        type: "chat",
+        online: true,
+        unread: 1,
+        photo: "",
+        lastTime: "7:30 PM",
+        messages: [
+          { from: "them", text: "Okay 👍", time: "7:30 PM" }
+        ]
+      },
+      {
+        id: "c4",
+        name: "Rizwan Ali",
+        username: "rizwan_ali",
+        phone: "+92 333 5554433",
+        type: "chat",
+        online: false,
+        unread: 0,
+        photo: "",
+        lastTime: "5:15 PM",
+        messages: [
+          { from: "them", text: "Call me later", time: "5:15 PM" }
+        ]
+      }
+    ];
+
+    let currentUser = DB.getUser();
+    let contacts = DB.getContacts() || defaultContacts;
+    let currentFilter = "all";
+    let activeContactId = null;
+
+    // Auto-login if remembered
+    window.onload = () => {
+      if (currentUser && currentUser.remember) {
+        document.getElementById("authName").value = currentUser.name;
+        document.getElementById("authUsername").value = currentUser.username;
+        document.getElementById("authPassword").value = currentUser.password;
+        if (currentUser.loggedIn) {
+          launchApp();
+        }
+      }
+    };
+
+    // =========================================================
+    // 2. AUTHENTICATION (Username + Password + Remember)
+    // =========================================================
+    function handleLogin() {
+      const name = document.getElementById("authName").value.trim() || "Ayaz Bugti";
+      const username = document.getElementById("authUsername").value.trim().toLowerCase();
+      const password = document.getElementById("authPassword").value.trim();
+      const remember = document.getElementById("rememberMe").checked;
+
+      if (!username || !password) {
+        alert("कृपया यूज़रनेम और पासवर्ड दोनों डालें!");
+        return;
+      }
+
+      // Check existing user password if same username
+      if (currentUser && currentUser.username === username && currentUser.password !== password) {
+        alert("गलत पासवर्ड! कृपया सही पासवर्ड डालें।");
+        return;
+      }
+
+      currentUser = {
+        name: currentUser && currentUser.username === username ? currentUser.name : name,
+        username: username,
+        password: password,
+        bio: (currentUser && currentUser.bio) || "Dream Big... 💚",
+        photo: (currentUser && currentUser.photo) || "",
+        remember: remember,
+        loggedIn: true
+      };
+
+      DB.saveUser(currentUser);
+      DB.saveContacts(contacts);
+      launchApp();
+    }
+
+    function launchApp() {
+      document.getElementById("authScreen").style.display = "none";
+      document.getElementById("mainApp").style.display = "flex";
+      updateProfileUI();
+      renderChats();
+    }
+
+    function logoutUser() {
+      currentUser.loggedIn = false;
+      DB.saveUser(currentUser);
+      document.getElementById("mainApp").style.display = "none";
+      document.getElementById("authScreen").style.display = "flex";
+    }
+
+    // =========================================================
+    // 3. SMART ALGORITHM (Ranking + Context-Aware Replies)
+    // =========================================================
+    function smartRankContacts(list) {
+      // Algorithm: Unread messages aur recent activity ko upar rank karta hai
+      return [...list].sort((a, b) => (b.unread > 0 ? 1 : 0) - (a.unread > 0 ? 1 : 0));
+    }
+
+    function generateSmartReply(userText, contactName) {
+      const msg = userText.toLowerCase();
+      if (msg.includes("hi") || msg.includes("hello") || msg.includes("salam") || msg.includes("नमस्ते")) {
+        return `वालेकुम अस्सलाम / Hello! कैसे हो ${currentUser.name}? 😊`;
+      }
+      if (msg.includes("kya kar") || msg.includes("क्या कर") || msg.includes("what are you doing")) {
+        return `बस अभी Nomi Chat पर ऑनलाइन हूँ और तुम्हारा मैसेज देख रहा हूँ! तुम बताओ?`;
+      }
+      if (msg.includes("kaise") || msg.includes("कैसे") || msg.includes("how are")) {
+        return `मैं बिल्कुल बढ़िया हूँ! उम्मीद है तुम भी अच्छे होगे 💚`;
+      }
+      if (msg.includes("call") || msg.includes("कॉल")) {
+        return `ठीक है, मैं 5 मिनट में फ्री होकर कॉल करता हूँ 📞`;
+      }
+      return `समझ गया "${userText}" 👍 — बिल्कुल सही कहा!`;
+    }
+
+    // =========================================================
+    // 4. RENDER CHATS & CONTACTS
+    // =========================================================
+    function toggleSearch() {
+      const box = document.getElementById("searchBox");
+      box.style.display = box.style.display === "block" ? "none" : "block";
+    }
+
+    function setFilter(type, btn) {
+      currentFilter = type;
+      switchTab("chats");
+      if (btn) {
+        document.querySelectorAll(".pill").forEach(p => p.classList.remove("active"));
+        btn.classList.add("active");
+      }
+      renderChats();
+    }
+
+    function renderChats() {
+      const listEl = document.getElementById("chatList");
+      const query = (document.getElementById("searchInput").value || "").toLowerCase();
+      listEl.innerHTML = "";
+
+      let filtered = contacts.filter(c => {
+        const matchesFilter = currentFilter === "all" || c.type === currentFilter;
+        const matchesSearch =
+          c.name.toLowerCase().includes(query) ||
+          c.username.toLowerCase().includes(query) ||
+          c.phone.toLowerCase().includes(query);
+        return matchesFilter && matchesSearch;
+      });
+
+      filtered = smartRankContacts(filtered);
+
+      filtered.forEach(c => {
+        const lastMsg = c.messages[c.messages.length - 1] || { text: "Say Hi!", time: "Now" };
+        const div = document.createElement("div");
+        div.className = "chat-item";
+        div.onclick = () => openChat(c.id);
+
+        div.innerHTML = `
+          <div class="avatar-wrap">
+            <div class="avatar-img">${c.type === 'group' ? '👥' : c.name.charAt(0).toUpperCase()}</div>
+            ${c.online ? '<span class="online-dot"></span>' : ''}
+          </div>
+          <div class="chat-meta">
+            <div class="chat-row-top">
+              <span class="chat-name">${c.name}</span>
+              <span class="chat-time">${lastMsg.time}</span>
+            </div>
+            <div class="chat-row-bottom">
+              <span class="chat-preview">${lastMsg.from === 'me' ? '✓✓ ' : ''}${lastMsg.text}</span>
+              ${c.unread > 0 ? `<span class="unread-badge">${c.unread}</span>` : ''}
+            </div>
+          </div>
+        `;
+        listEl.appendChild(div);
+      });
+    }
+
+    // =========================================================
+    // 5. CONVERSATION & MESSAGING
+    // =========================================================
+    function openChat(id) {
+      activeContactId = id;
+      const contact = contacts.find(c => c.id === id);
+      if (!contact) return;
+
+      contact.unread = 0;
+      DB.saveContacts(contacts);
+      renderChats();
+
+      document.getElementById("convName").textContent = contact.name;
+      document.getElementById("convAvatar").textContent = contact.name.charAt(0).toUpperCase();
+      document.getElementById("convStatus").textContent = contact.online ? "● Online" : `Last seen ${contact.lastTime}`;
+      document.getElementById("convView").style.display = "flex";
+      renderMessages();
+    }
+
+    function closeChat() {
+      document.getElementById("convView").style.display = "none";
+      activeContactId = null;
+    }
+
+    function renderMessages() {
+      const contact = contacts.find(c => c.id === activeContactId);
+      const box = document.getElementById("convMessages");
+      box.innerHTML = "";
+      contact.messages.forEach(m => {
+        const div = document.createElement("div");
+        div.className = `msg-bubble ${m.from}`;
+        div.innerHTML = `${m.text}<div class="msg-time">${m.time}</div>`;
+        box.appendChild(div);
+      });
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function sendMessage() {
+      const input = document.getElementById("msgInput");
+      const text = input.value.trim();
+      if (!text || !activeContactId) return;
+
+      const contact = contacts.find(c => c.id === activeContactId);
+      const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+      contact.messages.push({ from: "me", text, time });
+      DB.saveContacts(contacts);
+      input.value = "";
+      renderMessages();
+      renderChats();
+
+      // Typing indicator + Smart Algorithm Reply
+      document.getElementById("convStatus").textContent = "typing...";
+      setTimeout(() => {
+        const reply = generateSmartReply(text, contact.name);
+        const rTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        contact.messages.push({ from: "them", text: reply, time: rTime });
+        contact.online = true;
+        DB.saveContacts(contacts);
+        if (activeContactId === contact.id) {
+          document.getElementById("convStatus").textContent = "● Online";
+          renderMessages();
+        }
+        renderChats();
+      }, 1000);
+    }
+
+    // =========================================================
+    // 6. PROFILE, PASSWORD & ADD CONTACT MODALS
+    // =========================================================
+    function switchTab(tab) {
+      document.getElementById("chatsTab").style.display = tab === "chats" ? "flex" : "none";
+      document.getElementById("profileTab").style.display = tab === "profile" ? "flex" : "none";
+      document.getElementById("navChats").classList.toggle("active", tab === "chats");
+      document.getElementById("navSettings").classList.toggle("active", tab === "profile");
+    }
+
+    function updateProfileUI() {
+      document.getElementById("profDisplayName").textContent = currentUser.name;
+      document.getElementById("profBioText").textContent = currentUser.bio;
+      document.getElementById("profUsernameText").textContent = currentUser.username;
+
+      const img = document.getElementById("profileImg");
+      const init = document.getElementById("profileInitial");
+      if (currentUser.photo) {
+        img.src = currentUser.photo;
+        img.style.display = "block";
+        init.style.display = "none";
+      } else {
+        img.style.display = "none";
+        init.style.display = "flex";
+        init.textContent = currentUser.name.charAt(0).toUpperCase();
+      }
+    }
+
+    function openModal(type) {
+      const overlay = document.getElementById("modalOverlay");
+      const content = document.getElementById("modalContent");
+      overlay.style.display = "flex";
+
+      if (type === "name") {
+        content.innerHTML = `
+          <h4>प्रोफाइल नाम बदलें</h4>
+          <input type="text" id="editField" value="${currentUser.name}" />
+          <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeModal()">रद्द करें</button>
+            <button class="btn-primary" onclick="saveSetting('name')">Save</button>
+          </div>`;
+      } else if (type === "bio") {
+        content.innerHTML = `
+          <h4>Bio बदलें</h4>
+          <input type="text" id="editField" value="${currentUser.bio}" />
+          <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeModal()">रद्द करें</button>
+            <button class="btn-primary" onclick="saveSetting('bio')">Save</button>
+          </div>`;
+      } else if (type === "username") {
+        content.innerHTML = `
+          <h4>Username सेट करें</h4>
+          <input type="text" id="editField" value="${currentUser.username}" />
+          <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeModal()">रद्द करें</button>
+            <button class="btn-primary" onclick="saveSetting('username')">Save</button>
+          </div>`;
+      } else if (type === "password") {
+        content.innerHTML = `
+          <h4>पासवर्ड बदलें (Change Password)</h4>
+          <input type="password" id="oldPass" placeholder="पुराना पासवर्ड डालें" />
+          <input type="password" id="newPass" placeholder="नया पासवर्ड डालें" />
+          <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeModal()">रद्द करें</button>
+            <button class="btn-primary" onclick="changePassword()">Update Password</button>
+          </div>`;
+      } else if (type === "photo") {
+        content.innerHTML = `
+          <h4>गोल प्रोफाइल फोटो बदलें</h4>
+          <input type="file" id="fileInput" accept="image/*" />
+          <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeModal()">रद्द करें</button>
+            <button class="btn-primary" onclick="uploadPhoto()">Upload</button>
+          </div>`;
+      }
+    }
+
+    function openAddContactModal() {
+      const overlay = document.getElementById("modalOverlay");
+      const content = document.getElementById("modalContent");
+      overlay.style.display = "flex";
+      content.innerHTML = `
+        <h4>नया कॉन्टैक्ट जोड़ें (Add Contact)</h4>
+        <input type="text" id="cName" placeholder="दोस्त का नाम (जैसे: Bilal)" />
+        <input type="text" id="cPhone" placeholder="मोबाइल नंबर (जैसे: +92 300 0000000)" />
+        <input type="text" id="cUser" placeholder="यूज़रनेम (जैसे: bilal_01)" />
+        <div class="modal-actions">
+          <button class="btn-cancel" onclick="closeModal()">रद्द करें</button>
+          <button class="btn-primary" onclick="addNewContact()">Add & Chat</button>
+        </div>`;
+    }
+
+    function addNewContact() {
+      const name = document.getElementById("cName").value.trim();
+      const phone = document.getElementById("cPhone").value.trim();
+      const username = document.getElementById("cUser").value.trim();
+      if (!name || (!phone && !username)) {
+        alert("नाम और नंबर या यूज़रनेम ज़रूर डालें!");
+        return;
+      }
+      const newC = {
+        id: "c_" + Date.now(),
+        name,
+        phone: phone || "No Number",
+        username: username || name.toLowerCase(),
+        type: "chat",
+        online: true,
+        unread: 0,
+        lastTime: "Now",
+        messages: [{ from: "them", text: `Hi! मैं ${name} हूँ, Nomi Chat पर जुड़ गया हूँ!`, time: "Now" }]
+      };
+      contacts.unshift(newC);
+      DB.saveContacts(contacts);
+      closeModal();
+      switchTab("chats");
+      renderChats();
+      openChat(newC.id);
+    }
+
+    function saveSetting(field) {
+      const val = document.getElementById("editField").value.trim();
+      if (!val) return;
+      currentUser[field] = field === "username" ? val.toLowerCase() : val;
+      DB.saveUser(currentUser);
+      updateProfileUI();
+      closeModal();
+    }
+
+    function changePassword() {
+      const oldP = document.getElementById("oldPass").value.trim();
+      const newP = document.getElementById("newPass").value.trim();
+      if (oldP !== currentUser.password) {
+        alert("पुराना पासवर्ड सही नहीं है!");
+        return;
+      }
+      if (!newP) {
+        alert("नया पासवर्ड डालें!");
+        return;
+      }
+      currentUser.password = newP;
+      DB.saveUser(currentUser);
+      alert("पासवर्ड सफलतापूर्वक बदल गया है! ✅");
+      closeModal();
+    }
+
+    function uploadPhoto() {
+      const file = document.getElementById("fileInput").files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        currentUser.photo = e.target.result;
+        DB.saveUser(currentUser);
+        updateProfileUI();
+        closeModal();
+      };
+      reader.readAsDataURL(file);
+    }
+
+    function closeModal() {
+      document.getElementById("modalOverlay").style.display = "none";
+    }
+  </script>
+</body>
+</html>

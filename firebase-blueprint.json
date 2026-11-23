@@ -1,0 +1,365 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated Nomi Chat user profile and preferences.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the profile owner."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User's public display name."
+        },
+        "username": {
+          "type": "string",
+          "description": "Unique handle for the user."
+        },
+        "bio": {
+          "type": "string",
+          "description": "Short status bio."
+        },
+        "dob": {
+          "type": "string",
+          "description": "Date of birth (YYYY-MM-DD)."
+        },
+        "provider": {
+          "type": "string",
+          "enum": ["google", "username"],
+          "description": "Authentication registration provider."
+        },
+        "photoData": {
+          "type": "string",
+          "description": "Optional compressed JPEG data URI for profile avatar."
+        },
+        "online": {
+          "type": "boolean",
+          "description": "Whether the user appears online."
+        },
+        "verified": {
+          "type": "boolean",
+          "description": "Whether the verified checkmark is shown."
+        },
+        "premiumUnlocked": {
+          "type": "boolean",
+          "description": "Whether Smart AI Reply and premium features are unlocked."
+        },
+        "accountStatus": {
+          "type": "string",
+          "enum": ["active", "banned"],
+          "description": "Account standing status."
+        },
+        "reportCount": {
+          "type": "integer",
+          "description": "Number of unique reports against this account."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "displayName",
+        "username",
+        "bio",
+        "dob",
+        "provider",
+        "online",
+        "verified",
+        "premiumUnlocked",
+        "accountStatus",
+        "reportCount",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserDirectoryEntry": {
+      "title": "UserDirectoryEntry",
+      "description": "Public handle moderation and uniqueness registry for Nomi Chat.",
+      "type": "object",
+      "properties": {
+        "ownerUid": {
+          "type": "string",
+          "description": "Optional Firebase Auth UID of the handle owner."
+        },
+        "username": {
+          "type": "string",
+          "description": "Normalized unique handle identifier."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Public display name."
+        },
+        "provider": {
+          "type": "string",
+          "enum": ["google", "username"],
+          "description": "Auth provider associated with this username."
+        },
+        "accountStatus": {
+          "type": "string",
+          "enum": ["active", "banned"],
+          "description": "Moderation status; transitions to banned at 10 unique reports."
+        },
+        "reportCount": {
+          "type": "integer",
+          "description": "Count of unique reporters."
+        },
+        "reportedByUids": {
+          "type": "array",
+          "description": "Bounded list of unique reporter UIDs."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "username",
+        "displayName",
+        "accountStatus",
+        "reportCount",
+        "reportedByUids",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ChatThread": {
+      "title": "ChatThread",
+      "description": "A direct contact or group conversation thread owned by the user.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID."
+        },
+        "name": {
+          "type": "string",
+          "description": "Contact or group name."
+        },
+        "username": {
+          "type": "string",
+          "description": "Contact handle."
+        },
+        "phone": {
+          "type": "string",
+          "description": "Contact phone number or Group label."
+        },
+        "threadType": {
+          "type": "string",
+          "enum": ["chat", "group"],
+          "description": "Whether this thread is a 1:1 chat or group."
+        },
+        "online": {
+          "type": "boolean",
+          "description": "Online indicator status."
+        },
+        "typing": {
+          "type": "boolean",
+          "description": "Real-time typing indicator when the other party is composing."
+        },
+        "unreadCount": {
+          "type": "integer",
+          "description": "Number of unread messages."
+        },
+        "lastMessageText": {
+          "type": "string",
+          "description": "Preview text of the latest message."
+        },
+        "lastMessageFromMe": {
+          "type": "boolean",
+          "description": "Whether the latest message was sent by the owner."
+        },
+        "lastMessageTimeLabel": {
+          "type": "string",
+          "description": "Formatted display timestamp for the latest message."
+        },
+        "pinned": {
+          "type": "boolean",
+          "description": "Whether this conversation is pinned."
+        },
+        "accountStatus": {
+          "type": "string",
+          "enum": ["active", "banned"],
+          "description": "Reported status of this contact."
+        },
+        "reportCount": {
+          "type": "integer",
+          "description": "Number of unique reports on this contact."
+        },
+        "reportedBy": {
+          "type": "array",
+          "description": "Unique reporter usernames for duplicate-report prevention."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "name",
+        "username",
+        "phone",
+        "threadType",
+        "online",
+        "typing",
+        "unreadCount",
+        "lastMessageText",
+        "lastMessageFromMe",
+        "lastMessageTimeLabel",
+        "pinned",
+        "accountStatus",
+        "reportCount",
+        "reportedBy",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "An individual message inside a chat thread.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID."
+        },
+        "contactId": {
+          "type": "string",
+          "description": "Parent ChatThread document ID."
+        },
+        "sender": {
+          "type": "string",
+          "enum": ["me", "them"],
+          "description": "Message sender direction."
+        },
+        "text": {
+          "type": "string",
+          "description": "Message text body."
+        },
+        "timeLabel": {
+          "type": "string",
+          "description": "Formatted time label for the bubble."
+        },
+        "aiGenerated": {
+          "type": "boolean",
+          "description": "Whether the reply was generated by Firebase AI Logic."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "contactId",
+        "sender",
+        "text",
+        "timeLabel",
+        "aiGenerated",
+        "createdAt"
+      ]
+    },
+    "UserCredentialRecord": {
+      "title": "UserCredentialRecord",
+      "description": "Owner-only salted password hash and registration snapshot keyed by normalized username.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID."
+        },
+        "username": {
+          "type": "string",
+          "description": "Normalized unique username."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Registered full name."
+        },
+        "dob": {
+          "type": "string",
+          "description": "Registered date of birth."
+        },
+        "passwordSalt": {
+          "type": "string",
+          "description": "Random per-credential hex salt."
+        },
+        "passwordHash": {
+          "type": "string",
+          "description": "Salted stretched SHA-256 digest of the password (never plaintext)."
+        },
+        "accountStatus": {
+          "type": "string",
+          "enum": ["active", "banned"],
+          "description": "Account status."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "username",
+        "displayName",
+        "dob",
+        "passwordSalt",
+        "passwordHash",
+        "accountStatus",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Authenticated user profile document."
+    },
+    "/users/{userId}/credentials/{username}": {
+      "schema": { "$ref": "#/entities/UserCredentialRecord" },
+      "description": "Owner-only salted password credential records keyed by username."
+    },
+    "/directory/{username}": {
+      "schema": { "$ref": "#/entities/UserDirectoryEntry" },
+      "description": "Handle-based moderation directory for reporting and auto-ban enforcement."
+    },
+    "/users/{userId}/contacts/{contactId}": {
+      "schema": { "$ref": "#/entities/ChatThread" },
+      "description": "User's contacts, chats, and groups."
+    },
+    "/users/{userId}/contacts/{contactId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Messages inside a contact or group thread."
+    }
+  }
+}

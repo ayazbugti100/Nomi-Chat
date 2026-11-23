@@ -1,0 +1,6 @@
+{
+  "name": "Nomi Chat",
+  "description": "Smart emerald-themed messaging app with real-time cloud chats, groups, customizable profiles, and AI-powered smart replies.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

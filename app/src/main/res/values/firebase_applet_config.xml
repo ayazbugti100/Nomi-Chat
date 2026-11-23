@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<resources>
+    <string name="firestore_database_id" translatable="false">ai-studio-android-nomichat-c179c243-5000-4f9b-91a8-e4e3c0ffa23a</string>
+    <string name="recaptcha_site_key" translatable="false">6LdhCy4uAAAAABJBn-jC2_8XWuI9Y8eMUsdo4-Pf</string>
+</resources>
