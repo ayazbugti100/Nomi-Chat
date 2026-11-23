@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -13,19 +14,27 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.CloudDone
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.WorkspacePremium
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
@@ -41,21 +50,31 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.ui.window.Dialog
+import com.example.R
+import com.example.data.model.BAN_REPORT_LIMIT
+import com.example.data.model.ChatThread
 import com.example.data.model.ThemeMode
+import com.example.ui.components.AvatarCircle
+import com.example.ui.theme.EmeraldBright
 import com.example.ui.theme.EmeraldDark
 import com.example.ui.theme.EmeraldDeep
 import com.example.ui.theme.EmeraldMid
+import com.example.ui.theme.ErrorContainerLight
 import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.GoldCrown
 import com.example.ui.theme.MintLight
+import com.example.ui.theme.MintOnlineGlow
 import com.example.ui.viewmodel.UsernameSearchState
 
 @Composable
@@ -114,17 +133,10 @@ fun AddContactDialog(
     onSearchUsername: (String) -> Unit = {},
     onResetSearch: () -> Unit = {},
     onDismiss: () -> Unit,
-    onAddContact: (
-        name: String,
-        phone: String,
-        username: String,
-        isGroup: Boolean,
-        peerUid: String,
-        isRegisteredPeer: Boolean
-    ) -> Unit
+    onAddDirectChat: (username: String) -> Unit,
+    onAddGroup: (name: String, username: String) -> Unit
 ) {
     var name by remember { mutableStateOf("") }
-    var phone by remember { mutableStateOf("") }
     var username by remember { mutableStateOf("") }
     var isGroup by remember { mutableStateOf(false) }
 
@@ -156,7 +168,10 @@ fun AddContactDialog(
                     )
                     FilterChip(
                         selected = isGroup,
-                        onClick = { isGroup = true },
+                        onClick = {
+                            isGroup = true
+                            onResetSearch()
+                        },
                         label = { Text("Group") },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = MintLight,
@@ -174,20 +189,17 @@ fun AddContactDialog(
                         OutlinedTextField(
                             value = username,
                             onValueChange = { raw ->
-                                val hasPrefix = raw.startsWith("@")
-                                val body = raw.removePrefix("@").lowercase()
-                                    .filter { it.isLetterOrDigit() || it == '_' || it == '.' || it == '-' }
-                                val combined = if (hasPrefix) "@$body" else body
-                                if (combined.length <= 32) {
-                                    username = combined
+                                if (raw.length <= 42) {
+                                    username = raw.replace("\n", "")
                                     if (usernameSearchState != UsernameSearchState.Idle) {
                                         onResetSearch()
                                     }
                                 }
                             },
                             label = { Text("Username") },
-                            placeholder = { Text("e.g. @alex_nomi") },
+                            placeholder = { Text("Enter exact @username") },
                             singleLine = true,
+                            isError = usernameSearchState is UsernameSearchState.NotFound,
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier
                                 .weight(1f)
@@ -196,7 +208,7 @@ fun AddContactDialog(
 
                         Button(
                             onClick = { onSearchUsername(username) },
-                            enabled = cleanUsername.length >= 2 && usernameSearchState !is UsernameSearchState.Loading,
+                            enabled = cleanUsername.isNotEmpty() && usernameSearchState !is UsernameSearchState.Loading,
                             colors = ButtonDefaults.buttonColors(containerColor = EmeraldMid),
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.testTag("find_username_button")
@@ -245,14 +257,7 @@ fun AddContactDialog(
                                     }
                                     Button(
                                         onClick = {
-                                            onAddContact(
-                                                usernameSearchState.result.displayName,
-                                                "",
-                                                usernameSearchState.result.username,
-                                                false,
-                                                usernameSearchState.result.ownerUid,
-                                                true
-                                            )
+                                            onAddDirectChat(usernameSearchState.result.username)
                                         },
                                         colors = ButtonDefaults.buttonColors(containerColor = EmeraldDark),
                                         modifier = Modifier.testTag("add_found_user_button")
@@ -263,26 +268,29 @@ fun AddContactDialog(
                             }
                         }
                         is UsernameSearchState.NotFound -> {
-                            Text(
-                                text = "Username not found in directory yet. Tap Add below to add @$cleanUsername anyway.",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = ErrorRed,
-                                modifier = Modifier.testTag("username_not_found_text")
-                            )
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("username_not_found_text"),
+                                shape = RoundedCornerShape(10.dp),
+                                color = ErrorContainerLight
+                            ) {
+                                Text(
+                                    text = usernameSearchState.message,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = ErrorRed,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                                )
+                            }
                         }
                         else -> Unit
                     }
 
-                    OutlinedTextField(
-                        value = name,
-                        onValueChange = { if (it.length <= 60) name = it },
-                        label = { Text("Display Name (Optional)") },
-                        placeholder = { Text("Leave blank to derive from username") },
-                        singleLine = true,
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("add_contact_name_input")
+                    Text(
+                        text = "Only accounts actually registered with that exact username can be added.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 } else {
                     OutlinedTextField(
@@ -318,17 +326,20 @@ fun AddContactDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    val found = (usernameSearchState as? UsernameSearchState.Found)?.result
-                    onAddContact(
-                        name.ifBlank { found?.displayName.orEmpty() },
-                        phone,
-                        found?.username ?: username,
-                        isGroup,
-                        found?.ownerUid.orEmpty(),
-                        found != null
-                    )
+                    if (isGroup) {
+                        onAddGroup(name, username)
+                    } else {
+                        val found = (usernameSearchState as? UsernameSearchState.Found)?.result
+                        onAddDirectChat(found?.username ?: username)
+                    }
                 },
-                enabled = if (isGroup) name.trim().isNotEmpty() else cleanUsername.isNotEmpty(),
+                enabled = if (isGroup) {
+                    name.trim().isNotEmpty()
+                } else {
+                    cleanUsername.isNotEmpty() &&
+                        usernameSearchState !is UsernameSearchState.Loading &&
+                        usernameSearchState !is UsernameSearchState.NotFound
+                },
                 colors = ButtonDefaults.buttonColors(containerColor = EmeraldMid),
                 modifier = Modifier.testTag("add_contact_confirm_button")
             ) {
@@ -601,4 +612,337 @@ fun AppLockOverlay(
             }
         }
     }
+}
+
+@Composable
+fun AvatarPreviewDialog(
+    thread: ChatThread,
+    onDismiss: () -> Unit,
+    onOpenChat: () -> Unit,
+    onViewContact: () -> Unit,
+    onToggleBlock: () -> Unit
+) {
+    val isChannel = thread.name.contains("Channel", ignoreCase = true)
+    val isGroup = thread.threadType == "group" && !isChannel
+    val isOnline = thread.online && !thread.blocked && thread.accountStatus != "banned"
+    val statusLabel = when {
+        thread.accountStatus == "banned" -> "Banned"
+        thread.blocked -> "Blocked"
+        isOnline -> "Online"
+        else -> "Offline"
+    }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier
+                .width(290.dp)
+                .testTag("avatar_preview_dialog"),
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surface,
+            shadowElevation = 14.dp
+        ) {
+            Column {
+                // WhatsApp-style compact avatar header + large preview area
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(250.dp)
+                        .background(
+                            brush = Brush.verticalGradient(
+                                listOf(EmeraldDeep, EmeraldDark, EmeraldMid)
+                            )
+                        )
+                ) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        AvatarCircle(
+                            name = thread.name,
+                            isGroup = isGroup,
+                            isChannel = isChannel,
+                            showOnlineDot = isOnline,
+                            size = 132.dp,
+                            borderColor = Color.White.copy(alpha = 0.7f)
+                        )
+                    }
+
+                    // Semi-transparent top name strip
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .align(Alignment.TopCenter)
+                            .background(Color.Black.copy(alpha = 0.34f))
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = thread.name,
+                                style = MaterialTheme.typography.titleMedium,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (thread.username.isNotBlank()) {
+                                Text(
+                                    text = "@${thread.username}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MintOnlineGlow,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (isOnline) EmeraldBright.copy(alpha = 0.28f) else Color.White.copy(alpha = 0.16f)
+                        ) {
+                            Text(
+                                text = statusLabel,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isOnline) MintOnlineGlow else Color.White.copy(alpha = 0.9f),
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+
+                // Bottom quick-action icon row (Open Chat, View Contact, Block)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(
+                        onClick = onOpenChat,
+                        modifier = Modifier.testTag("avatar_preview_open_chat")
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Chat,
+                            contentDescription = "Open chat",
+                            tint = EmeraldDark
+                        )
+                    }
+                    IconButton(
+                        onClick = onViewContact,
+                        modifier = Modifier.testTag("avatar_preview_view_contact")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = "View contact",
+                            tint = EmeraldDark
+                        )
+                    }
+                    IconButton(
+                        onClick = onToggleBlock,
+                        modifier = Modifier.testTag("avatar_preview_block_chat")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Block,
+                            contentDescription = if (thread.blocked) "Unblock" else "Block",
+                            tint = ErrorRed
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ContactProfileDialog(
+    contact: ChatThread,
+    onDismiss: () -> Unit,
+    onToggleBlock: () -> Unit,
+    onReportClick: () -> Unit
+) {
+    val statusText = when {
+        contact.accountStatus == "banned" -> "Banned"
+        contact.blocked -> "Blocked"
+        contact.online -> "Online"
+        else -> "Offline"
+    }
+    val statusBg = when {
+        contact.accountStatus == "banned" || contact.blocked -> ErrorContainerLight
+        contact.online -> MintLight
+        else -> MaterialTheme.colorScheme.surfaceVariant
+    }
+    val statusFg = when {
+        contact.accountStatus == "banned" || contact.blocked -> ErrorRed
+        contact.online -> EmeraldDark
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                AvatarCircle(
+                    name = contact.name,
+                    isGroup = contact.threadType == "group",
+                    showOnlineDot = contact.online && !contact.blocked && contact.accountStatus != "banned",
+                    size = 64.dp
+                )
+                Text(
+                    text = contact.name,
+                    style = MaterialTheme.typography.titleLarge,
+                    textAlign = TextAlign.Center
+                )
+                if (contact.username.isNotBlank()) {
+                    Text(
+                        text = "@${contact.username}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = statusBg,
+                    modifier = Modifier.testTag("contact_profile_status_badge")
+                ) {
+                    Text(
+                        text = statusText,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = statusFg,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                    )
+                }
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MintLight.copy(alpha = 0.7f)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = null,
+                            tint = EmeraldDark,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "Messages are end-to-end encrypted.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = EmeraldDeep
+                        )
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    TextButton(
+                        onClick = onToggleBlock,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            text = if (contact.blocked) "Unblock" else "Block",
+                            color = ErrorRed
+                        )
+                    }
+                    TextButton(
+                        onClick = onReportClick,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            text = stringResource(R.string.report_user),
+                            color = ErrorRed
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onDismiss,
+                colors = ButtonDefaults.buttonColors(containerColor = EmeraldDark)
+            ) {
+                Text("Close", color = Color.White)
+            }
+        }
+    )
+}
+
+@Composable
+fun ReportAccountDialog(
+    contact: ChatThread,
+    onDismiss: () -> Unit,
+    onConfirmReport: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                imageVector = Icons.Default.Shield,
+                contentDescription = null,
+                tint = ErrorRed
+            )
+        },
+        title = {
+            Text(
+                text = "Report ${contact.name}",
+                style = MaterialTheme.typography.titleLarge
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "Submit a safety report for @${contact.username.ifBlank { contact.id }}. Each user can report once. Accounts reaching $BAN_REPORT_LIMIT unique reports are automatically banned.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = if (contact.accountStatus == "banned") ErrorContainerLight else MintLight
+                ) {
+                    Text(
+                        text = if (contact.accountStatus == "banned") {
+                            "Status: Banned (${contact.reportCount}/$BAN_REPORT_LIMIT reports)"
+                        } else {
+                            "Current reports: ${contact.reportCount} / $BAN_REPORT_LIMIT"
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (contact.accountStatus == "banned") ErrorRed else EmeraldDeep,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onConfirmReport,
+                colors = ButtonDefaults.buttonColors(containerColor = ErrorRed),
+                modifier = Modifier.testTag("confirm_report_button")
+            ) {
+                Text(stringResource(R.string.report_user))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.cancel))
+            }
+        }
+    )
 }

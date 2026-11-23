@@ -69,11 +69,14 @@ import com.example.ui.screens.AddContactDialog
 import com.example.ui.screens.AppLockOverlay
 import com.example.ui.screens.AppLockSetupDialog
 import com.example.ui.screens.AppearanceDialog
+import com.example.ui.screens.AvatarPreviewDialog
 import com.example.ui.screens.ChatsScreen
+import com.example.ui.screens.ContactProfileDialog
 import com.example.ui.screens.ConversationScreen
 import com.example.ui.screens.EditSingleFieldDialog
 import com.example.ui.screens.PremiumFeaturesDialog
 import com.example.ui.screens.ProfileScreen
+import com.example.ui.screens.ReportAccountDialog
 import com.example.ui.theme.EmeraldMid
 import com.example.ui.theme.NomiChatTheme
 import com.example.ui.viewmodel.NomiChatViewModel
@@ -439,7 +442,17 @@ private fun NomiChatMainShell(
     val networkStatus by viewModel.networkStatus.collectAsStateWithLifecycle()
 
     var activeModal by remember { mutableStateOf(ActiveModal.NONE) }
+    var avatarPreviewThreadId by remember { mutableStateOf<String?>(null) }
+    var viewContactThreadId by remember { mutableStateOf<String?>(null) }
+    var renameThreadId by remember { mutableStateOf<String?>(null) }
+    var reportThreadId by remember { mutableStateOf<String?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
+
+    val allThreads = (contactsState as? UiState.Success)?.data.orEmpty()
+    val avatarPreviewThread = avatarPreviewThreadId?.let { id -> allThreads.firstOrNull { it.id == id } }
+    val viewContactThread = viewContactThreadId?.let { id -> allThreads.firstOrNull { it.id == id } }
+    val renameThread = renameThreadId?.let { id -> allThreads.firstOrNull { it.id == id } }
+    val reportThread = reportThreadId?.let { id -> allThreads.firstOrNull { it.id == id } }
 
     LaunchedEffect(snackbarMessage) {
         val msg = snackbarMessage
@@ -565,7 +578,10 @@ private fun NomiChatMainShell(
                         onOpenPasscodeSetup = { activeModal = ActiveModal.PASSCODE },
                         onToggleNotifications = viewModel::setNotificationsEnabled,
                         onOpenAppearancePicker = { activeModal = ActiveModal.APPEARANCE },
-                        onOpenAddContact = { activeModal = ActiveModal.ADD_CONTACT },
+                        onOpenAddContact = {
+                            viewModel.resetUsernameSearch()
+                            activeModal = ActiveModal.ADD_CONTACT
+                        },
                         onLogoutClick = {
                             scope.launch {
                                 viewModel.setOfflineBeforeLogout()
@@ -631,10 +647,16 @@ private fun NomiChatMainShell(
                         onOpenProfile = { onSelectBottomTab(MainBottomTab.SETTINGS) },
                         onOpenPremium = { activeModal = ActiveModal.PREMIUM },
                         onOpenChat = viewModel::openConversation,
+                        onAvatarClick = { thread -> avatarPreviewThreadId = thread.id },
+                        onRenameChat = { thread -> renameThreadId = thread.id },
+                        onViewContact = { thread -> viewContactThreadId = thread.id },
                         onToggleLockChat = viewModel::toggleLockChat,
                         onToggleBlockChat = viewModel::toggleBlockChat,
                         onDeleteChat = viewModel::deleteChatPermanently,
-                        onAddContactClick = { activeModal = ActiveModal.ADD_CONTACT },
+                        onAddContactClick = {
+                            viewModel.resetUsernameSearch()
+                            activeModal = ActiveModal.ADD_CONTACT
+                        },
                         networkStatus = networkStatus
                     )
                 }
@@ -694,9 +716,18 @@ private fun NomiChatMainShell(
             onSearchUsername = viewModel::findUserByUsername,
             onResetSearch = viewModel::resetUsernameSearch,
             onDismiss = { activeModal = ActiveModal.NONE },
-            onAddContact = { name, phone, username, isGroup, peerUid, isRegisteredPeer ->
-                viewModel.addNewContact(name, phone, username, isGroup, peerUid, isRegisteredPeer)
-                activeModal = ActiveModal.NONE
+            onAddDirectChat = { username ->
+                viewModel.addDirectChatByUsername(
+                    username = username,
+                    onSuccess = { activeModal = ActiveModal.NONE }
+                )
+            },
+            onAddGroup = { name, username ->
+                viewModel.addGroupChat(
+                    name = name,
+                    username = username,
+                    onSuccess = { activeModal = ActiveModal.NONE }
+                )
             }
         )
         ActiveModal.APPEARANCE -> AppearanceDialog(
@@ -713,6 +744,65 @@ private fun NomiChatMainShell(
             smartAiEnabled = prefs.smartAiEnabled,
             onToggleSmartAi = viewModel::setSmartAiEnabled,
             onDismiss = { activeModal = ActiveModal.NONE }
+        )
+    }
+
+    avatarPreviewThread?.let { thread ->
+        AvatarPreviewDialog(
+            thread = thread,
+            onDismiss = { avatarPreviewThreadId = null },
+            onOpenChat = {
+                avatarPreviewThreadId = null
+                viewModel.openConversation(thread.id)
+            },
+            onViewContact = {
+                avatarPreviewThreadId = null
+                viewContactThreadId = thread.id
+            },
+            onToggleBlock = {
+                avatarPreviewThreadId = null
+                viewModel.toggleBlockChat(thread)
+            }
+        )
+    }
+
+    viewContactThread?.let { thread ->
+        ContactProfileDialog(
+            contact = thread,
+            onDismiss = { viewContactThreadId = null },
+            onToggleBlock = {
+                viewContactThreadId = null
+                viewModel.toggleBlockChat(thread)
+            },
+            onReportClick = {
+                viewContactThreadId = null
+                reportThreadId = thread.id
+            }
+        )
+    }
+
+    reportThread?.let { thread ->
+        ReportAccountDialog(
+            contact = thread,
+            onDismiss = { reportThreadId = null },
+            onConfirmReport = {
+                reportThreadId = null
+                viewModel.reportContact(thread)
+            }
+        )
+    }
+
+    renameThread?.let { thread ->
+        EditSingleFieldDialog(
+            title = "Rename Chat",
+            label = "Chat Name",
+            initialValue = thread.name,
+            maxLength = 60,
+            onDismiss = { renameThreadId = null },
+            onSave = { newName ->
+                viewModel.renameChat(thread, newName)
+                renameThreadId = null
+            }
         )
     }
 }

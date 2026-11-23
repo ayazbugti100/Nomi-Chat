@@ -68,6 +68,7 @@ service cloud.firestore {
              data.pinned is bool &&
              (!('locked' in data) || data.locked is bool) &&
              (!('blocked' in data) || data.blocked is bool) &&
+             (!('customRenamed' in data) || data.customRenamed is bool) &&
              (!('peerUid' in data) || (data.peerUid is string && data.peerUid.size() <= 128)) &&
              (!('isRegisteredPeer' in data) || data.isRegisteredPeer is bool) &&
              data.accountStatus in ['active', 'banned'] &&
@@ -159,7 +160,7 @@ service cloud.firestore {
                            'userId', 'name', 'username', 'phone', 'threadType',
                            'online', 'typing', 'unreadCount', 'lastMessageText',
                            'lastMessageFromMe', 'lastMessageTimeLabel', 'pinned',
-                           'locked', 'blocked', 'peerUid', 'isRegisteredPeer',
+                           'locked', 'blocked', 'customRenamed', 'peerUid', 'isRegisteredPeer',
                            'accountStatus', 'reportCount', 'reportedBy',
                            'createdAt', 'updatedAt'
                          ]) &&
@@ -179,7 +180,7 @@ service cloud.firestore {
                            'name', 'username', 'phone', 'threadType', 'online', 'typing',
                            'unreadCount', 'lastMessageText', 'lastMessageFromMe',
                            'lastMessageTimeLabel', 'pinned', 'locked', 'blocked',
-                           'peerUid', 'isRegisteredPeer',
+                           'customRenamed', 'peerUid', 'isRegisteredPeer',
                            'accountStatus', 'reportCount', 'reportedBy', 'updatedAt'
                          ]);
 

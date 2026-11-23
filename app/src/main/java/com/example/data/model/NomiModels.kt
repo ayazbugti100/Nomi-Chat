@@ -63,6 +63,7 @@ data class ChatThread(
     val pinned: Boolean = false,
     val locked: Boolean = false,
     val blocked: Boolean = false,
+    val customRenamed: Boolean = false,
     val peerUid: String = "",
     val isRegisteredPeer: Boolean = false,
     val accountStatus: String = "active",

@@ -412,16 +412,17 @@ class LocalAuthStore(context: Context) {
 
     suspend fun lookupUserByUsername(usernameInput: String): Result<DirectoryLookupResult?> = withContext(Dispatchers.IO) {
         runCatching {
-            val cleanHandle = NomiChatRepository.normalizeUsername(usernameInput.trim().removePrefix("@")).take(40)
-            if (cleanHandle.length < 2) return@runCatching null
+            val cleanHandle = NomiChatRepository.exactUsernameOrNull(usernameInput) ?: return@runCatching null
             mutex.withLock {
                 val root = readRootUnlocked()
                 val key = findAccountKeyByUsernameUnlocked(root, cleanHandle) ?: return@runCatching null
                 val obj = root.optJSONObject(key) ?: return@runCatching null
                 if (obj.optString("accountStatus", "active") == "banned") return@runCatching null
+                val storedUsername = obj.optString("username", key)
+                if (!storedUsername.equals(cleanHandle, ignoreCase = true)) return@runCatching null
                 DirectoryLookupResult(
-                    username = obj.optString("username", key),
-                    displayName = obj.optString("displayName", key),
+                    username = storedUsername,
+                    displayName = obj.optString("displayName", storedUsername),
                     ownerUid = key
                 )
             }
@@ -442,40 +443,47 @@ class LocalAuthStore(context: Context) {
                 val root = readRootUnlocked()
                 val account = root.optJSONObject(usernameKey)
                     ?: throw IllegalStateException("Account not found.")
-                val rawHandle = contactUsername.trim().removePrefix("@")
-                val cleanHandle = NomiChatRepository.normalizeUsername(rawHandle.ifBlank { name })
-                    .ifBlank { "nomiuser" }.take(40)
-                val derivedName = rawHandle
-                    .replace(Regex("[_.-]+"), " ")
-                    .trim()
-                    .split(Regex("\\s+"))
-                    .filter { it.isNotBlank() }
-                    .joinToString(" ") { part ->
-                        part.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString() }
-                    }
-                val cleanName = name.trim().ifBlank { derivedName }.ifBlank { cleanHandle }.take(60)
-                require(cleanName.isNotEmpty()) { "Contact name or username cannot be empty." }
-                val cleanPhone = phone.trim().ifBlank { "@$cleanHandle" }.take(30)
                 val validType = if (threadType == "group") "group" else "chat"
+                val rawHandle = contactUsername.trim().removePrefix("@")
                 val nowSec = System.currentTimeMillis() / 1000L
                 val contactId = "c_${UUID.randomUUID().toString().take(8)}"
 
-                val registeredPeerKey = if (validType == "chat") {
-                    findAccountKeyByUsernameUnlocked(root, cleanHandle)?.takeIf { it != usernameKey }
-                } else null
-                val resolvedPeerUid = peerUid.ifBlank { registeredPeerKey.orEmpty() }
-                val resolvedIsPeer = isRegisteredPeer || registeredPeerKey != null
-                val peerAccountObj = registeredPeerKey?.let { root.optJSONObject(it) }
-                val registeredPeerDisplayName = peerAccountObj?.optString("displayName")?.takeIf { n -> n.isNotBlank() }
-                val peerOnline = peerAccountObj != null &&
-                    peerAccountObj.optString("accountStatus", "active") != "banned" &&
-                    peerAccountObj.optBoolean("online", false)
-                val finalName = name.trim()
-                    .ifBlank { registeredPeerDisplayName.orEmpty() }
-                    .ifBlank { derivedName }
-                    .ifBlank { cleanHandle }
-                    .take(60)
-                require(finalName.isNotEmpty()) { "Contact name or username cannot be empty." }
+                val cleanHandle: String
+                val resolvedPeerUid: String
+                val resolvedIsPeer: Boolean
+                val peerOnline: Boolean
+                val finalName: String
+
+                if (validType == "chat") {
+                    cleanHandle = NomiChatRepository.exactUsernameOrNull(contactUsername)
+                        ?: throw IllegalStateException("User not found")
+                    val foundKey = findAccountKeyByUsernameUnlocked(root, cleanHandle)
+                        ?: throw IllegalStateException("User not found")
+                    if (foundKey == usernameKey) {
+                        throw IllegalStateException("You cannot add your own username.")
+                    }
+                    val candidateObj = root.optJSONObject(foundKey)
+                    if (candidateObj == null ||
+                        candidateObj.optString("accountStatus", "active") == "banned" ||
+                        !candidateObj.optString("username", foundKey).equals(cleanHandle, ignoreCase = true)
+                    ) {
+                        throw IllegalStateException("User not found")
+                    }
+                    resolvedPeerUid = foundKey
+                    resolvedIsPeer = true
+                    val registeredPeerDisplayName = candidateObj.optString("displayName").trim()
+                    peerOnline = candidateObj.optBoolean("online", false)
+                    finalName = registeredPeerDisplayName.ifBlank { cleanHandle }.take(60)
+                } else {
+                    cleanHandle = NomiChatRepository.normalizeUsername(rawHandle.ifBlank { name })
+                        .ifBlank { "nomigroup" }.take(40)
+                    resolvedPeerUid = peerUid
+                    resolvedIsPeer = isRegisteredPeer
+                    peerOnline = false
+                    finalName = name.trim().ifBlank { cleanHandle }.take(60)
+                    require(finalName.isNotEmpty()) { "Group name cannot be empty." }
+                }
+                val cleanPhone = phone.trim().ifBlank { "@$cleanHandle" }.take(30)
 
                 val existingContacts = account.optJSONArray("contacts") ?: JSONArray()
                 for (i in 0 until existingContacts.length()) {
@@ -822,6 +830,33 @@ class LocalAuthStore(context: Context) {
         }
     }
 
+    suspend fun renameChat(
+        usernameKey: String,
+        contactId: String,
+        newName: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanName = newName.trim().take(60)
+            require(cleanName.isNotEmpty()) { "Chat name cannot be empty." }
+            mutex.withLock {
+                val root = readRootUnlocked()
+                val account = root.optJSONObject(usernameKey) ?: return@withLock
+                val contacts = account.optJSONArray("contacts") ?: return@withLock
+                for (i in 0 until contacts.length()) {
+                    val obj = contacts.optJSONObject(i) ?: continue
+                    if (obj.optString("id") == contactId) {
+                        obj.put("name", cleanName)
+                        obj.put("customRenamed", true)
+                        obj.put("updatedAtSec", System.currentTimeMillis() / 1000L)
+                        break
+                    }
+                }
+                root.put(usernameKey, account)
+                writeRootUnlocked(root)
+            }
+        }
+    }
+
     suspend fun deleteChatPermanently(
         usernameKey: String,
         contactId: String
@@ -970,6 +1005,7 @@ class LocalAuthStore(context: Context) {
             pinned = obj.optBoolean("pinned", false),
             locked = obj.optBoolean("locked", false),
             blocked = obj.optBoolean("blocked", false),
+            customRenamed = obj.optBoolean("customRenamed", false),
             peerUid = obj.optString("peerUid", ""),
             isRegisteredPeer = obj.optBoolean("isRegisteredPeer", false),
             accountStatus = obj.optString("accountStatus", "active"),
@@ -1080,6 +1116,12 @@ class LocalNomiRepository(private val store: LocalAuthStore) : NomiDataSource {
         contactId: String,
         blocked: Boolean
     ): Result<Unit> = store.toggleBlockChat(userId, contactId, blocked)
+
+    override suspend fun renameChat(
+        userId: String,
+        contactId: String,
+        newName: String
+    ): Result<Unit> = store.renameChat(userId, contactId, newName)
 
     override suspend fun deleteChatPermanently(
         userId: String,

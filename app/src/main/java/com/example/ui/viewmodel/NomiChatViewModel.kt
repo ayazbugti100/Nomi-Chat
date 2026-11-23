@@ -56,7 +56,7 @@ sealed interface UsernameSearchState {
     data object Idle : UsernameSearchState
     data object Loading : UsernameSearchState
     data class Found(val result: DirectoryLookupResult) : UsernameSearchState
-    data object NotFound : UsernameSearchState
+    data class NotFound(val message: String = "User not found") : UsernameSearchState
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -481,6 +481,23 @@ class NomiChatViewModel(
         }
     }
 
+    fun renameChat(thread: ChatThread, newName: String) {
+        val cleanName = newName.trim().take(60)
+        if (cleanName.isEmpty()) {
+            _snackbarMessage.value = "Chat name cannot be empty."
+            return
+        }
+        viewModelScope.launch {
+            repository.renameChat(currentUserId, thread.id, cleanName)
+                .onSuccess {
+                    _popupMessage.value = "Chat renamed"
+                }
+                .onFailure { err ->
+                    _snackbarMessage.value = err.localizedMessage ?: "Unable to rename chat."
+                }
+        }
+    }
+
     fun deleteChatPermanently(thread: ChatThread) {
         viewModelScope.launch {
             repository.deleteChatPermanently(currentUserId, thread.id)
@@ -555,6 +572,10 @@ class NomiChatViewModel(
 
     fun reportActiveContact() {
         val contact = activeContact.value ?: return
+        reportContact(contact)
+    }
+
+    fun reportContact(contact: ChatThread) {
         val myHandle = (profileState.value as? UiState.Success)?.data?.username.orEmpty()
             .ifBlank { currentUserId }
 
@@ -572,23 +593,27 @@ class NomiChatViewModel(
     }
 
     fun findUserByUsername(username: String) {
-        val clean = username.trim().removePrefix("@")
-        if (clean.isEmpty()) {
-            _usernameSearchState.value = UsernameSearchState.NotFound
+        val clean = com.example.data.repository.NomiChatRepository.exactUsernameOrNull(username)
+        if (clean == null) {
+            _usernameSearchState.value = UsernameSearchState.NotFound("User not found")
             return
         }
+        val myHandle = (profileState.value as? UiState.Success)?.data?.username.orEmpty()
         viewModelScope.launch {
             _usernameSearchState.value = UsernameSearchState.Loading
             repository.lookupUserByUsername(clean)
                 .onSuccess { found ->
-                    _usernameSearchState.value = if (found != null) {
-                        UsernameSearchState.Found(found)
-                    } else {
-                        UsernameSearchState.NotFound
+                    _usernameSearchState.value = when {
+                        found == null || !found.username.equals(clean, ignoreCase = true) ->
+                            UsernameSearchState.NotFound("User not found")
+                        found.ownerUid == currentUserId ||
+                            (myHandle.isNotBlank() && found.username.equals(myHandle, ignoreCase = true)) ->
+                            UsernameSearchState.NotFound("You cannot add your own username.")
+                        else -> UsernameSearchState.Found(found)
                     }
                 }
                 .onFailure {
-                    _usernameSearchState.value = UsernameSearchState.NotFound
+                    _usernameSearchState.value = UsernameSearchState.NotFound("User not found")
                 }
         }
     }
@@ -597,30 +622,78 @@ class NomiChatViewModel(
         _usernameSearchState.value = UsernameSearchState.Idle
     }
 
-    fun addNewContact(
-        name: String,
-        phone: String,
+    fun addDirectChatByUsername(
         username: String,
-        isGroup: Boolean,
-        peerUid: String = "",
-        isRegisteredPeer: Boolean = false
+        onSuccess: () -> Unit
     ) {
+        val clean = com.example.data.repository.NomiChatRepository.exactUsernameOrNull(username)
+        if (clean == null) {
+            _usernameSearchState.value = UsernameSearchState.NotFound("User not found")
+            return
+        }
+        val myHandle = (profileState.value as? UiState.Success)?.data?.username.orEmpty()
         viewModelScope.launch {
-            val type = if (isGroup) "group" else "chat"
+            _usernameSearchState.value = UsernameSearchState.Loading
+            val lookupResult = repository.lookupUserByUsername(clean)
+            val found = lookupResult.getOrNull()
+            if (lookupResult.isFailure || found == null || !found.username.equals(clean, ignoreCase = true)) {
+                _usernameSearchState.value = UsernameSearchState.NotFound("User not found")
+                return@launch
+            }
+            if (found.ownerUid == currentUserId ||
+                (myHandle.isNotBlank() && found.username.equals(myHandle, ignoreCase = true))
+            ) {
+                _usernameSearchState.value = UsernameSearchState.NotFound("You cannot add your own username.")
+                return@launch
+            }
+
             repository.addContact(
                 userId = currentUserId,
-                name = name,
-                username = username,
-                phone = phone,
-                threadType = type,
-                peerUid = peerUid,
-                isRegisteredPeer = isRegisteredPeer
+                name = found.displayName,
+                username = found.username,
+                phone = "",
+                threadType = "chat",
+                peerUid = found.ownerUid,
+                isRegisteredPeer = true
             ).onSuccess {
                 _usernameSearchState.value = UsernameSearchState.Idle
-                _selectedFilter.value = if (isGroup) ChatPillFilter.GROUPS else ChatPillFilter.CHATS
-                _popupMessage.value = if (isGroup) "Group added" else "Chat added"
+                _selectedFilter.value = ChatPillFilter.CHATS
+                _popupMessage.value = "Chat added"
+                onSuccess()
             }.onFailure { err ->
-                _snackbarMessage.value = err.localizedMessage ?: "Could not add contact."
+                _usernameSearchState.value = UsernameSearchState.NotFound(
+                    err.localizedMessage?.takeIf { it.isNotBlank() } ?: "User not found"
+                )
+            }
+        }
+    }
+
+    fun addGroupChat(
+        name: String,
+        username: String = "",
+        onSuccess: () -> Unit
+    ) {
+        val cleanName = name.trim()
+        if (cleanName.isEmpty()) {
+            _snackbarMessage.value = "Group name cannot be empty."
+            return
+        }
+        viewModelScope.launch {
+            repository.addContact(
+                userId = currentUserId,
+                name = cleanName,
+                username = username,
+                phone = "",
+                threadType = "group",
+                peerUid = "",
+                isRegisteredPeer = false
+            ).onSuccess {
+                _usernameSearchState.value = UsernameSearchState.Idle
+                _selectedFilter.value = ChatPillFilter.GROUPS
+                _popupMessage.value = "Group added"
+                onSuccess()
+            }.onFailure { err ->
+                _snackbarMessage.value = err.localizedMessage ?: "Could not create group."
             }
         }
     }

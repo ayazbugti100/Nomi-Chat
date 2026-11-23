@@ -146,9 +146,10 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun `lock block permanent delete and add by username persist across reloads`() = runTest {
+  fun `lock block rename permanent delete and add by username persist across reloads`() = runTest {
     val store = LocalAuthStore(context)
     store.signUpUser("Alex Roe", "alexroe", "2000-01-01", "pass123", "pass123")
+    store.signUpUser("Alex Nomi", "alex_nomi", "1998-07-04", "pass123", "pass123")
 
     val addRes = store.addContact(
       usernameKey = "alexroe",
@@ -166,18 +167,77 @@ class ExampleRobolectricTest {
     assertEquals("Alex Nomi", addedThread?.name)
     assertEquals("alex_nomi", addedThread?.username)
 
+    store.renameChat("alexroe", addedId, "Best Buddy")
     store.toggleLockChat("alexroe", addedId, true)
     store.toggleBlockChat("alexroe", addedId, true)
 
     val reloadedStore = LocalAuthStore(context)
     val updatedThread = reloadedStore.observeContacts("alexroe").first().firstOrNull { it.id == addedId }
     assertNotNull(updatedThread)
+    assertEquals("Best Buddy", updatedThread?.name)
+    assertTrue(updatedThread?.customRenamed == true)
     assertTrue(updatedThread?.locked == true)
     assertTrue(updatedThread?.blocked == true)
 
     reloadedStore.deleteChatPermanently("alexroe", addedId)
     val afterDelete = LocalAuthStore(context).observeContacts("alexroe").first()
     assertTrue(afterDelete.none { it.id == addedId })
+  }
+
+  @Test
+  fun `add chat by username rejects unregistered and self usernames`() = runTest {
+    val store = LocalAuthStore(context)
+    store.signUpUser("Nomi User", "nomi_one", "2000-01-01", "pass123", "pass123")
+    store.signUpUser("Default Fallback", "nomiuser", "2000-01-01", "pass123", "pass123")
+    store.signUpUser("GH Bugti", "ghbugti", "1997-02-10", "pass123", "pass123")
+
+    // Any unregistered, blank, punctuation, or non-matching handle must be rejected cleanly
+    val invalidInputs = listOf(
+      "@does_not_exist",
+      "GH Bugti",
+      "gh.bugti",
+      "gh_bugti",
+      "@.",
+      ""
+    )
+    invalidInputs.forEach { badInput ->
+      val res = store.addContact(
+        usernameKey = "nomi_one",
+        name = "Fake Display Name",
+        contactUsername = badInput,
+        phone = "",
+        threadType = "chat"
+      )
+      assertTrue("Expected failure for '$badInput'", res.isFailure)
+      assertEquals("User not found", res.exceptionOrNull()?.message)
+      assertEquals(null, store.lookupUserByUsername(badInput).getOrNull())
+    }
+    assertTrue(store.observeContacts("nomi_one").first().isEmpty())
+
+    // Self-add is rejected
+    val selfResult = store.addContact(
+      usernameKey = "nomi_one",
+      name = "",
+      contactUsername = "@nomi_one",
+      phone = "",
+      threadType = "chat"
+    )
+    assertTrue(selfResult.isFailure)
+    assertEquals("You cannot add your own username.", selfResult.exceptionOrNull()?.message)
+
+    // Exact registered username succeeds and uses the real registered account name ("GH Bugti")
+    val exactResult = store.addContact(
+      usernameKey = "nomi_one",
+      name = "Wrong Typed Name",
+      contactUsername = "@ghbugti",
+      phone = "",
+      threadType = "chat"
+    )
+    assertTrue(exactResult.isSuccess)
+    val addedContacts = store.observeContacts("nomi_one").first()
+    assertEquals(1, addedContacts.size)
+    assertEquals("GH Bugti", addedContacts.first().name)
+    assertEquals("ghbugti", addedContacts.first().username)
   }
 
   @Test
@@ -239,6 +299,8 @@ class ExampleRobolectricTest {
     val store = LocalAuthStore(context)
     val outcome = store.signUpUser("Nomi User", "nomi_clean", "2000-01-01", "pass123", "pass123")
     assertTrue(outcome is LocalAuthOutcome.Success)
+    store.signUpUser("Friend User", "friend_user", "2000-01-01", "pass123", "pass123")
+    store.setUserPresence("friend_user", false)
 
     val initialContacts = store.observeContacts("nomi_clean").first()
     assertTrue(initialContacts.isEmpty())
@@ -327,6 +389,11 @@ class ExampleRobolectricTest {
     assertEquals("Alice Live", merged.name)
     assertEquals("active", merged.accountStatus)
     assertTrue(merged.online)
+
+    val renamedThread = thread.copy(name = "My Nickname", customRenamed = true)
+    val mergedRenamed = NomiChatRepository.mergeThreadWithDirectory(renamedThread, freshDirOnline, nowMs)
+    assertEquals("My Nickname", mergedRenamed.name)
+    assertTrue(mergedRenamed.online)
 
     // Stale heartbeat (>150s old) drops back to Offline
     val staleDir = freshDirOnline.copy(

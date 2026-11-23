@@ -91,6 +91,9 @@ interface NomiDataSource {
 
     suspend fun toggleBlockChat(userId: String, contactId: String, blocked: Boolean): Result<Unit>
 
+    suspend fun renameChat(userId: String, contactId: String, newName: String): Result<Unit> =
+        Result.success(Unit)
+
     suspend fun deleteChatPermanently(userId: String, contactId: String): Result<Unit>
 
     suspend fun reportUserAccount(

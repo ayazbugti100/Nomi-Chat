@@ -738,8 +738,7 @@ class NomiChatRepository(
     }
 
     override suspend fun lookupUserByUsername(username: String): Result<DirectoryLookupResult?> {
-        val cleanHandle = sanitizeHandle(username.trim().removePrefix("@"))
-        if (cleanHandle.length < 2) return Result.success(null)
+        val cleanHandle = exactUsernameOrNull(username) ?: return Result.success(null)
         val path = "directory/$cleanHandle"
         return try {
             requireUserId()
@@ -747,11 +746,13 @@ class NomiChatRepository(
             if (!snap.exists()) return Result.success(null)
             if (snap.getString("accountStatus") == "banned") return Result.success(null)
             val ownerUid = snap.getString("ownerUid").orEmpty()
-            val displayName = snap.getString("displayName").orEmpty().ifBlank { cleanHandle }
-            val handle = snap.getString("username").orEmpty().ifBlank { cleanHandle }
+            if (ownerUid.isBlank()) return Result.success(null)
+            val storedHandle = snap.getString("username").orEmpty().ifBlank { cleanHandle }
+            if (!storedHandle.equals(cleanHandle, ignoreCase = true)) return Result.success(null)
+            val displayName = snap.getString("displayName").orEmpty().ifBlank { storedHandle }
             Result.success(
                 DirectoryLookupResult(
-                    username = handle,
+                    username = storedHandle,
                     displayName = displayName,
                     ownerUid = ownerUid
                 )
@@ -778,44 +779,44 @@ class NomiChatRepository(
             val uid = requireUserId()
             check(uid == userId) { "Signed-in user mismatch." }
 
-            val rawHandle = username.trim().removePrefix("@")
-            val cleanHandle = sanitizeHandle(rawHandle.ifBlank { name })
-            val derivedName = rawHandle
-                .replace(Regex("[_.-]+"), " ")
-                .trim()
-                .split(Regex("\\s+"))
-                .filter { it.isNotBlank() }
-                .joinToString(" ") { part ->
-                    part.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString() }
-                }
-            val cleanName = name.trim().ifBlank { derivedName }.ifBlank { cleanHandle }.take(60)
-            require(cleanName.isNotEmpty()) { "Contact name or username cannot be empty." }
-            val cleanPhone = phone.trim().ifBlank { "@$cleanHandle" }.take(30)
             val validType = if (threadType == "group") "group" else "chat"
+            val rawHandle = username.trim().removePrefix("@")
+            val cleanHandle: String
             var resolvedPeerUid = peerUid
             var resolvedIsPeer = isRegisteredPeer
             var resolvedDirName = ""
             var resolvedOnline = false
-            if (validType == "chat" && cleanHandle.length >= 2) {
-                val dirSnap = runCatching { db.collection("directory").document(cleanHandle).get().await() }.getOrNull()
-                if (dirSnap != null && dirSnap.exists() && dirSnap.getString("accountStatus") != "banned") {
-                    val owner = dirSnap.getString("ownerUid").orEmpty()
-                    if (owner.isNotBlank() && owner != uid) {
-                        resolvedPeerUid = resolvedPeerUid.ifBlank { owner }
-                        resolvedIsPeer = true
-                        resolvedDirName = dirSnap.getString("displayName").orEmpty()
-                        val updatedTs = dirSnap.getTimestamp("updatedAt")?.toDate()?.time
-                        val fresh = updatedTs == null || (System.currentTimeMillis() - updatedTs) <= PRESENCE_STALE_MS
-                        resolvedOnline = (dirSnap.getBoolean("online") == true) && fresh
-                    }
+            val finalName: String
+
+            if (validType == "chat") {
+                cleanHandle = exactUsernameOrNull(username)
+                    ?: return Result.failure(IllegalStateException("User not found"))
+                val dirSnap = db.collection("directory").document(cleanHandle).get().await()
+                if (!dirSnap.exists() || dirSnap.getString("accountStatus") == "banned") {
+                    return Result.failure(IllegalStateException("User not found"))
                 }
+                val owner = dirSnap.getString("ownerUid").orEmpty()
+                val storedHandle = dirSnap.getString("username").orEmpty()
+                if (owner.isBlank() || !storedHandle.equals(cleanHandle, ignoreCase = true)) {
+                    return Result.failure(IllegalStateException("User not found"))
+                }
+                if (owner == uid) {
+                    return Result.failure(IllegalStateException("You cannot add your own username."))
+                }
+                resolvedPeerUid = owner
+                resolvedIsPeer = true
+                resolvedDirName = dirSnap.getString("displayName").orEmpty()
+                val updatedTs = dirSnap.getTimestamp("updatedAt")?.toDate()?.time
+                val fresh = updatedTs == null || (System.currentTimeMillis() - updatedTs) <= PRESENCE_STALE_MS
+                resolvedOnline = (dirSnap.getBoolean("online") == true) && fresh
+                finalName = resolvedDirName.trim().ifBlank { storedHandle }.take(60)
+            } else {
+                cleanHandle = sanitizeHandle(rawHandle.ifBlank { name })
+                val cleanGroupName = name.trim().ifBlank { cleanHandle }.take(60)
+                require(cleanGroupName.isNotEmpty()) { "Group name cannot be empty." }
+                finalName = cleanGroupName
             }
-            val finalName = name.trim()
-                .ifBlank { resolvedDirName }
-                .ifBlank { derivedName }
-                .ifBlank { cleanHandle }
-                .take(60)
-            require(finalName.isNotEmpty()) { "Contact name or username cannot be empty." }
+            val cleanPhone = phone.trim().ifBlank { "@$cleanHandle" }.take(30)
 
             if (validType == "chat" && cleanHandle.isNotBlank()) {
                 val existingSnap = db.collection("users").document(uid)
@@ -857,6 +858,7 @@ class NomiChatRepository(
                     "pinned" to false,
                     "locked" to false,
                     "blocked" to false,
+                    "customRenamed" to false,
                     "peerUid" to resolvedPeerUid,
                     "isRegisteredPeer" to resolvedIsPeer,
                     "accountStatus" to "active",
@@ -1285,6 +1287,36 @@ class NomiChatRepository(
         }
     }
 
+    override suspend fun renameChat(
+        userId: String,
+        contactId: String,
+        newName: String
+    ): Result<Unit> {
+        val path = "users/$userId/contacts/$contactId"
+        return try {
+            val uid = requireUserId()
+            check(uid == userId) { "Signed-in user mismatch." }
+            require(contactId.isNotBlank()) { "contactId cannot be blank." }
+            val cleanName = newName.trim().take(60)
+            require(cleanName.isNotEmpty()) { "Chat name cannot be empty." }
+            db.collection("users").document(uid)
+                .collection("contacts").document(contactId)
+                .update(
+                    mapOf(
+                        "name" to cleanName,
+                        "customRenamed" to true,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
     override suspend fun deleteChatPermanently(
         userId: String,
         contactId: String
@@ -1448,6 +1480,15 @@ class NomiChatRepository(
                 .trim('_')
         }
 
+        fun exactUsernameOrNull(raw: String): String? {
+            val candidate = raw.trim().removePrefix("@").lowercase()
+            return if (candidate.length in 2..40 && candidate.matches(Regex("^[a-z0-9_-]+$"))) {
+                candidate
+            } else {
+                null
+            }
+        }
+
         fun mergeThreadWithDirectory(
             thread: ChatThread,
             entry: UserDirectoryEntry?,
@@ -1462,7 +1503,11 @@ class NomiChatRepository(
             ) {
                 return thread.copy(online = false)
             }
-            val syncedName = entry.displayName.trim().ifBlank { thread.name }
+            val syncedName = if (thread.customRenamed) {
+                thread.name
+            } else {
+                entry.displayName.trim().ifBlank { thread.name }
+            }
             val syncedStatus = if (entry.accountStatus == "banned") "banned" else thread.accountStatus
             val updatedMs = entry.updatedAt?.toDate()?.time
             val withinWindow = updatedMs == null || (nowMillis - updatedMs) <= PRESENCE_STALE_MS

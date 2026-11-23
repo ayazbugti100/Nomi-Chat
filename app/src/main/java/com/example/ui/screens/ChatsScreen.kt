@@ -38,9 +38,8 @@ import androidx.compose.material.icons.filled.DonutLarge
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Group
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.WifiOff
@@ -105,7 +104,10 @@ fun ChatsScreen(
     onOpenProfile: () -> Unit,
     onOpenPremium: () -> Unit,
     onOpenChat: (String) -> Unit,
-    onToggleLockChat: (ChatThread) -> Unit,
+    onAvatarClick: (ChatThread) -> Unit = {},
+    onRenameChat: (ChatThread) -> Unit = {},
+    onViewContact: (ChatThread) -> Unit = {},
+    onToggleLockChat: (ChatThread) -> Unit = {},
     onToggleBlockChat: (ChatThread) -> Unit,
     onDeleteChat: (ChatThread) -> Unit,
     onAddContactClick: () -> Unit,
@@ -315,7 +317,9 @@ fun ChatsScreen(
                                                 ChatListRow(
                                                     thread = thread,
                                                     onOpenChat = { onOpenChat(thread.id) },
-                                                    onToggleLock = { onToggleLockChat(thread) },
+                                                    onAvatarClick = { onAvatarClick(thread) },
+                                                    onRenameChat = { onRenameChat(thread) },
+                                                    onViewContact = { onViewContact(thread) },
                                                     onToggleBlock = { onToggleBlockChat(thread) },
                                                     onDeleteChat = { onDeleteChat(thread) }
                                                 )
@@ -438,7 +442,9 @@ private fun FilterPillChip(
 private fun ChatListRow(
     thread: ChatThread,
     onOpenChat: () -> Unit,
-    onToggleLock: () -> Unit,
+    onAvatarClick: () -> Unit,
+    onRenameChat: () -> Unit,
+    onViewContact: () -> Unit,
     onToggleBlock: () -> Unit,
     onDeleteChat: () -> Unit
 ) {
@@ -462,13 +468,20 @@ private fun ChatListRow(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            AvatarCircle(
-                name = thread.name,
-                isGroup = isGroup,
-                isChannel = isChannel,
-                showOnlineDot = thread.online && !thread.blocked,
-                size = 52.dp
-            )
+            Box(
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .clickable(onClick = onAvatarClick)
+                    .testTag("chat_avatar_${thread.id}")
+            ) {
+                AvatarCircle(
+                    name = thread.name,
+                    isGroup = isGroup,
+                    isChannel = isChannel,
+                    showOnlineDot = thread.online && !thread.blocked,
+                    size = 52.dp
+                )
+            }
 
             Column(modifier = Modifier.weight(1f)) {
                 Row(
@@ -631,7 +644,7 @@ private fun ChatListRow(
             }
         }
 
-        // Small white popup menu anchored to the clicked chat row
+        // Popup menu anchored to the double-tapped or long-pressed chat row
         DropdownMenu(
             expanded = menuExpanded,
             onDismissRequest = { menuExpanded = false },
@@ -645,7 +658,7 @@ private fun ChatListRow(
             DropdownMenuItem(
                 text = {
                     Text(
-                        text = "Open chat",
+                        text = "Rename Chat",
                         color = LightOnSurface,
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Medium
@@ -653,7 +666,7 @@ private fun ChatListRow(
                 },
                 leadingIcon = {
                     Icon(
-                        imageVector = Icons.AutoMirrored.Filled.Chat,
+                        imageVector = Icons.Default.Edit,
                         contentDescription = null,
                         tint = EmeraldMid,
                         modifier = Modifier.size(18.dp)
@@ -661,22 +674,21 @@ private fun ChatListRow(
                 },
                 onClick = {
                     menuExpanded = false
-                    onOpenChat()
+                    onRenameChat()
                 },
-                modifier = Modifier.testTag("popup_open_chat_${thread.id}")
+                modifier = Modifier.testTag("popup_rename_chat_${thread.id}")
             )
-            HorizontalDivider(color = Color(0xFFECEFF1), thickness = 0.8.dp)
             DropdownMenuItem(
                 text = {
                     Text(
-                        text = if (thread.locked) "Unlock chat" else "Lock chat",
+                        text = "View Contact",
                         color = LightOnSurface,
                         style = MaterialTheme.typography.bodyMedium
                     )
                 },
                 leadingIcon = {
                     Icon(
-                        imageVector = if (thread.locked) Icons.Default.LockOpen else Icons.Default.Lock,
+                        imageVector = Icons.Default.Person,
                         contentDescription = null,
                         tint = LightOnSurface,
                         modifier = Modifier.size(18.dp)
@@ -684,9 +696,9 @@ private fun ChatListRow(
                 },
                 onClick = {
                     menuExpanded = false
-                    onToggleLock()
+                    onViewContact()
                 },
-                modifier = Modifier.testTag("popup_lock_chat_${thread.id}")
+                modifier = Modifier.testTag("popup_view_contact_${thread.id}")
             )
             DropdownMenuItem(
                 text = {

@@ -196,6 +196,10 @@
           "type": "boolean",
           "description": "Whether this conversation is pinned."
         },
+        "customRenamed": {
+          "type": "boolean",
+          "description": "Whether the owner assigned a custom display name to this chat."
+        },
         "accountStatus": {
           "type": "string",
           "enum": ["active", "banned"],
