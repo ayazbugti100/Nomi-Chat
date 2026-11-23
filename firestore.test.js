@@ -172,11 +172,20 @@ test("Directory reporting prevents duplicates, blocks forged bans, and auto-bans
     })
   );
 
+  // Owner can update displayName and online presence without altering moderation fields
+  await assertSucceeds(
+    bobDb.collection("directory").doc("target_user").update({
+      online: true,
+      updatedAt: new Date(Date.now() - 2000),
+    })
+  );
+
   // Overwriting an existing directory username by another user must fail
   const charlieDb = testEnv.authenticatedContext("charlie_uid").firestore();
   await assertFails(
     charlieDb.collection("directory").doc("target_user").update({
       displayName: "Hijacked",
+      online: true,
       updatedAt: new Date(Date.now() - 1000),
     })
   );

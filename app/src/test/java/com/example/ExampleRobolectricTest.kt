@@ -5,13 +5,17 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.LocalAuthOutcome
 import com.example.data.local.LocalAuthStore
 import com.example.data.model.ChatThread
+import com.example.data.model.IncomingMessageAlert
 import com.example.data.model.ThemeMode
 import com.example.data.model.UserDirectoryEntry
 import com.example.data.network.NetworkConnectivityObserver
 import com.example.data.repository.NomiChatRepository
+import com.google.firebase.Timestamp
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -231,7 +235,72 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun `mergeThreadWithDirectory updates peer displayName and ban status when owner matches`() {
+  fun `new account starts with empty chat list and no dummy contacts or fake messages`() = runTest {
+    val store = LocalAuthStore(context)
+    val outcome = store.signUpUser("Nomi User", "nomi_clean", "2000-01-01", "pass123", "pass123")
+    assertTrue(outcome is LocalAuthOutcome.Success)
+
+    val initialContacts = store.observeContacts("nomi_clean").first()
+    assertTrue(initialContacts.isEmpty())
+
+    val addRes = store.addContact(
+      usernameKey = "nomi_clean",
+      name = "Friend User",
+      contactUsername = "@friend_user",
+      phone = "",
+      threadType = "chat"
+    )
+    assertTrue(addRes.isSuccess)
+    val contactId = addRes.getOrThrow()
+
+    val contacts = store.observeContacts("nomi_clean").first()
+    assertEquals(1, contacts.size)
+    assertEquals("", contacts.first().lastMessageText)
+    assertFalse(contacts.first().online)
+
+    val initialMsgs = store.observeMessages("nomi_clean", contactId).first()
+    assertTrue(initialMsgs.isEmpty())
+  }
+
+  @Test
+  fun `real presence toggling and incoming alerts work without auto-replies`() = runTest {
+    val store = LocalAuthStore(context)
+    store.signUpUser("Alice User", "alice_u", "2000-01-01", "pass123", "pass123")
+    store.signUpUser("Bob User", "bob_u", "2000-01-01", "pass123", "pass123")
+
+    // Alice goes offline -> Bob adds Alice -> Alice should appear Offline
+    store.setUserPresence("alice_u", false)
+    val addAliceOnBob = store.addContact(
+      usernameKey = "bob_u",
+      name = "Alice User",
+      contactUsername = "alice_u",
+      phone = "",
+      threadType = "chat"
+    ).getOrThrow()
+
+    var aliceThread = store.observeContacts("bob_u").first().first { it.id == addAliceOnBob }
+    assertFalse(aliceThread.online)
+
+    // Alice opens app -> Online updates to true
+    store.setUserPresence("alice_u", true)
+    aliceThread = store.observeContacts("bob_u").first().first { it.id == addAliceOnBob }
+    assertTrue(aliceThread.online)
+
+    // Bob sends "Hi" -> Alice receives incoming alert & 1 message (no auto-reply on Bob's side)
+    val alertDeferred = async { store.incomingAlerts.first() }
+    store.sendMessage("bob_u", addAliceOnBob, "me", "Hi", aiGenerated = false)
+    val alert: IncomingMessageAlert = alertDeferred.await()
+    assertEquals("alice_u", alert.recipientUserId)
+    assertEquals("Hi", alert.text)
+
+    val bobMessages = store.observeMessages("bob_u", addAliceOnBob).first()
+    assertEquals(1, bobMessages.size)
+    assertEquals("me", bobMessages.first().sender)
+  }
+
+  @Test
+  fun `mergeThreadWithDirectory updates peer displayName, ban status, and real online staleness`() {
+    val nowMs = 1_000_000_000L
     val thread = ChatThread(
       id = "c_peer",
       userId = "uid_bob",
@@ -239,26 +308,41 @@ class ExampleRobolectricTest {
       username = "alice",
       peerUid = "uid_alice",
       isRegisteredPeer = true,
+      online = true,
       accountStatus = "active"
     )
-    val dirUpdate = UserDirectoryEntry(
+    // Null directory entry forces offline (no fake online)
+    assertFalse(NomiChatRepository.mergeThreadWithDirectory(thread, null, nowMs).online)
+
+    val freshDirOnline = UserDirectoryEntry(
       id = "alice",
       ownerUid = "uid_alice",
       username = "alice",
       displayName = "Alice Live",
-      accountStatus = "active"
+      online = true,
+      accountStatus = "active",
+      updatedAt = Timestamp((nowMs - 10_000L) / 1000L, 0)
     )
-    val merged = NomiChatRepository.mergeThreadWithDirectory(thread, dirUpdate)
+    val merged = NomiChatRepository.mergeThreadWithDirectory(thread, freshDirOnline, nowMs)
     assertEquals("Alice Live", merged.name)
     assertEquals("active", merged.accountStatus)
+    assertTrue(merged.online)
 
-    val mismatchedDir = dirUpdate.copy(ownerUid = "uid_other", displayName = "Spoofed")
-    val untouched = NomiChatRepository.mergeThreadWithDirectory(thread, mismatchedDir)
+    // Stale heartbeat (>150s old) drops back to Offline
+    val staleDir = freshDirOnline.copy(
+      updatedAt = Timestamp((nowMs - 200_000L) / 1000L, 0)
+    )
+    assertFalse(NomiChatRepository.mergeThreadWithDirectory(thread, staleDir, nowMs).online)
+
+    val mismatchedDir = freshDirOnline.copy(ownerUid = "uid_other", displayName = "Spoofed")
+    val untouched = NomiChatRepository.mergeThreadWithDirectory(thread, mismatchedDir, nowMs)
     assertEquals("Old Alice", untouched.name)
+    assertFalse(untouched.online)
 
-    val bannedDir = dirUpdate.copy(accountStatus = "banned")
-    val bannedMerged = NomiChatRepository.mergeThreadWithDirectory(thread, bannedDir)
+    val bannedDir = freshDirOnline.copy(accountStatus = "banned")
+    val bannedMerged = NomiChatRepository.mergeThreadWithDirectory(thread, bannedDir, nowMs)
     assertEquals("banned", bannedMerged.accountStatus)
+    assertFalse(bannedMerged.online)
   }
 
   @Test

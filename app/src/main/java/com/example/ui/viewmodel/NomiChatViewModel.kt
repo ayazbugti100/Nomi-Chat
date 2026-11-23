@@ -13,6 +13,7 @@ import com.example.data.model.ChatMessage
 import com.example.data.model.ChatPillFilter
 import com.example.data.model.ChatThread
 import com.example.data.model.DirectoryLookupResult
+import com.example.data.model.IncomingMessageAlert
 import com.example.data.model.ThemeMode
 import com.example.data.model.UiState
 import com.example.data.model.UserProfile
@@ -30,9 +31,13 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
@@ -41,6 +46,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
@@ -75,6 +81,11 @@ class NomiChatViewModel(
         )
 
     private var incomingSyncJob: Job? = null
+    private var presenceHeartbeatJob: Job? = null
+    private var isAppInForeground: Boolean = false
+
+    private val _incomingNotificationEvents = MutableSharedFlow<IncomingMessageAlert>(extraBufferCapacity = 24)
+    val incomingNotificationEvents: Flow<IncomingMessageAlert> = _incomingNotificationEvents.asSharedFlow()
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
@@ -256,6 +267,7 @@ class NomiChatViewModel(
         ensureInitialSetup()
         observeAutoSmartSuggestions()
         startIncomingSyncLoop()
+        observeIncomingMessageAlerts()
         observeNetworkRecovery()
     }
 
@@ -264,6 +276,43 @@ class NomiChatViewModel(
         incomingSyncJob = viewModelScope.launch {
             repository.startIncomingSync(currentUserId) { _activeContactId.value }
         }
+    }
+
+    private fun observeIncomingMessageAlerts() {
+        viewModelScope.launch {
+            repository.incomingAlerts.collect { alert ->
+                val matchesUser = alert.recipientUserId.isEmpty() || alert.recipientUserId == currentUserId
+                if (!matchesUser) return@collect
+                if (!preferences.value.notificationsEnabled) return@collect
+                val viewingSameThreadInForeground = isAppInForeground && _activeContactId.value == alert.contactId
+                if (!viewingSameThreadInForeground) {
+                    _incomingNotificationEvents.tryEmit(alert)
+                }
+            }
+        }
+    }
+
+    fun setAppForeground(inForeground: Boolean) {
+        isAppInForeground = inForeground
+        presenceHeartbeatJob?.cancel()
+        if (inForeground) {
+            presenceHeartbeatJob = viewModelScope.launch {
+                repository.setUserPresence(currentUserId, true)
+                while (isActive) {
+                    delay(PRESENCE_HEARTBEAT_MS)
+                    repository.setUserPresence(currentUserId, true)
+                }
+            }
+        } else {
+            viewModelScope.launch {
+                repository.setUserPresence(currentUserId, false)
+            }
+        }
+    }
+
+    suspend fun setOfflineBeforeLogout() {
+        presenceHeartbeatJob?.cancel()
+        repository.setUserPresence(currentUserId, false)
     }
 
     private fun observeNetworkRecovery() {
@@ -317,7 +366,9 @@ class NomiChatViewModel(
                 pendingPassword = pendingPassword
             ).onSuccess { outcome ->
                 when (outcome) {
-                    is UserSetupOutcome.Allowed -> Unit
+                    is UserSetupOutcome.Allowed -> {
+                        preferencesRepository.clearPendingSignInFlow()
+                    }
                     is UserSetupOutcome.Banned -> {
                         _isBannedAccount.value = true
                         _popupMessage.value = "Your account is banned."
@@ -469,49 +520,7 @@ class NomiChatViewModel(
             )
             result.onFailure { err ->
                 _snackbarMessage.value = err.localizedMessage ?: "Failed to send message."
-                return@launch
             }
-
-            if (preferences.value.smartAiEnabled && !contact.isRegisteredPeer) {
-                triggerAiContactReply(contact, trimmed)
-            }
-        }
-    }
-
-    private suspend fun triggerAiContactReply(contact: ChatThread, userMessage: String) {
-        _isContactTyping.value = true
-        repository.setContactTyping(currentUserId, contact.id, true)
-
-        val history = (activeMessagesState.value as? UiState.Success)?.data.orEmpty()
-        val myName = (profileState.value as? UiState.Success)?.data?.displayName ?: "Friend"
-
-        val replyResult = smartReplyRepository.generateContactReply(
-            userName = myName,
-            contactName = contact.name,
-            isGroup = contact.threadType == "group",
-            recentMessages = history,
-            latestUserMessage = userMessage
-        )
-
-        _isContactTyping.value = false
-        repository.setContactTyping(currentUserId, contact.id, false)
-
-        replyResult.onSuccess { replyText ->
-            if (contact.id.isNotBlank()) {
-                val isChatStillOpen = _activeContactId.value == contact.id
-                repository.sendMessage(
-                    userId = currentUserId,
-                    contactId = contact.id,
-                    sender = "them",
-                    text = replyText,
-                    aiGenerated = true,
-                    incrementUnreadIfThem = !isChatStillOpen
-                ).onFailure { err ->
-                    _snackbarMessage.value = err.localizedMessage ?: "Failed to save AI reply."
-                }
-            }
-        }.onFailure { err ->
-            _snackbarMessage.value = "Smart AI unavailable: ${err.localizedMessage ?: "Check connection"}"
         }
     }
 
@@ -730,5 +739,6 @@ class NomiChatViewModel(
     private companion object {
         const val TAG = "NomiChatVM"
         const val STOP_TIMEOUT_MILLIS = 5000L
+        const val PRESENCE_HEARTBEAT_MS = 60_000L
     }
 }

@@ -1,8 +1,10 @@
 package com.example.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -42,6 +44,8 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.WifiOff
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -429,6 +433,7 @@ private fun FilterPillChip(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ChatListRow(
     thread: ChatThread,
@@ -447,7 +452,11 @@ private fun ChatListRow(
                 .fillMaxWidth()
                 .alpha(if (thread.blocked) 0.65f else 1f)
                 .clip(RoundedCornerShape(16.dp))
-                .clickable { menuExpanded = true }
+                .combinedClickable(
+                    onClick = onOpenChat,
+                    onLongClick = { menuExpanded = true },
+                    onDoubleClick = { menuExpanded = true }
+                )
                 .padding(horizontal = 10.dp, vertical = 10.dp)
                 .testTag("chat_item_${thread.id}"),
             verticalAlignment = Alignment.CenterVertically,
@@ -583,10 +592,11 @@ private fun ChatListRow(
                                         modifier = Modifier.size(16.dp)
                                     )
                                 }
+                                val messageBody = thread.lastMessageText.ifBlank { "Tap to start chatting" }
                                 val previewText = if (thread.username.isNotBlank()) {
-                                    "@${thread.username} • ${thread.lastMessageText}"
+                                    "@${thread.username} • $messageBody"
                                 } else {
-                                    thread.lastMessageText
+                                    messageBody
                                 }
                                 Text(
                                     text = previewText,
@@ -741,11 +751,21 @@ private fun StatusOverviewList(
     ) {
         item {
             Text(
-                text = "Active Friends Now",
+                text = "Online Contacts",
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.padding(vertical = 4.dp)
             )
+        }
+        if (activeStatuses.isEmpty()) {
+            item {
+                Text(
+                    text = "No contacts are currently online.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 8.dp)
+                )
+            }
         }
         items(activeStatuses, key = { it.id }) { thread ->
             Row(
@@ -859,7 +879,8 @@ private fun EmptyChatsState(onAddContactClick: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(32.dp),
+            .padding(32.dp)
+            .testTag("empty_chats_state"),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
@@ -871,15 +892,24 @@ private fun EmptyChatsState(onAddContactClick: () -> Unit) {
         )
         Spacer(modifier = Modifier.height(12.dp))
         Text(
-            text = "No matching conversations",
+            text = "No chats yet",
             style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.onSurface
         )
         Spacer(modifier = Modifier.height(6.dp))
         Text(
-            text = "Tap the + button to add a contact by phone or username.",
+            text = "Add a contact by @username to start messaging.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+        Spacer(modifier = Modifier.height(16.dp))
+        Button(
+            onClick = onAddContactClick,
+            colors = ButtonDefaults.buttonColors(containerColor = EmeraldDark),
+            shape = RoundedCornerShape(22.dp),
+            modifier = Modifier.testTag("empty_add_contact_button")
+        ) {
+            Text(text = "Add by @username", color = Color.White, fontWeight = FontWeight.SemiBold)
+        }
     }
 }

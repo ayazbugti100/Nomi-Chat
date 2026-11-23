@@ -1,9 +1,15 @@
 package com.example
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,6 +22,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -27,8 +34,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.credentials.CredentialManager
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
@@ -47,6 +58,7 @@ import com.example.data.preferences.UserAppPreferences
 import com.example.data.preferences.UserPreferencesRepository
 import com.example.data.repository.NomiChatRepository
 import com.example.firebase.configureAppCheck
+import com.example.notifications.MessageNotificationHelper
 import com.example.ui.auth.AuthScreen
 import com.example.ui.auth.authStateFlow
 import com.example.ui.auth.onGoogleSignInClicked
@@ -73,11 +85,15 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+    private var notificationContactIdState by mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // STEP 1: Configure App Check with launch intent before any UI or Firebase operations
+        // STEP 1: Configure App Check & Notification Channel before UI operations
         configureAppCheck(this, intent)
+        MessageNotificationHelper.ensureChannel(applicationContext)
+        notificationContactIdState = intent?.getStringExtra(MessageNotificationHelper.EXTRA_CONTACT_ID)
 
         // STEP 2: Enable Edge-to-Edge and launch Compose UI
         enableEdgeToEdge()
@@ -89,8 +105,22 @@ class MainActivity : ComponentActivity() {
             )
 
             NomiChatTheme(themeMode = prefs.themeMode) {
-                AppNavigation(preferencesRepository = prefsRepo, themeMode = prefs.themeMode)
+                AppNavigation(
+                    preferencesRepository = prefsRepo,
+                    themeMode = prefs.themeMode,
+                    pendingNotificationContactId = notificationContactIdState,
+                    onConsumedNotificationContactId = { notificationContactIdState = null }
+                )
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val contactId = intent.getStringExtra(MessageNotificationHelper.EXTRA_CONTACT_ID)
+        if (!contactId.isNullOrBlank()) {
+            notificationContactIdState = contactId
         }
     }
 }
@@ -110,7 +140,9 @@ private enum class ActiveModal {
 @Composable
 fun AppNavigation(
     preferencesRepository: UserPreferencesRepository,
-    themeMode: ThemeMode
+    themeMode: ThemeMode,
+    pendingNotificationContactId: String? = null,
+    onConsumedNotificationContactId: () -> Unit = {}
 ) {
     val appContext = LocalContext.current.applicationContext
     val localAuthStore = remember(appContext) { LocalAuthStore(appContext) }
@@ -152,7 +184,7 @@ fun AppNavigation(
             lastValidatedKey = ""
             return@LaunchedEffect
         }
-        if (lastValidatedKey == activeUsernameRaw && validatedLocalUser != null) {
+        if (lastValidatedKey == activeUsernameRaw && !validatedLocalUser.isNullOrEmpty()) {
             return@LaunchedEffect
         }
         when (val outcome = localAuthStore.validateActiveSession(activeUsernameRaw)) {
@@ -226,6 +258,8 @@ fun AppNavigation(
                         preferencesRepository = preferencesRepository,
                         currentThemeMode = themeMode,
                         bottomTab = bottomTab,
+                        pendingNotificationContactId = pendingNotificationContactId,
+                        onConsumedNotificationContactId = onConsumedNotificationContactId,
                         onSelectBottomTab = { bottomTab = it },
                         onResetToAuth = { bottomTab = MainBottomTab.CHATS },
                         onShowGlobalPopup = { message -> globalPopupMessage = message },
@@ -256,6 +290,8 @@ fun AppNavigation(
                         preferencesRepository = preferencesRepository,
                         currentThemeMode = themeMode,
                         bottomTab = bottomTab,
+                        pendingNotificationContactId = pendingNotificationContactId,
+                        onConsumedNotificationContactId = onConsumedNotificationContactId,
                         onSelectBottomTab = { bottomTab = it },
                         onResetToAuth = { bottomTab = MainBottomTab.CHATS },
                         onShowGlobalPopup = { message -> globalPopupMessage = message },
@@ -289,9 +325,10 @@ fun AppNavigation(
                                 appLockPinHash = saved.appLockPinHash
                             )
                         }
+                        preferencesRepository.clearPendingSignInFlow()
+                        preferencesRepository.saveActiveUsername(loggedInUsername)
                         validatedLocalUser = loggedInUsername
                         lastValidatedKey = loggedInUsername
-                        preferencesRepository.saveActiveUsername(loggedInUsername)
                     },
                     onAuthSuccess = {
                         globalAuthError = null
@@ -315,6 +352,8 @@ private fun NomiChatMainShell(
     preferencesRepository: UserPreferencesRepository,
     currentThemeMode: ThemeMode,
     bottomTab: MainBottomTab,
+    pendingNotificationContactId: String? = null,
+    onConsumedNotificationContactId: () -> Unit = {},
     onSelectBottomTab: (MainBottomTab) -> Unit,
     onResetToAuth: () -> Unit,
     onShowGlobalPopup: (String) -> Unit,
@@ -323,6 +362,61 @@ private fun NomiChatMainShell(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val credentialManager = remember(context) { CredentialManager.create(context) }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ -> }
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, viewModel) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> viewModel.setAppForeground(true)
+                Lifecycle.Event.ON_STOP -> viewModel.setAppForeground(false)
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            viewModel.setAppForeground(true)
+        }
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            viewModel.setAppForeground(false)
+        }
+    }
+
+    LaunchedEffect(viewModel) {
+        viewModel.incomingNotificationEvents.collect { alert ->
+            MessageNotificationHelper.showIncomingMessageNotification(
+                context = context.applicationContext,
+                contactId = alert.contactId,
+                senderName = alert.senderName,
+                senderHandle = alert.senderHandle,
+                messageText = alert.text
+            )
+        }
+    }
+
+    LaunchedEffect(pendingNotificationContactId) {
+        val targetId = pendingNotificationContactId
+        if (!targetId.isNullOrBlank()) {
+            viewModel.openConversation(targetId)
+            onConsumedNotificationContactId()
+        }
+    }
 
     val profileState by viewModel.profileState.collectAsStateWithLifecycle()
     val contactsState by viewModel.filteredContactsState.collectAsStateWithLifecycle()
@@ -450,6 +544,7 @@ private fun NomiChatMainShell(
                         onDismissSuggestions = viewModel::dismissQuickSuggestions,
                         onSendMessage = viewModel::sendMessage,
                         onReportContact = viewModel::reportActiveContact,
+                        onToggleBlockContact = { viewModel.toggleBlockChat(currentThread) },
                         onBack = viewModel::closeConversation
                     )
                 } else if (bottomTab == MainBottomTab.SETTINGS) {
@@ -473,7 +568,9 @@ private fun NomiChatMainShell(
                         onOpenAddContact = { activeModal = ActiveModal.ADD_CONTACT },
                         onLogoutClick = {
                             scope.launch {
+                                viewModel.setOfflineBeforeLogout()
                                 onResetToAuth()
+                                preferencesRepository.clearPendingSignInFlow()
                                 preferencesRepository.saveActiveUsername("")
                                 if (Firebase.auth.currentUser != null) {
                                     signOutUser(

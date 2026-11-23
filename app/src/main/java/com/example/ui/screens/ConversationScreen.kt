@@ -106,6 +106,7 @@ fun ConversationScreen(
     onDismissSuggestions: () -> Unit,
     onSendMessage: (String) -> Unit,
     onReportContact: () -> Unit,
+    onToggleBlockContact: () -> Unit = {},
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -113,6 +114,7 @@ fun ConversationScreen(
 
     var messageText by remember { mutableStateOf("") }
     var showReportDialog by remember { mutableStateOf(false) }
+    var showProfileDialog by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
     val isContactBanned = contact.accountStatus == "banned"
@@ -154,84 +156,94 @@ fun ConversationScreen(
                     )
                 }
 
-                AvatarCircle(
-                    name = contact.name,
-                    isGroup = contact.threadType == "group",
-                    showOnlineDot = contact.online && !isContactBanned,
-                    size = 40.dp
-                )
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { showProfileDialog = true }
+                        .padding(horizontal = 4.dp, vertical = 4.dp)
+                        .testTag("contact_profile_header"),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    AvatarCircle(
+                        name = contact.name,
+                        isGroup = contact.threadType == "group",
+                        showOnlineDot = contact.online && !isContactBanned && !isContactBlocked,
+                        size = 40.dp
+                    )
 
-                Spacer(modifier = Modifier.width(10.dp))
+                    Spacer(modifier = Modifier.width(10.dp))
 
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text(
-                            text = contact.name,
-                            style = MaterialTheme.typography.titleMedium,
-                            color = Color.White,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false)
-                        )
-                        if (isContactBanned) {
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = ErrorRed
-                            ) {
-                                Text(
-                                    text = stringResource(R.string.banned_account_badge),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = contact.name,
+                                style = MaterialTheme.typography.titleMedium,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                            if (isContactBanned) {
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = ErrorRed
+                                ) {
+                                    Text(
+                                        text = stringResource(R.string.banned_account_badge),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color.White,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
                             }
                         }
-                    }
 
-                    Spacer(modifier = Modifier.height(2.dp))
+                        Spacer(modifier = Modifier.height(2.dp))
 
-                    if (otherPartyTyping) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(5.dp),
-                            modifier = Modifier.testTag("header_typing_indicator")
-                        ) {
-                            TypingPulseDots(dotColor = MintOnlineGlow, dotSize = 5.dp)
-                            Text(
-                                text = stringResource(R.string.status_typing),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MintOnlineGlow,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    } else {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            modifier = Modifier.testTag("e2e_header_badge")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Lock,
-                                contentDescription = stringResource(R.string.e2e_badge),
-                                tint = MintOnlineGlow,
-                                modifier = Modifier.size(11.dp)
-                            )
-                            Text(
-                                text = when {
-                                    isContactBanned -> "Account banned"
-                                    isContactBlocked -> "Blocked user"
-                                    contact.online -> "Online • E2E Encrypted"
-                                    else -> "Last seen ${contact.lastMessageTimeLabel} • E2E"
-                                },
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MintOnlineGlow,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
+                        if (otherPartyTyping) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                modifier = Modifier.testTag("header_typing_indicator")
+                            ) {
+                                TypingPulseDots(dotColor = MintOnlineGlow, dotSize = 5.dp)
+                                Text(
+                                    text = stringResource(R.string.status_typing),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MintOnlineGlow,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        } else {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                modifier = Modifier.testTag("e2e_header_badge")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Lock,
+                                    contentDescription = stringResource(R.string.e2e_badge),
+                                    tint = MintOnlineGlow,
+                                    modifier = Modifier.size(11.dp)
+                                )
+                                Text(
+                                    text = when {
+                                        isContactBanned -> "Account banned"
+                                        isContactBlocked -> "Blocked user"
+                                        contact.online -> "Online • E2E Encrypted"
+                                        else -> "Offline • E2E Encrypted"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MintOnlineGlow,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         }
                     }
                 }
@@ -468,6 +480,21 @@ fun ConversationScreen(
         }
     }
 
+    if (showProfileDialog) {
+        ContactProfileDialog(
+            contact = contact,
+            onDismiss = { showProfileDialog = false },
+            onToggleBlock = {
+                showProfileDialog = false
+                onToggleBlockContact()
+            },
+            onReportClick = {
+                showProfileDialog = false
+                showReportDialog = true
+            }
+        )
+    }
+
     if (showReportDialog) {
         ReportAccountDialog(
             contact = contact,
@@ -478,6 +505,133 @@ fun ConversationScreen(
             }
         )
     }
+}
+
+@Composable
+private fun ContactProfileDialog(
+    contact: ChatThread,
+    onDismiss: () -> Unit,
+    onToggleBlock: () -> Unit,
+    onReportClick: () -> Unit
+) {
+    val statusText = when {
+        contact.accountStatus == "banned" -> "Banned"
+        contact.blocked -> "Blocked"
+        contact.online -> "Online"
+        else -> "Offline"
+    }
+    val statusBg = when {
+        contact.accountStatus == "banned" || contact.blocked -> ErrorContainerLight
+        contact.online -> MintLight
+        else -> MaterialTheme.colorScheme.surfaceVariant
+    }
+    val statusFg = when {
+        contact.accountStatus == "banned" || contact.blocked -> ErrorRed
+        contact.online -> EmeraldDark
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                AvatarCircle(
+                    name = contact.name,
+                    isGroup = contact.threadType == "group",
+                    showOnlineDot = contact.online && !contact.blocked && contact.accountStatus != "banned",
+                    size = 64.dp
+                )
+                Text(
+                    text = contact.name,
+                    style = MaterialTheme.typography.titleLarge,
+                    textAlign = TextAlign.Center
+                )
+                if (contact.username.isNotBlank()) {
+                    Text(
+                        text = "@${contact.username}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = statusBg,
+                    modifier = Modifier.testTag("contact_profile_status_badge")
+                ) {
+                    Text(
+                        text = statusText,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = statusFg,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                    )
+                }
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MintLight.copy(alpha = 0.7f)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = null,
+                            tint = EmeraldDark,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "Messages are end-to-end encrypted.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = EmeraldDeep
+                        )
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    TextButton(
+                        onClick = onToggleBlock,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            text = if (contact.blocked) "Unblock" else "Block",
+                            color = ErrorRed
+                        )
+                    }
+                    TextButton(
+                        onClick = onReportClick,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            text = stringResource(R.string.report_user),
+                            color = ErrorRed
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onDismiss,
+                colors = ButtonDefaults.buttonColors(containerColor = EmeraldDark)
+            ) {
+                Text("Close", color = Color.White)
+            }
+        }
+    )
 }
 
 @Composable

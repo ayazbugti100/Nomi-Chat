@@ -5,6 +5,7 @@ import com.example.data.model.BAN_REPORT_LIMIT
 import com.example.data.model.ChatMessage
 import com.example.data.model.ChatThread
 import com.example.data.model.DirectoryLookupResult
+import com.example.data.model.IncomingMessageAlert
 import com.example.data.model.ReportOutcome
 import com.example.data.model.ThemeMode
 import com.example.data.model.UserProfile
@@ -14,7 +15,9 @@ import com.example.data.security.PasswordHasher
 import com.google.firebase.Timestamp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -44,6 +47,8 @@ class LocalAuthStore(context: Context) {
     private val file = File(context.applicationContext.filesDir, "nomi_auth_users.json")
     private val mutex = Mutex()
     private val changeTick = MutableStateFlow(0L)
+    private val _incomingAlerts = MutableSharedFlow<IncomingMessageAlert>(extraBufferCapacity = 24)
+    val incomingAlerts: Flow<IncomingMessageAlert> = _incomingAlerts.asSharedFlow()
 
     private fun readRootUnlocked(): JSONObject {
         if (!file.exists()) return JSONObject()
@@ -97,6 +102,7 @@ class LocalAuthStore(context: Context) {
                 put("dob", birthDate)
                 put("provider", "username")
                 put("photoData", JSONObject.NULL)
+                put("online", true)
                 put("passwordSalt", salt)
                 put("passwordHash", hash)
                 put("accountStatus", "active")
@@ -112,8 +118,8 @@ class LocalAuthStore(context: Context) {
                         put("appLockPinHash", "")
                     }
                 )
-                put("contacts", buildStarterContactsJson(user, nowSec))
-                put("messages", buildStarterMessagesJson(user, nowSec))
+                put("contacts", JSONArray())
+                put("messages", JSONObject())
                 put("deletedIds", JSONArray())
             }
 
@@ -231,6 +237,19 @@ class LocalAuthStore(context: Context) {
         }
     }
 
+    suspend fun setUserPresence(usernameKey: String, online: Boolean) = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val root = readRootUnlocked()
+            val accountKey = findAccountKeyByUsernameUnlocked(root, usernameKey) ?: return@withLock
+            val account = root.optJSONObject(accountKey) ?: return@withLock
+            if (account.optBoolean("online", false) == online) return@withLock
+            account.put("online", online)
+            account.put("updatedAtSec", System.currentTimeMillis() / 1000L)
+            root.put(accountKey, account)
+            writeRootUnlocked(root)
+        }
+    }
+
     fun observeContacts(username: String): Flow<List<ChatThread>> = changeTick.map {
         withContext(Dispatchers.IO) {
             mutex.withLock {
@@ -247,7 +266,16 @@ class LocalAuthStore(context: Context) {
                     val obj = arr.optJSONObject(i) ?: continue
                     val id = obj.optString("id", "")
                     if (id.isNotBlank() && !deletedSet.contains(id)) {
-                        list.add(jsonToChatThread(obj))
+                        val thread = jsonToChatThread(obj)
+                        val peerKey = thread.peerUid.ifBlank { thread.username }
+                        val peerAccount = findAccountKeyByUsernameUnlocked(root, peerKey)?.let { root.optJSONObject(it) }
+                        val realOnline = if (thread.threadType == "chat" && peerAccount != null) {
+                            peerAccount.optString("accountStatus", "active") != "banned" &&
+                                peerAccount.optBoolean("online", false)
+                        } else {
+                            false
+                        }
+                        list.add(thread.copy(online = realOnline))
                     }
                 }
                 list.sortedByDescending { it.updatedAt?.seconds ?: 0L }
@@ -429,19 +457,19 @@ class LocalAuthStore(context: Context) {
                 require(cleanName.isNotEmpty()) { "Contact name or username cannot be empty." }
                 val cleanPhone = phone.trim().ifBlank { "@$cleanHandle" }.take(30)
                 val validType = if (threadType == "group") "group" else "chat"
-                val nowLabel = currentFormattedTime()
                 val nowSec = System.currentTimeMillis() / 1000L
                 val contactId = "c_${UUID.randomUUID().toString().take(8)}"
-                val greeting = "New chat started with @$cleanHandle"
 
                 val registeredPeerKey = if (validType == "chat") {
                     findAccountKeyByUsernameUnlocked(root, cleanHandle)?.takeIf { it != usernameKey }
                 } else null
                 val resolvedPeerUid = peerUid.ifBlank { registeredPeerKey.orEmpty() }
                 val resolvedIsPeer = isRegisteredPeer || registeredPeerKey != null
-                val registeredPeerDisplayName = registeredPeerKey?.let {
-                    root.optJSONObject(it)?.optString("displayName")?.takeIf { n -> n.isNotBlank() }
-                }
+                val peerAccountObj = registeredPeerKey?.let { root.optJSONObject(it) }
+                val registeredPeerDisplayName = peerAccountObj?.optString("displayName")?.takeIf { n -> n.isNotBlank() }
+                val peerOnline = peerAccountObj != null &&
+                    peerAccountObj.optString("accountStatus", "active") != "banned" &&
+                    peerAccountObj.optBoolean("online", false)
                 val finalName = name.trim()
                     .ifBlank { registeredPeerDisplayName.orEmpty() }
                     .ifBlank { derivedName }
@@ -456,6 +484,7 @@ class LocalAuthStore(context: Context) {
                         existingObj.put("name", finalName)
                         existingObj.put("peerUid", resolvedPeerUid)
                         existingObj.put("isRegisteredPeer", resolvedIsPeer)
+                        existingObj.put("online", peerOnline)
                         existingObj.put("updatedAtSec", nowSec)
                         root.put(usernameKey, account)
                         writeRootUnlocked(root)
@@ -472,12 +501,12 @@ class LocalAuthStore(context: Context) {
                         put("username", cleanHandle)
                         put("phone", cleanPhone)
                         put("threadType", validType)
-                        put("online", true)
+                        put("online", peerOnline)
                         put("typing", false)
                         put("unreadCount", 0L)
-                        put("lastMessageText", greeting)
+                        put("lastMessageText", "")
                         put("lastMessageFromMe", false)
-                        put("lastMessageTimeLabel", nowLabel)
+                        put("lastMessageTimeLabel", "")
                         put("pinned", false)
                         put("locked", false)
                         put("blocked", false)
@@ -496,21 +525,7 @@ class LocalAuthStore(context: Context) {
                 account.put("contacts", updatedContacts)
 
                 val messagesObj = account.optJSONObject("messages") ?: JSONObject()
-                val msgArr = JSONArray().apply {
-                    put(
-                        JSONObject().apply {
-                            put("id", "m_${UUID.randomUUID().toString().take(8)}")
-                            put("userId", usernameKey)
-                            put("contactId", contactId)
-                            put("sender", "them")
-                            put("text", "Hi! I'm $finalName, connected on Nomi Chat!")
-                            put("timeLabel", nowLabel)
-                            put("aiGenerated", false)
-                            put("createdAtSec", nowSec)
-                        }
-                    )
-                }
-                messagesObj.put(contactId, msgArr)
+                messagesObj.put(contactId, JSONArray())
                 account.put("messages", messagesObj)
 
                 root.put(usernameKey, account)
@@ -596,7 +611,6 @@ class LocalAuthStore(context: Context) {
                         obj.put("lastMessageFromMe", validSender == "me")
                         obj.put("lastMessageTimeLabel", timeLabel)
                         obj.put("unreadCount", nextUnread)
-                        obj.put("online", true)
                         obj.put("typing", false)
                         obj.put("updatedAtSec", nowSec)
                         targetPeerHandle = obj.optString("username", "")
@@ -669,7 +683,7 @@ class LocalAuthStore(context: Context) {
                 put("username", senderHandle)
                 put("phone", "@$senderHandle")
                 put("threadType", "chat")
-                put("online", true)
+                put("online", false)
                 put("typing", false)
                 put("unreadCount", 1L)
                 put("lastMessageText", text.take(1000))
@@ -730,6 +744,15 @@ class LocalAuthStore(context: Context) {
         )
         peerMessagesObj.put(peerContactId, peerMsgArr)
         peerAccount.put("messages", peerMessagesObj)
+        _incomingAlerts.tryEmit(
+            IncomingMessageAlert(
+                contactId = peerContactId,
+                senderName = senderDisplayName,
+                senderHandle = senderHandle,
+                text = text,
+                recipientUserId = peerKey
+            )
+        )
     }
 
     suspend fun markThreadRead(usernameKey: String, contactId: String): Result<Unit> = withContext(Dispatchers.IO) {
@@ -918,7 +941,7 @@ class LocalAuthStore(context: Context) {
             dob = obj.optString("dob", "2000-01-01"),
             provider = obj.optString("provider", "username"),
             photoData = rawPhoto,
-            online = true,
+            online = obj.optBoolean("online", false),
             verified = true,
             premiumUnlocked = true,
             accountStatus = obj.optString("accountStatus", "active"),
@@ -938,7 +961,7 @@ class LocalAuthStore(context: Context) {
             username = obj.optString("username", ""),
             phone = obj.optString("phone", ""),
             threadType = obj.optString("threadType", "chat"),
-            online = obj.optBoolean("online", true),
+            online = obj.optBoolean("online", false),
             typing = obj.optBoolean("typing", false),
             unreadCount = obj.optLong("unreadCount", 0L),
             lastMessageText = obj.optString("lastMessageText", ""),
@@ -970,92 +993,18 @@ class LocalAuthStore(context: Context) {
         )
     }
 
-    private fun buildStarterContactsJson(userId: String, nowSec: Long): JSONArray {
-        val starters = starterList()
-        return JSONArray().apply {
-            starters.forEachIndexed { idx, s ->
-                put(
-                    JSONObject().apply {
-                        put("id", s.id)
-                        put("userId", userId)
-                        put("name", s.name)
-                        put("username", s.username)
-                        put("phone", s.phone)
-                        put("threadType", s.type)
-                        put("online", s.online)
-                        put("typing", false)
-                        put("unreadCount", s.unread)
-                        put("lastMessageText", s.message)
-                        put("lastMessageFromMe", false)
-                        put("lastMessageTimeLabel", s.time)
-                        put("pinned", s.pinned)
-                        put("locked", false)
-                        put("blocked", false)
-                        put("accountStatus", "active")
-                        put("reportCount", 0L)
-                        put("reportedBy", JSONArray())
-                        put("createdAtSec", nowSec - idx)
-                        put("updatedAtSec", nowSec - idx)
-                    }
-                )
-            }
-        }
-    }
-
-    private fun buildStarterMessagesJson(userId: String, nowSec: Long): JSONObject {
-        val obj = JSONObject()
-        starterList().forEachIndexed { idx, s ->
-            obj.put(
-                s.id,
-                JSONArray().apply {
-                    put(
-                        JSONObject().apply {
-                            put("id", "m_init_${s.id}")
-                            put("userId", userId)
-                            put("contactId", s.id)
-                            put("sender", "them")
-                            put("text", s.message)
-                            put("timeLabel", s.time)
-                            put("aiGenerated", false)
-                            put("createdAtSec", nowSec - idx)
-                        }
-                    )
-                }
-            )
-        }
-        return obj
-    }
-
     private fun currentFormattedTime(): String {
         return SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date())
     }
-
-    private data class StarterItem(
-        val id: String,
-        val name: String,
-        val username: String,
-        val phone: String,
-        val type: String,
-        val online: Boolean,
-        val unread: Long,
-        val message: String,
-        val time: String,
-        val pinned: Boolean
-    )
-
-    private fun starterList() = listOf(
-        StarterItem("c_alex", "Alex Morgan", "alexmorgan", "+1 555 234 5678", "chat", true, 1L, "Hi! How are you?", "9:41 PM", true),
-        StarterItem("c_friends", "Friends Group", "friends_grp", "Group", "group", true, 12L, "Best video ever! 🎬", "8:52 PM", false),
-        StarterItem("c_sara", "Sara Khan", "sarakhan", "+92 321 9876543", "chat", true, 1L, "Okay 👍", "7:30 PM", false),
-        StarterItem("c_family", "Family Group", "family_grp", "Group", "group", false, 3L, "Dinner ready!", "6:20 PM", false),
-        StarterItem("c_rizwan", "Rizwan Ali", "rizwan_ali", "+92 333 5554433", "chat", false, 0L, "Call me later", "5:15 PM", false),
-        StarterItem("c_besties", "Best Friends", "best_friends", "Group", "group", true, 0L, "See you soon ❤️", "4:40 PM", false),
-        StarterItem("c_news", "News Channel", "nomi_news", "Channel", "group", true, 0L, "Big update today!", "3:25 PM", false)
-    )
 }
 
 class LocalNomiRepository(private val store: LocalAuthStore) : NomiDataSource {
     override val requiresInitialCloudSetup: Boolean = false
+    override val incomingAlerts: Flow<IncomingMessageAlert> = store.incomingAlerts
+
+    override suspend fun setUserPresence(userId: String, online: Boolean) {
+        store.setUserPresence(userId, online)
+    }
 
     override fun observeUserProfile(userId: String): Flow<UserProfile?> =
         store.observeProfile(userId)

@@ -4,14 +4,17 @@ import com.example.data.model.AuthFlowMode
 import com.example.data.model.ChatMessage
 import com.example.data.model.ChatThread
 import com.example.data.model.DirectoryLookupResult
+import com.example.data.model.IncomingMessageAlert
 import com.example.data.model.ReportOutcome
 import com.example.data.model.ThemeMode
 import com.example.data.model.UserProfile
 import com.example.data.model.UserSetupOutcome
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 
 interface NomiDataSource {
     val requiresInitialCloudSetup: Boolean
+    val incomingAlerts: Flow<IncomingMessageAlert> get() = emptyFlow()
 
     fun observeUserProfile(userId: String): Flow<UserProfile?>
 
@@ -77,6 +80,8 @@ interface NomiDataSource {
     ): Result<Unit>
 
     suspend fun startIncomingSync(userId: String, activeContactIdProvider: () -> String?) {}
+
+    suspend fun setUserPresence(userId: String, online: Boolean) {}
 
     suspend fun onNetworkReconnected() {}
 

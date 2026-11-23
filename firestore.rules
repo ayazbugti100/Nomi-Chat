@@ -43,6 +43,7 @@ service cloud.firestore {
              data.username is string && data.username.size() >= 1 && data.username.size() <= 40 &&
              data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60 &&
              (!('provider' in data) || data.provider in ['google', 'username']) &&
+             (!('online' in data) || data.online is bool) &&
              data.accountStatus in ['active', 'banned'] &&
              data.reportCount is int && data.reportCount >= 0 && data.reportCount <= 50 &&
              data.reportedByUids is list && data.reportedByUids.size() <= 50 &&
@@ -275,7 +276,7 @@ service cloud.firestore {
                          'reportCount', 'reportedByUids', 'createdAt', 'updatedAt'
                        ]) &&
                        incoming().keys().hasOnly([
-                         'ownerUid', 'username', 'displayName', 'provider', 'accountStatus',
+                         'ownerUid', 'username', 'displayName', 'provider', 'online', 'accountStatus',
                          'reportCount', 'reportedByUids', 'createdAt', 'updatedAt'
                        ]) &&
                        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
@@ -293,10 +294,10 @@ service cloud.firestore {
                        incoming().createdAt == existing().createdAt &&
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                        (
-                         // Owner updating display name without altering moderation state
+                         // Owner updating display name or presence without altering moderation state
                          ('ownerUid' in existing() &&
                           existing().ownerUid == request.auth.uid &&
-                          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'updatedAt'])) ||
+                          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'online', 'updatedAt'])) ||
                          // Any signed-in reporter appending their own unique UID once
                          (!(request.auth.uid in existing().reportedByUids) &&
                           request.auth.uid in incoming().reportedByUids &&

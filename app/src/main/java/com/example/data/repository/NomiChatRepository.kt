@@ -7,6 +7,7 @@ import com.example.data.model.BAN_REPORT_LIMIT
 import com.example.data.model.ChatMessage
 import com.example.data.model.ChatThread
 import com.example.data.model.DirectoryLookupResult
+import com.example.data.model.IncomingMessageAlert
 import com.example.data.model.ReportOutcome
 import com.example.data.model.UserDirectoryEntry
 import com.example.data.model.UserProfile
@@ -27,7 +28,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.collectLatest
@@ -54,6 +57,9 @@ class NomiChatRepository(
     )
 
     override val requiresInitialCloudSetup: Boolean = true
+
+    private val _incomingAlerts = MutableSharedFlow<IncomingMessageAlert>(extraBufferCapacity = 24)
+    override val incomingAlerts: Flow<IncomingMessageAlert> = _incomingAlerts.asSharedFlow()
 
     override suspend fun onNetworkReconnected() {
         runCatching { db.enableNetwork().await() }
@@ -295,8 +301,15 @@ class NomiChatRepository(
                         return Result.success(UserSetupOutcome.Allowed)
                     }
                     AuthFlowMode.RETURNING_LOGIN -> {
+                        if (pendingPassword.isEmpty() && returningIdentifier.isBlank()) {
+                            return Result.success(UserSetupOutcome.Allowed)
+                        }
+                        if (pendingPassword.isEmpty()) {
+                            // Session persisted across restart/force-close after previous login
+                            return Result.success(UserSetupOutcome.Allowed)
+                        }
                         val cleanUser = normalizeUsername(returningIdentifier)
-                        if (cleanUser.isEmpty() || pendingPassword.isEmpty()) {
+                        if (cleanUser.isEmpty()) {
                             return Result.success(
                                 UserSetupOutcome.Rejected("Enter both username and password.")
                             )
@@ -343,10 +356,14 @@ class NomiChatRepository(
                         return Result.success(UserSetupOutcome.Allowed)
                     }
                     AuthFlowMode.SIGN_UP -> {
+                        if (pendingPassword.isEmpty()) {
+                            // Session persisted across restart/force-close after previous signup
+                            return Result.success(UserSetupOutcome.Allowed)
+                        }
                         val cleanName = preferredDisplayName.trim().take(60)
                         val cleanUser = normalizeUsername(preferredUsername).take(40)
                         val cleanDob = preferredDob.trim().take(20)
-                        if (cleanName.isBlank() || cleanUser.isBlank() || cleanDob.isBlank() || pendingPassword.isEmpty()) {
+                        if (cleanName.isBlank() || cleanUser.isBlank() || cleanDob.isBlank()) {
                             return Result.success(
                                 UserSetupOutcome.Rejected("Please fill in all fields.")
                             )
@@ -400,6 +417,7 @@ class NomiChatRepository(
                                 "username" to cleanUser,
                                 "displayName" to cleanName,
                                 "provider" to (existingUser.getString("provider") ?: "username"),
+                                "online" to true,
                                 "accountStatus" to "active",
                                 "reportCount" to 0L,
                                 "reportedByUids" to emptyList<String>(),
@@ -447,7 +465,7 @@ class NomiChatRepository(
                 }
                 val restoredName = credSnap.getString("displayName").orEmpty().ifBlank { "Nomi User" }.take(60)
                 val restoredDob = credSnap.getString("dob").orEmpty().ifBlank { "2000-01-01" }.take(20)
-                createFreshUserProfileWithStarters(
+                createFreshUserProfile(
                     uid = uid,
                     userRef = userRef,
                     resolvedName = restoredName,
@@ -539,7 +557,7 @@ class NomiChatRepository(
                 salt to hash
             } else null
 
-            createFreshUserProfileWithStarters(
+            createFreshUserProfile(
                 uid = uid,
                 userRef = userRef,
                 resolvedName = resolvedName,
@@ -559,7 +577,7 @@ class NomiChatRepository(
         }
     }
 
-    private suspend fun createFreshUserProfileWithStarters(
+    private suspend fun createFreshUserProfile(
         uid: String,
         userRef: com.google.firebase.firestore.DocumentReference,
         resolvedName: String,
@@ -613,62 +631,12 @@ class NomiChatRepository(
                     "username" to resolvedUsername,
                     "displayName" to resolvedName,
                     "provider" to resolvedProvider,
+                    "online" to true,
                     "accountStatus" to "active",
                     "reportCount" to 0L,
                     "reportedByUids" to emptyList<String>(),
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
-                )
-            )
-        }
-
-        val starters = listOf(
-            StarterThread("c_alex", "Alex Morgan", "alexmorgan", "+1 555 234 5678", "chat", true, 1L, "Hi! How are you?", "9:41 PM", true),
-            StarterThread("c_friends", "Friends Group", "friends_grp", "Group", "group", true, 12L, "Best video ever! 🎬", "8:52 PM", false),
-            StarterThread("c_sara", "Sara Khan", "sarakhan", "+92 321 9876543", "chat", true, 1L, "Okay 👍", "7:30 PM", false),
-            StarterThread("c_family", "Family Group", "family_grp", "Group", "group", false, 3L, "Dinner ready!", "6:20 PM", false),
-            StarterThread("c_rizwan", "Rizwan Ali", "rizwan_ali", "+92 333 5554433", "chat", false, 0L, "Call me later", "5:15 PM", false),
-            StarterThread("c_besties", "Best Friends", "best_friends", "Group", "group", true, 0L, "See you soon ❤️", "4:40 PM", false),
-            StarterThread("c_news", "News Channel", "nomi_news", "Channel", "group", true, 0L, "Big update today!", "3:25 PM", false)
-        )
-
-        starters.forEach { starter ->
-            val contactRef = userRef.collection("contacts").document(starter.id)
-            batch.set(
-                contactRef,
-                mapOf(
-                    "userId" to uid,
-                    "name" to starter.name,
-                    "username" to starter.username,
-                    "phone" to starter.phone,
-                    "threadType" to starter.type,
-                    "online" to starter.online,
-                    "typing" to false,
-                    "unreadCount" to starter.unread,
-                    "lastMessageText" to starter.message,
-                    "lastMessageFromMe" to false,
-                    "lastMessageTimeLabel" to starter.time,
-                    "pinned" to starter.pinned,
-                    "locked" to false,
-                    "blocked" to false,
-                    "accountStatus" to "active",
-                    "reportCount" to 0L,
-                    "reportedBy" to emptyList<String>(),
-                    "createdAt" to FieldValue.serverTimestamp(),
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            )
-            val msgRef = contactRef.collection("messages").document("m_init_${starter.id}")
-            batch.set(
-                msgRef,
-                mapOf(
-                    "userId" to uid,
-                    "contactId" to starter.id,
-                    "sender" to "them",
-                    "text" to starter.message,
-                    "timeLabel" to starter.time,
-                    "aiGenerated" to false,
-                    "createdAt" to FieldValue.serverTimestamp()
                 )
             )
         }
@@ -741,6 +709,7 @@ class NomiChatRepository(
                             "username" to updatedHandle,
                             "displayName" to updatedName.take(60),
                             "provider" to currentProvider,
+                            "online" to true,
                             "accountStatus" to "active",
                             "reportCount" to 0L,
                             "reportedByUids" to emptyList<String>(),
@@ -752,6 +721,7 @@ class NomiChatRepository(
                     dirRef.update(
                         mapOf(
                             "displayName" to updatedName.take(60),
+                            "online" to true,
                             "updatedAt" to FieldValue.serverTimestamp()
                         )
                     ).await()
@@ -825,14 +795,18 @@ class NomiChatRepository(
             var resolvedPeerUid = peerUid
             var resolvedIsPeer = isRegisteredPeer
             var resolvedDirName = ""
-            if (validType == "chat" && resolvedPeerUid.isBlank() && cleanHandle.length >= 2) {
+            var resolvedOnline = false
+            if (validType == "chat" && cleanHandle.length >= 2) {
                 val dirSnap = runCatching { db.collection("directory").document(cleanHandle).get().await() }.getOrNull()
                 if (dirSnap != null && dirSnap.exists() && dirSnap.getString("accountStatus") != "banned") {
                     val owner = dirSnap.getString("ownerUid").orEmpty()
                     if (owner.isNotBlank() && owner != uid) {
-                        resolvedPeerUid = owner
+                        resolvedPeerUid = resolvedPeerUid.ifBlank { owner }
                         resolvedIsPeer = true
                         resolvedDirName = dirSnap.getString("displayName").orEmpty()
+                        val updatedTs = dirSnap.getTimestamp("updatedAt")?.toDate()?.time
+                        val fresh = updatedTs == null || (System.currentTimeMillis() - updatedTs) <= PRESENCE_STALE_MS
+                        resolvedOnline = (dirSnap.getBoolean("online") == true) && fresh
                     }
                 }
             }
@@ -843,28 +817,43 @@ class NomiChatRepository(
                 .take(60)
             require(finalName.isNotEmpty()) { "Contact name or username cannot be empty." }
 
-            val nowLabel = currentFormattedTime()
-            val greeting = "Hi! I'm $finalName, connected on Nomi Chat!"
+            if (validType == "chat" && cleanHandle.isNotBlank()) {
+                val existingSnap = db.collection("users").document(uid)
+                    .collection("contacts")
+                    .whereEqualTo("username", cleanHandle)
+                    .limit(1)
+                    .get()
+                    .await()
+                val existingDoc = existingSnap.documents.firstOrNull()
+                if (existingDoc != null) {
+                    existingDoc.reference.update(
+                        mapOf(
+                            "name" to finalName,
+                            "peerUid" to resolvedPeerUid,
+                            "isRegisteredPeer" to resolvedIsPeer,
+                            "online" to resolvedOnline,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                    return Result.success(existingDoc.id)
+                }
+            }
 
             val contactRef = db.collection("users").document(uid).collection("contacts").document()
             path = contactRef.path
-            val msgRef = contactRef.collection("messages").document()
-
-            val batch = db.batch()
-            batch.set(
-                contactRef,
+            contactRef.set(
                 mapOf(
                     "userId" to uid,
                     "name" to finalName,
                     "username" to cleanHandle,
                     "phone" to cleanPhone,
                     "threadType" to validType,
-                    "online" to true,
+                    "online" to resolvedOnline,
                     "typing" to false,
                     "unreadCount" to 0L,
-                    "lastMessageText" to greeting,
+                    "lastMessageText" to "",
                     "lastMessageFromMe" to false,
-                    "lastMessageTimeLabel" to nowLabel,
+                    "lastMessageTimeLabel" to "",
                     "pinned" to false,
                     "locked" to false,
                     "blocked" to false,
@@ -876,20 +865,7 @@ class NomiChatRepository(
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            )
-            batch.set(
-                msgRef,
-                mapOf(
-                    "userId" to uid,
-                    "contactId" to contactRef.id,
-                    "sender" to "them",
-                    "text" to greeting,
-                    "timeLabel" to nowLabel,
-                    "aiGenerated" to false,
-                    "createdAt" to FieldValue.serverTimestamp()
-                )
-            )
-            batch.commit().await()
+            ).await()
             Result.success(contactRef.id)
         } catch (e: CancellationException) {
             throw e
@@ -993,7 +969,6 @@ class NomiChatRepository(
                 "lastMessageFromMe" to (validSender == "me"),
                 "lastMessageTimeLabel" to timeLabel,
                 "unreadCount" to unreadUpdate,
-                "online" to true,
                 "typing" to false,
                 "updatedAt" to FieldValue.serverTimestamp()
             )
@@ -1104,10 +1079,13 @@ class NomiChatRepository(
                         }
 
                         val batch = db.batch()
+                        val targetContactId: String
+                        var isBlockedContact = false
                         if (existingDoc == null) {
                             val newContactRef = userRef.collection("contacts").document()
+                            targetContactId = newContactRef.id
                             val msgRef = newContactRef.collection("messages").document()
-                            val isActiveOpen = activeContactIdProvider() == newContactRef.id
+                            val isActiveOpen = activeContactIdProvider() == targetContactId
                             batch.set(
                                 newContactRef,
                                 mapOf(
@@ -1116,7 +1094,7 @@ class NomiChatRepository(
                                     "username" to fromUsername,
                                     "phone" to "@$fromUsername",
                                     "threadType" to "chat",
-                                    "online" to true,
+                                    "online" to false,
                                     "typing" to false,
                                     "unreadCount" to if (isActiveOpen) 0L else 1L,
                                     "lastMessageText" to text.take(1000),
@@ -1138,7 +1116,7 @@ class NomiChatRepository(
                                 msgRef,
                                 mapOf(
                                     "userId" to uid,
-                                    "contactId" to newContactRef.id,
+                                    "contactId" to targetContactId,
                                     "sender" to "them",
                                     "text" to text,
                                     "timeLabel" to timeLabel,
@@ -1147,14 +1125,16 @@ class NomiChatRepository(
                                 )
                             )
                         } else {
+                            targetContactId = existingDoc.id
+                            isBlockedContact = existingDoc.getBoolean("blocked") == true
                             val contactRef = existingDoc.reference
                             val msgRef = contactRef.collection("messages").document()
-                            val isActiveOpen = activeContactIdProvider() == existingDoc.id
+                            val isActiveOpen = activeContactIdProvider() == targetContactId
                             batch.set(
                                 msgRef,
                                 mapOf(
                                     "userId" to uid,
-                                    "contactId" to existingDoc.id,
+                                    "contactId" to targetContactId,
                                     "sender" to "them",
                                     "text" to text,
                                     "timeLabel" to timeLabel,
@@ -1173,7 +1153,6 @@ class NomiChatRepository(
                                     "lastMessageFromMe" to false,
                                     "lastMessageTimeLabel" to timeLabel,
                                     "unreadCount" to if (isActiveOpen) 0L else FieldValue.increment(1L),
-                                    "online" to true,
                                     "typing" to false,
                                     "updatedAt" to FieldValue.serverTimestamp()
                                 )
@@ -1181,6 +1160,16 @@ class NomiChatRepository(
                         }
                         batch.delete(doc.reference)
                         batch.commit().await()
+                        if (!isBlockedContact) {
+                            _incomingAlerts.tryEmit(
+                                IncomingMessageAlert(
+                                    contactId = targetContactId,
+                                    senderName = fromDisplayName,
+                                    senderHandle = fromUsername,
+                                    text = text
+                                )
+                            )
+                        }
                         true
                     }
                     if (delivered.isFailure) {
@@ -1188,6 +1177,35 @@ class NomiChatRepository(
                     }
                 }
             }
+    }
+
+    override suspend fun setUserPresence(userId: String, online: Boolean) {
+        val uid = auth.currentUser?.uid ?: return
+        if (uid != userId) return
+        runCatching {
+            val userRef = db.collection("users").document(uid)
+            val snap = userRef.get().await()
+            if (!snap.exists()) return
+            userRef.update(
+                mapOf(
+                    "online" to online,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            val handle = sanitizeHandle(snap.getString("username").orEmpty())
+            if (handle.isNotBlank()) {
+                val dirRef = db.collection("directory").document(handle)
+                val dirSnap = dirRef.get().await()
+                if (dirSnap.exists() && dirSnap.getString("ownerUid") == uid) {
+                    dirRef.update(
+                        mapOf(
+                            "online" to online,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+            }
+        }
     }
 
     override suspend fun markThreadRead(userId: String, contactId: String): Result<Unit> {
@@ -1419,20 +1437,9 @@ class NomiChatRepository(
         return SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date())
     }
 
-    private data class StarterThread(
-        val id: String,
-        val name: String,
-        val username: String,
-        val phone: String,
-        val type: String,
-        val online: Boolean,
-        val unread: Long,
-        val message: String,
-        val time: String,
-        val pinned: Boolean
-    )
-
     companion object {
+        const val PRESENCE_STALE_MS = 150_000L
+
         fun normalizeUsername(raw: String): String {
             return raw.trim()
                 .lowercase()
@@ -1441,18 +1448,28 @@ class NomiChatRepository(
                 .trim('_')
         }
 
-        fun mergeThreadWithDirectory(thread: ChatThread, entry: UserDirectoryEntry?): ChatThread {
-            if (entry == null) return thread
+        fun mergeThreadWithDirectory(
+            thread: ChatThread,
+            entry: UserDirectoryEntry?,
+            nowMillis: Long = System.currentTimeMillis()
+        ): ChatThread {
+            if (entry == null) {
+                return thread.copy(online = false)
+            }
             if (thread.peerUid.isNotBlank() &&
                 !entry.ownerUid.isNullOrBlank() &&
                 entry.ownerUid != thread.peerUid
             ) {
-                return thread
+                return thread.copy(online = false)
             }
             val syncedName = entry.displayName.trim().ifBlank { thread.name }
             val syncedStatus = if (entry.accountStatus == "banned") "banned" else thread.accountStatus
+            val updatedMs = entry.updatedAt?.toDate()?.time
+            val withinWindow = updatedMs == null || (nowMillis - updatedMs) <= PRESENCE_STALE_MS
+            val realOnline = entry.online && syncedStatus != "banned" && withinWindow
             return thread.copy(
                 name = syncedName,
+                online = realOnline,
                 accountStatus = syncedStatus,
                 peerUid = thread.peerUid.ifBlank { entry.ownerUid.orEmpty() },
                 isRegisteredPeer = thread.isRegisteredPeer || !entry.ownerUid.isNullOrBlank()

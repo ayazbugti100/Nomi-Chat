@@ -99,6 +99,16 @@ class UserPreferencesRepository(private val context: Context) {
         }
     }
 
+    suspend fun clearPendingSignInFlow() {
+        dataStore.edit { prefs ->
+            prefs[Keys.PREFERRED_NAME] = ""
+            prefs[Keys.PREFERRED_USERNAME] = ""
+            prefs[Keys.PREFERRED_DOB] = ""
+            prefs[Keys.AUTH_FLOW_MODE] = AuthFlowMode.GOOGLE_QUICK.name
+            prefs[Keys.RETURNING_IDENTIFIER] = ""
+        }
+    }
+
     suspend fun applyAccountSettings(
         themeMode: ThemeMode,
         notificationsEnabled: Boolean,

@@ -37,6 +37,7 @@ data class UserDirectoryEntry(
     val username: String = "",
     val displayName: String = "",
     val provider: String = "google",
+    val online: Boolean = false,
     val accountStatus: String = "active",
     val reportCount: Long = 0L,
     val reportedByUids: List<String> = emptyList(),
@@ -53,7 +54,7 @@ data class ChatThread(
     val username: String = "",
     val phone: String = "",
     val threadType: String = "chat",
-    val online: Boolean = true,
+    val online: Boolean = false,
     val typing: Boolean = false,
     val unreadCount: Long = 0L,
     val lastMessageText: String = "",
@@ -95,6 +96,14 @@ data class ReportOutcome(
     val message: String,
     val status: String = "active",
     val count: Long = 0L
+)
+
+data class IncomingMessageAlert(
+    val contactId: String,
+    val senderName: String,
+    val senderHandle: String,
+    val text: String,
+    val recipientUserId: String = ""
 )
 
 enum class AuthFlowMode {

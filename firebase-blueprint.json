@@ -104,6 +104,10 @@
           "enum": ["google", "username"],
           "description": "Auth provider associated with this username."
         },
+        "online": {
+          "type": "boolean",
+          "description": "Real-time online presence indicator for the handle owner."
+        },
         "accountStatus": {
           "type": "string",
           "enum": ["active", "banned"],

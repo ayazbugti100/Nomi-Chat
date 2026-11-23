@@ -264,7 +264,7 @@ fun AddContactDialog(
                         }
                         is UsernameSearchState.NotFound -> {
                             Text(
-                                text = "Username not found in Nomi directory. You can still tap Add below to start an AI chat.",
+                                text = "Username not found in directory yet. Tap Add below to add @$cleanUsername anyway.",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = ErrorRed,
                                 modifier = Modifier.testTag("username_not_found_text")
