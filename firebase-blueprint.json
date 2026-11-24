@@ -34,6 +34,23 @@
           "type": "string",
           "description": "Optional compressed JPEG data URI for profile avatar."
         },
+        "bannerData": {
+          "type": "string",
+          "description": "Optional compressed JPEG data URI for custom profile banner."
+        },
+        "profileVisibility": {
+          "type": "string",
+          "enum": ["everyone", "selected", "nobody"],
+          "description": "Controls who can view the user's profile photo, banner, and bio."
+        },
+        "allowedViewerUids": {
+          "type": "array",
+          "description": "Selected contact UIDs allowed to view profile details when visibility is selected."
+        },
+        "maxProfileViewers": {
+          "type": "integer",
+          "description": "Custom viewer count limit when profile visibility is selected (0 = unlimited)."
+        },
         "online": {
           "type": "boolean",
           "description": "Whether the user appears online."
@@ -104,9 +121,30 @@
           "enum": ["google", "username"],
           "description": "Auth provider associated with this username."
         },
+        "bio": {
+          "type": "string",
+          "description": "Public status bio synced for allowed viewers."
+        },
         "photoData": {
           "type": "string",
           "description": "Optional compressed JPEG data URI for profile avatar."
+        },
+        "bannerData": {
+          "type": "string",
+          "description": "Optional compressed JPEG data URI for custom profile banner."
+        },
+        "profileVisibility": {
+          "type": "string",
+          "enum": ["everyone", "selected", "nobody"],
+          "description": "Controls who can view profile details."
+        },
+        "allowedViewerUids": {
+          "type": "array",
+          "description": "Selected contact UIDs allowed to view profile details."
+        },
+        "maxProfileViewers": {
+          "type": "integer",
+          "description": "Custom viewer count limit (0 = unlimited)."
         },
         "online": {
           "type": "boolean",
@@ -172,9 +210,17 @@
           "enum": ["chat", "group"],
           "description": "Whether this thread is a 1:1 chat or group."
         },
+        "bio": {
+          "type": "string",
+          "description": "Contact bio when visible according to privacy rules."
+        },
         "photoData": {
           "type": "string",
           "description": "Optional compressed JPEG data URI for peer avatar."
+        },
+        "bannerData": {
+          "type": "string",
+          "description": "Optional compressed JPEG data URI for peer profile banner."
         },
         "online": {
           "type": "boolean",
@@ -203,6 +249,22 @@
         "pinned": {
           "type": "boolean",
           "description": "Whether this conversation is pinned."
+        },
+        "archived": {
+          "type": "boolean",
+          "description": "Whether this conversation is moved to the Archived folder."
+        },
+        "muted": {
+          "type": "boolean",
+          "description": "Whether incoming notifications for this chat are muted."
+        },
+        "disappearingSeconds": {
+          "type": "integer",
+          "description": "Auto-expiry duration in seconds for disappearing messages (0 = off)."
+        },
+        "chatTheme": {
+          "type": "string",
+          "description": "Selected visual chat theme key."
         },
         "customRenamed": {
           "type": "boolean",
@@ -273,6 +335,23 @@
         "text": {
           "type": "string",
           "description": "Message text body."
+        },
+        "messageType": {
+          "type": "string",
+          "enum": ["text", "voice", "image", "file", "call"],
+          "description": "Kind of message payload."
+        },
+        "mediaData": {
+          "type": "string",
+          "description": "Optional base64 audio/image payload for voice notes or attachments."
+        },
+        "durationSec": {
+          "type": "integer",
+          "description": "Voice note duration in seconds."
+        },
+        "expiresAtMs": {
+          "type": "integer",
+          "description": "Optional disappearing-message expiry epoch millis."
         },
         "timeLabel": {
           "type": "string",
@@ -382,7 +461,11 @@
         },
         "caption": {
           "type": "string",
-          "description": "Optional story caption."
+          "description": "Optional story caption or text overlay."
+        },
+        "storyFont": {
+          "type": "string",
+          "description": "Font style key for rendering story text (English & Urdu)."
         },
         "createdAtMs": {
           "type": "integer",

@@ -30,9 +30,11 @@ fun configureAppCheck(context: Context, intent: Intent?) {
                     "$DEBUG_STORE_PREFIX$persistenceKey",
                     Context.MODE_PRIVATE
                 )
+                // CRITICAL: MUST use commit() instead of apply() so the secret is written
+                // synchronously before DebugAppCheckProviderFactory reads it.
                 prefs.edit()
                     .putString(DEBUG_SECRET_KEY, debugToken)
-                    .apply()
+                    .commit()
                 Log.d(TAG, "App Check debug secret configured successfully.")
             } else {
                 Log.w(TAG, "No debug token found in Intent extra.")

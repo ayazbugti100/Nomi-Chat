@@ -110,7 +110,7 @@ class SmartReplyRepository {
                 }
             }
 
-            val response = withTimeout(45_000L) {
+            val response = withTimeout(60_000L) {
                 suggestionsModel.generateContent(prompt)
             }
             val jsonText = response.text ?: return Result.failure(IllegalStateException("Empty suggestions JSON"))

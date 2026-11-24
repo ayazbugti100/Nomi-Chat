@@ -67,10 +67,18 @@ import com.example.ui.theme.MintLight
 @Composable
 fun EmeraldWaveHeader(
     modifier: Modifier = Modifier,
+    bannerData: String? = null,
     content: @Composable BoxScope.() -> Unit
 ) {
     val wave1 = remember { Path() }
     val wave2 = remember { Path() }
+    val decodedBannerBytes = remember(bannerData) {
+        if (!bannerData.isNullOrBlank() && bannerData.startsWith("data:image")) {
+            val b64 = bannerData.substringAfter("base64,", "")
+            runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull()
+        } else null
+    }
+
     Box(
         modifier = modifier.background(
             brush = Brush.linearGradient(
@@ -78,37 +86,59 @@ fun EmeraldWaveHeader(
             )
         )
     ) {
-        Canvas(modifier = Modifier.matchParentSize()) {
-            val w = size.width
-            val h = size.height
-
-            // Soft glassy highlight orb top-right
-            drawCircle(
-                color = Color.White.copy(alpha = 0.11f),
-                radius = w * 0.28f,
-                center = Offset(w * 0.88f, h * 0.12f)
+        if (decodedBannerBytes != null) {
+            AsyncImage(
+                model = decodedBannerBytes,
+                contentDescription = "Profile banner background",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.matchParentSize()
             )
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(
+                                Color.Black.copy(alpha = 0.56f),
+                                Color.Black.copy(alpha = 0.38f),
+                                Color.Black.copy(alpha = 0.66f)
+                            )
+                        )
+                    )
+            )
+        } else {
+            Canvas(modifier = Modifier.matchParentSize()) {
+                val w = size.width
+                val h = size.height
 
-            // Translucent layered wave ribbon
-            wave1.reset()
-            wave1.apply {
-                moveTo(0f, h * 0.65f)
-                cubicTo(w * 0.25f, h * 0.35f, w * 0.65f, h * 0.92f, w, h * 0.50f)
-                lineTo(w, h)
-                lineTo(0f, h)
-                close()
-            }
-            drawPath(wave1, color = Color.White.copy(alpha = 0.08f))
+                // Soft glassy highlight orb top-right
+                drawCircle(
+                    color = Color.White.copy(alpha = 0.11f),
+                    radius = w * 0.28f,
+                    center = Offset(w * 0.88f, h * 0.12f)
+                )
 
-            wave2.reset()
-            wave2.apply {
-                moveTo(0f, h * 0.30f)
-                cubicTo(w * 0.35f, h * 0.62f, w * 0.72f, h * 0.15f, w, h * 0.42f)
-                lineTo(w, 0f)
-                lineTo(0f, 0f)
-                close()
+                // Translucent layered wave ribbon
+                wave1.reset()
+                wave1.apply {
+                    moveTo(0f, h * 0.65f)
+                    cubicTo(w * 0.25f, h * 0.35f, w * 0.65f, h * 0.92f, w, h * 0.50f)
+                    lineTo(w, h)
+                    lineTo(0f, h)
+                    close()
+                }
+                drawPath(wave1, color = Color.White.copy(alpha = 0.08f))
+
+                wave2.reset()
+                wave2.apply {
+                    moveTo(0f, h * 0.30f)
+                    cubicTo(w * 0.35f, h * 0.62f, w * 0.72f, h * 0.15f, w, h * 0.42f)
+                    lineTo(w, 0f)
+                    lineTo(0f, 0f)
+                    close()
+                }
+                drawPath(wave2, color = EmeraldDeep.copy(alpha = 0.22f))
             }
-            drawPath(wave2, color = EmeraldDeep.copy(alpha = 0.22f))
         }
         content()
     }
@@ -125,6 +155,8 @@ fun AvatarCircle(
     storyRingSeen: Boolean = false,
     size: Dp = 50.dp,
     borderColor: Color? = null,
+    imageContentScale: ContentScale = ContentScale.Crop,
+    imageBackgroundColor: Color? = null,
     modifier: Modifier = Modifier
 ) {
     val decodedBytes = remember(photoData) {
@@ -135,6 +167,7 @@ fun AvatarCircle(
     }
 
     val containerColor = when {
+        decodedBytes != null && imageBackgroundColor != null -> imageBackgroundColor
         isChannel -> Color(0xFF1A84F5)
         isGroup -> EmeraldMid
         else -> MintLight
@@ -149,7 +182,11 @@ fun AvatarCircle(
             )
         }
     }
-    val innerSize = if (hasStoryRing) (size - 6.dp).coerceAtLeast(24.dp) else size
+    val innerSize = when {
+        hasStoryRing -> (size - 10.dp).coerceAtLeast(24.dp)
+        borderColor != null -> (size - 5.dp).coerceAtLeast(24.dp)
+        else -> size
+    }
 
     Box(
         modifier = modifier.size(size),
@@ -165,24 +202,27 @@ fun AvatarCircle(
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.surface)
             )
+        } else if (borderColor != null) {
+            Box(
+                modifier = Modifier
+                    .size(size)
+                    .clip(CircleShape)
+                    .border(2.5.dp, borderColor, CircleShape)
+            )
         }
 
         Box(
             modifier = Modifier
                 .size(innerSize)
                 .clip(CircleShape)
-                .background(containerColor)
-                .then(
-                    if (borderColor != null) Modifier.border(2.5.dp, borderColor, CircleShape)
-                    else Modifier
-                ),
+                .background(containerColor),
             contentAlignment = Alignment.Center
         ) {
             if (decodedBytes != null) {
                 AsyncImage(
                     model = decodedBytes,
                     contentDescription = "$name avatar",
-                    contentScale = ContentScale.Crop,
+                    contentScale = imageContentScale,
                     modifier = Modifier
                         .size(innerSize)
                         .clip(CircleShape)
@@ -215,7 +255,7 @@ fun AvatarCircle(
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .size(size * 0.26f)
+                    .size((size * 0.24f).coerceAtMost(20.dp))
                     .clip(CircleShape)
                     .background(EmeraldVibrant)
                     .border(2.dp, MaterialTheme.colorScheme.surface, CircleShape)

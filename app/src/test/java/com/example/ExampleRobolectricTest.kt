@@ -7,6 +7,7 @@ import com.example.data.local.LocalAuthStore
 import com.example.data.model.ChatThread
 import com.example.data.model.IncomingMessageAlert
 import com.example.data.model.STORY_DURATION_MS
+import com.example.data.model.StoryFontStyle
 import com.example.data.model.ThemeMode
 import com.example.data.model.UserDirectoryEntry
 import com.example.data.network.NetworkConnectivityObserver
@@ -562,7 +563,397 @@ class ExampleRobolectricTest {
     assertEquals(1L, receiverThread.unreadCount)
     assertEquals("Hi", receiverThread.lastMessageText)
   }
+
+  @Test
+  fun `stories support English and Urdu captions across all 10 StoryFontStyle fonts`() = runTest {
+    assertEquals(10, StoryFontStyle.entries.size)
+    val store = LocalAuthStore(context)
+    store.signUpUser("Ayesha Noor", "ayesha_noor", "2000-01-01", "pass123", "pass123")
+    store.signUpUser("Bilal Ahmed", "bilal_a", "2000-01-01", "pass123", "pass123")
+
+    val createdIds = mutableListOf<String>()
+    StoryFontStyle.entries.forEachIndexed { index, fontStyle ->
+      val media = if (index % 2 == 0) "text_card:emerald" else "data:image/jpeg;base64,/9j/STORY_$index"
+      val caption = "Nomi ${fontStyle.displayName} • ${fontStyle.urduSample} اردو"
+      val id = store.postStory(
+        usernameKey = "ayesha_noor",
+        mediaData = media,
+        caption = caption,
+        storyFont = fontStyle.key
+      ).getOrThrow()
+      createdIds.add(id)
+    }
+
+    val stories = store.observeStories("bilal_a").first()
+    assertEquals(10, stories.size)
+    StoryFontStyle.entries.forEach { fontStyle ->
+      val matched = stories.firstOrNull { it.storyFont == fontStyle.key }
+      assertNotNull("Expected story with font ${fontStyle.key}", matched)
+      assertTrue(matched!!.caption.contains(fontStyle.urduSample))
+      assertEquals(fontStyle, StoryFontStyle.fromKey(matched.storyFont))
+    }
+  }
+
+  @Test
+  fun `real-time name and photo updates propagate to peer contacts when not customRenamed`() = runTest {
+    val store = LocalAuthStore(context)
+    store.signUpUser("Zara Ali", "zara_ali", "1998-06-15", "pass123", "pass123")
+    store.signUpUser("Hamza Khan", "hamza_k", "1997-04-20", "pass123", "pass123")
+
+    val contactId = store.addContact(
+      usernameKey = "hamza_k",
+      name = "",
+      contactUsername = "@zara_ali",
+      phone = "",
+      threadType = "chat"
+    ).getOrThrow()
+
+    var zaraOnHamza = store.observeContacts("hamza_k").first().first { it.id == contactId }
+    assertEquals("Zara Ali", zaraOnHamza.name)
+
+    val newPhoto = "data:image/jpeg;base64,/9j/ZARA_NEW_PHOTO"
+    store.updateProfile(
+      usernameKey = "zara_ali",
+      displayName = "Zara Updated",
+      photoData = newPhoto
+    )
+
+    zaraOnHamza = store.observeContacts("hamza_k").first().first { it.id == contactId }
+    assertEquals("Zara Updated", zaraOnHamza.name)
+    assertEquals(newPhoto, zaraOnHamza.photoData)
+
+    // Directory merge also syncs updated displayName and photoData when customRenamed = false
+    val nowMs = 1_000_000_000L
+    val merged = NomiChatRepository.mergeThreadWithDirectory(
+      zaraOnHamza.copy(name = "Old Name", photoData = null, customRenamed = false),
+      UserDirectoryEntry(
+        id = "zara_ali",
+        ownerUid = zaraOnHamza.peerUid,
+        username = "zara_ali",
+        displayName = "Zara Live Name",
+        photoData = newPhoto,
+        online = true,
+        accountStatus = "active",
+        updatedAt = Timestamp((nowMs - 4_000L) / 1000L, 0)
+      ),
+      nowMs
+    )
+    assertEquals("Zara Live Name", merged.name)
+    assertEquals(newPhoto, merged.photoData)
+    assertTrue(merged.online)
+  }
+
+  @Test
+  fun `custom profile banner syncs across profile, contact lookup, incoming message, and directory merge`() = runTest {
+    val store = LocalAuthStore(context)
+    store.signUpUser("Ayesha Banner", "ayesha_b", "1999-01-12", "pass123", "pass123")
+    store.signUpUser("Usman Ali", "usman_a", "1998-08-22", "pass123", "pass123")
+
+    val banner1 = "data:image/jpeg;base64,/9j/BANNER_ONE"
+    val banner2 = "data:image/jpeg;base64,/9j/BANNER_TWO"
+
+    store.updateProfile(usernameKey = "ayesha_b", bannerData = banner1)
+    val ownProfile = store.observeProfile("ayesha_b").first()
+    assertNotNull(ownProfile)
+    assertEquals(banner1, ownProfile?.bannerData)
+
+    val found = store.lookupUserByUsername("@ayesha_b").getOrNull()
+    assertNotNull(found)
+    assertEquals(banner1, found?.bannerData)
+
+    val contactIdOnUsman = store.addContact(
+      usernameKey = "usman_a",
+      name = "",
+      contactUsername = "@ayesha_b",
+      phone = "",
+      threadType = "chat"
+    ).getOrThrow()
+
+    var threadOnUsman = store.observeContacts("usman_a").first().first { it.id == contactIdOnUsman }
+    assertEquals(banner1, threadOnUsman.bannerData)
+
+    // Updating Ayesha's banner propagates immediately to Usman's chat thread
+    store.updateProfile(usernameKey = "ayesha_b", bannerData = banner2)
+    threadOnUsman = store.observeContacts("usman_a").first().first { it.id == contactIdOnUsman }
+    assertEquals(banner2, threadOnUsman.bannerData)
+
+    // Directory merge also propagates peer bannerData live to ChatThread
+    val nowMs = 1_000_000_000L
+    val merged = NomiChatRepository.mergeThreadWithDirectory(
+      threadOnUsman.copy(bannerData = null),
+      UserDirectoryEntry(
+        id = "ayesha_b",
+        ownerUid = threadOnUsman.peerUid,
+        username = "ayesha_b",
+        displayName = "Ayesha Banner",
+        bannerData = banner2,
+        online = true,
+        accountStatus = "active",
+        updatedAt = Timestamp((nowMs - 3_000L) / 1000L, 0)
+      ),
+      nowMs
+    )
+    assertEquals(banner2, merged.bannerData)
+    assertTrue(merged.online)
+  }
+
+  @Test
+  fun `voice messages deliver cross-account and chat mute, theme, disappearing, and clear actions work`() = runTest {
+    val store = LocalAuthStore(context)
+    store.signUpUser("Nomi Sender", "nomi_v", "2000-01-01", "pass123", "pass123")
+    store.signUpUser("Peer Listener", "peer_v", "1999-05-05", "pass123", "pass123")
+
+    val contactOnSender = store.addContact(
+      usernameKey = "nomi_v",
+      name = "",
+      contactUsername = "@peer_v",
+      phone = "",
+      threadType = "chat"
+    ).getOrThrow()
+
+    val contactOnPeer = store.addContact(
+      usernameKey = "peer_v",
+      name = "",
+      contactUsername = "@nomi_v",
+      phone = "",
+      threadType = "chat"
+    ).getOrThrow()
+
+    val voiceClip = "data:audio/mp4;base64,QUFBQQ=="
+    val alertDeferred = async { store.incomingAlerts.first() }
+    store.sendMessage(
+      usernameKey = "nomi_v",
+      contactId = contactOnSender,
+      sender = "me",
+      text = "",
+      aiGenerated = false,
+      messageType = "voice",
+      mediaData = voiceClip,
+      durationSec = 6L
+    )
+    val alert = alertDeferred.await()
+    assertEquals("peer_v", alert.recipientUserId)
+    assertTrue(alert.text.contains("Voice message"))
+
+    val peerMessages = store.observeMessages("peer_v", contactOnPeer).first()
+    assertEquals(1, peerMessages.size)
+    assertEquals("voice", peerMessages.first().messageType)
+    assertEquals(voiceClip, peerMessages.first().mediaData)
+    assertEquals(6L, peerMessages.first().durationSec)
+
+    // Chat theme & mute & disappearing messages persist per thread
+    store.toggleMuteChat("peer_v", contactOnPeer, true)
+    store.setChatTheme("peer_v", contactOnPeer, "ocean")
+    store.setDisappearingMessages("peer_v", contactOnPeer, 86_400L)
+
+    val peerThread = store.observeContacts("peer_v").first().first { it.id == contactOnPeer }
+    assertTrue(peerThread.muted)
+    assertEquals("ocean", peerThread.chatTheme)
+    assertEquals(86_400L, peerThread.disappearingSeconds)
+
+    // Clear chat removes messages cleanly while preserving the contact thread
+    store.clearChatMessages("peer_v", contactOnPeer)
+    val clearedMessages = store.observeMessages("peer_v", contactOnPeer).first()
+    assertTrue(clearedMessages.isEmpty())
+    assertTrue(store.observeContacts("peer_v").first().any { it.id == contactOnPeer })
+  }
+
+  @Test
+  fun `privacy visibility controls hide and restore photo, banner, and bio across Yes, No, and Selected People with custom limit`() = runTest {
+    val store = LocalAuthStore(context)
+    store.signUpUser("Alice Privacy", "alice_p", "1998-03-10", "pass123", "pass123")
+    store.signUpUser("Bob Allowed", "bob_p", "1999-04-12", "pass123", "pass123")
+    store.signUpUser("Charlie Restricted", "charlie_p", "1997-07-18", "pass123", "pass123")
+
+    val alicePhoto = "data:image/jpeg;base64,/9j/ALICE_PHOTO"
+    val aliceBanner = "data:image/jpeg;base64,/9j/ALICE_BANNER"
+    val aliceBio = "Living in Islamabad"
+    store.updateProfile(
+      usernameKey = "alice_p",
+      bio = aliceBio,
+      photoData = alicePhoto,
+      bannerData = aliceBanner
+    )
+
+    val bobContactId = store.addContact("bob_p", "", "@alice_p", "", "chat").getOrThrow()
+    val charlieContactId = store.addContact("charlie_p", "", "@alice_p", "", "chat").getOrThrow()
+
+    // 1. Default Yes (everyone): both Bob & Charlie see photo, banner, and bio
+    var onBob = store.observeContacts("bob_p").first().first { it.id == bobContactId }
+    var onCharlie = store.observeContacts("charlie_p").first().first { it.id == charlieContactId }
+    assertEquals(alicePhoto, onBob.photoData)
+    assertEquals(aliceBanner, onBob.bannerData)
+    assertEquals(aliceBio, onBob.bio)
+    assertEquals(alicePhoto, onCharlie.photoData)
+
+    // 2. Switch to No (nobody): immediately hides photo, banner, bio on both Bob and Charlie & lookup
+    store.updatePrivacySettings("alice_p", "nobody", listOf("bob_p"), 1L).getOrThrow()
+    onBob = store.observeContacts("bob_p").first().first { it.id == bobContactId }
+    onCharlie = store.observeContacts("charlie_p").first().first { it.id == charlieContactId }
+    assertEquals(null, onBob.photoData)
+    assertEquals(null, onBob.bannerData)
+    assertEquals("", onBob.bio)
+    assertEquals(null, onCharlie.photoData)
+    assertEquals(null, onCharlie.bannerData)
+    assertEquals("", onCharlie.bio)
+
+    val lookupWhileNobody = store.lookupUserByUsername("@alice_p", viewerUserId = "bob_p").getOrThrow()
+    assertNotNull(lookupWhileNobody)
+    assertEquals(null, lookupWhileNobody?.photoData)
+    assertEquals(null, lookupWhileNobody?.bannerData)
+    assertEquals("", lookupWhileNobody?.bio)
+
+    // 3. Switch to Selected People with custom limit = 1 (Bob allowed, Charlie not allowed)
+    store.updatePrivacySettings("alice_p", "selected", listOf("bob_p", "charlie_p"), 1L).getOrThrow()
+    onBob = store.observeContacts("bob_p").first().first { it.id == bobContactId }
+    onCharlie = store.observeContacts("charlie_p").first().first { it.id == charlieContactId }
+    assertEquals(alicePhoto, onBob.photoData)
+    assertEquals(aliceBanner, onBob.bannerData)
+    assertEquals(aliceBio, onBob.bio)
+    // Charlie is beyond the limit of 1, so Charlie still stays hidden!
+    assertEquals(null, onCharlie.photoData)
+    assertEquals(null, onCharlie.bannerData)
+    assertEquals("", onCharlie.bio)
+
+    // 4. Directory merge also enforces selected + limit rules for cloud threads
+    val nowMs = 1_000_000_000L
+    val cloudThreadForCharlie = ChatThread(
+      id = "c_cloud",
+      userId = "uid_charlie",
+      name = "Alice Privacy",
+      username = "alice_p",
+      bio = aliceBio,
+      photoData = alicePhoto,
+      bannerData = aliceBanner,
+      peerUid = "uid_alice",
+      isRegisteredPeer = true
+    )
+    val aliceDir = UserDirectoryEntry(
+      id = "alice_p",
+      ownerUid = "uid_alice",
+      username = "alice_p",
+      displayName = "Alice Privacy",
+      bio = aliceBio,
+      photoData = alicePhoto,
+      bannerData = aliceBanner,
+      profileVisibility = "selected",
+      allowedViewerUids = listOf("uid_bob", "uid_charlie"),
+      maxProfileViewers = 1L,
+      online = true,
+      accountStatus = "active",
+      updatedAt = Timestamp((nowMs - 2_000L) / 1000L, 0)
+    )
+    val mergedCharlie = NomiChatRepository.mergeThreadWithDirectory(
+      cloudThreadForCharlie,
+      aliceDir,
+      nowMs,
+      viewerUid = "uid_charlie"
+    )
+    assertEquals(null, mergedCharlie.photoData)
+    assertEquals(null, mergedCharlie.bannerData)
+    assertEquals("", mergedCharlie.bio)
+
+    val mergedBob = NomiChatRepository.mergeThreadWithDirectory(
+      cloudThreadForCharlie.copy(userId = "uid_bob"),
+      aliceDir,
+      nowMs,
+      viewerUid = "uid_bob"
+    )
+    assertEquals(alicePhoto, mergedBob.photoData)
+    assertEquals(aliceBanner, mergedBob.bannerData)
+    assertEquals(aliceBio, mergedBob.bio)
+  }
+
+  @Test
+  fun `blocked contacts counter and unblock action update live`() = runTest {
+    val store = LocalAuthStore(context)
+    store.signUpUser("Owner User", "owner_b", "2000-01-01", "pass123", "pass123")
+    store.signUpUser("Peer One", "peer_one", "2000-01-01", "pass123", "pass123")
+    store.signUpUser("Peer Two", "peer_two", "2000-01-01", "pass123", "pass123")
+
+    val c1 = store.addContact("owner_b", "", "@peer_one", "", "chat").getOrThrow()
+    val c2 = store.addContact("owner_b", "", "@peer_two", "", "chat").getOrThrow()
+
+    store.toggleBlockChat("owner_b", c1, true)
+    store.toggleBlockChat("owner_b", c2, true)
+    var blocked = store.observeContacts("owner_b").first().filter { it.blocked }
+    assertEquals(2, blocked.size)
+
+    store.toggleBlockChat("owner_b", c1, false)
+    blocked = store.observeContacts("owner_b").first().filter { it.blocked }
+    assertEquals(1, blocked.size)
+    assertEquals(c2, blocked.first().id)
+  }
+
+  @Test
+  fun `archiving and unarchiving chats persist across reloads and preserve archived folder state on incoming messages`() = runTest {
+    val store = LocalAuthStore(context)
+    store.signUpUser("Main User", "main_arch", "2000-01-01", "pass123", "pass123")
+    store.signUpUser("Work Peer", "work_peer", "1999-02-02", "pass123", "pass123")
+    store.signUpUser("Family Peer", "family_peer", "1998-03-03", "pass123", "pass123")
+
+    val workId = store.addContact("main_arch", "", "@work_peer", "", "chat").getOrThrow()
+    val familyId = store.addContact("main_arch", "", "@family_peer", "", "chat").getOrThrow()
+    val workSideMainId = store.addContact("work_peer", "", "@main_arch", "", "chat").getOrThrow()
+
+    // Archive Work Peer -> only Work Peer is marked archived; Family Peer remains in main inbox
+    store.toggleArchiveChat("main_arch", workId, true).getOrThrow()
+
+    val reloaded = LocalAuthStore(context)
+    val contactsAfterArchive = reloaded.observeContacts("main_arch").first()
+    val archivedList = contactsAfterArchive.filter { it.archived }
+    val inboxList = contactsAfterArchive.filter { !it.archived }
+    assertEquals(1, archivedList.size)
+    assertEquals(workId, archivedList.first().id)
+    assertEquals(1, inboxList.size)
+    assertEquals(familyId, inboxList.first().id)
+
+    // Incoming message from archived peer updates unread count while keeping it in Archived folder
+    reloaded.sendMessage("work_peer", workSideMainId, "them", "Ping?", aiGenerated = false).getOrThrow()
+    reloaded.sendMessage("work_peer", workSideMainId, "me", "Ping!", aiGenerated = false).getOrThrow()
+    val workThreadAfterPing = reloaded.observeContacts("main_arch").first().first { it.id == workId }
+    assertTrue(workThreadAfterPing.archived)
+    assertEquals(1L, workThreadAfterPing.unreadCount)
+    assertEquals("Ping!", workThreadAfterPing.lastMessageText)
+
+    // Unarchive restores Work Peer back to main inbox
+    reloaded.toggleArchiveChat("main_arch", workId, false).getOrThrow()
+    val contactsAfterUnarchive = LocalAuthStore(context).observeContacts("main_arch").first()
+    assertTrue(contactsAfterUnarchive.none { it.archived })
+    assertEquals(2, contactsAfterUnarchive.size)
+  }
+
+  @Test
+  fun `report user hides ban threshold and report count in feedback while keeping 10-report auto-ban active`() = runTest {
+    val store = LocalAuthStore(context)
+    store.signUpUser("Reporter Owner", "rep_owner", "2000-01-01", "pass123", "pass123")
+    store.signUpUser("Target User", "target_u", "2000-01-01", "pass123", "pass123")
+
+    val contactId = store.addContact("rep_owner", "", "@target_u", "", "chat").getOrThrow()
+    var targetThread = store.observeContacts("rep_owner").first().first { it.id == contactId }
+
+    // First 9 unique reporters keep account active and never reveal X/10 or threshold "10"
+    for (i in 1..9) {
+      val outcome = store.reportUserAccount("rep_owner", targetThread, "reporter_$i").getOrThrow()
+      assertTrue(outcome.ok)
+      assertEquals("active", outcome.status)
+      assertEquals(i.toLong(), outcome.count)
+      assertFalse(outcome.message.contains("/10"))
+      assertFalse(outcome.message.contains("10"))
+      assertFalse(outcome.message.contains("reports", ignoreCase = true))
+      targetThread = store.observeContacts("rep_owner").first().first { it.id == contactId }
+    }
+
+    // Duplicate reporter is blocked
+    val duplicate = store.reportUserAccount("rep_owner", targetThread, "reporter_1").getOrThrow()
+    assertFalse(duplicate.ok)
+
+    // 10th unique reporter triggers auto-ban internally without exposing count or "/10" in message
+    val tenth = store.reportUserAccount("rep_owner", targetThread, "reporter_10").getOrThrow()
+    assertTrue(tenth.ok)
+    assertEquals("banned", tenth.status)
+    assertEquals(10L, tenth.count)
+    assertFalse(tenth.message.contains("/10"))
+    assertFalse(tenth.message.contains("10"))
+  }
 }
-
-
-

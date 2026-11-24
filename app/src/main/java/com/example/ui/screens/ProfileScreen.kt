@@ -28,6 +28,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.Cake
 import androidx.compose.material.icons.filled.CameraAlt
@@ -49,12 +51,15 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -87,6 +92,7 @@ fun ProfileScreen(
     onEditUsernameClick: () -> Unit,
     onEditDobClick: () -> Unit,
     onPhotoPicked: (android.net.Uri) -> Unit,
+    onBannerPicked: (android.net.Uri) -> Unit = {},
     onOpenPasscodeSetup: () -> Unit,
     onToggleNotifications: (Boolean) -> Unit,
     onOpenAppearancePicker: () -> Unit,
@@ -109,17 +115,34 @@ fun ProfileScreen(
             }
         }
     )
+    val bannerPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+        onResult = { uri ->
+            if (uri != null) {
+                onBannerPicked(uri)
+            }
+        }
+    )
 
     val displayName = profile?.displayName?.ifBlank { "Nomi User" } ?: "Nomi User"
     val bio = profile?.bio?.ifBlank { "Dream Big... 💚" } ?: "Dream Big... 💚"
     val username = profile?.username?.ifBlank { "nomiuser" } ?: "nomiuser"
+    val hasCustomBanner = !profile?.bannerData.isNullOrBlank()
+    val headerTextShadow = Shadow(
+        color = Color.Black.copy(alpha = 0.65f),
+        offset = Offset(0f, 1.5f),
+        blurRadius = 4f
+    )
 
     Column(
         modifier = modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
-        EmeraldWaveHeader(modifier = Modifier.fillMaxWidth()) {
+        EmeraldWaveHeader(
+            modifier = Modifier.fillMaxWidth(),
+            bannerData = profile?.bannerData
+        ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -145,7 +168,7 @@ fun ProfileScreen(
                     }
                     Text(
                         text = stringResource(R.string.profile_title),
-                        style = MaterialTheme.typography.titleLarge,
+                        style = MaterialTheme.typography.titleLarge.copy(shadow = headerTextShadow),
                         color = Color.White
                     )
                     IconButton(
@@ -157,6 +180,51 @@ fun ProfileScreen(
                             contentDescription = "Security and passcode",
                             tint = Color.White
                         )
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                    contentAlignment = Alignment.CenterEnd
+                ) {
+                    Surface(
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .clip(RoundedCornerShape(20.dp))
+                            .clickable {
+                                bannerPickerLauncher.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                )
+                            }
+                            .testTag("add_banner_button"),
+                        shape = RoundedCornerShape(20.dp),
+                        color = Color.Black.copy(alpha = 0.42f),
+                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.4f))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AddPhotoAlternate,
+                                contentDescription = stringResource(
+                                    if (hasCustomBanner) R.string.change_banner else R.string.add_banner
+                                ),
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                text = stringResource(
+                                    if (hasCustomBanner) R.string.change_banner else R.string.add_banner
+                                ),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = Color.White,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                     }
                 }
 
@@ -203,7 +271,7 @@ fun ProfileScreen(
                 ) {
                     Text(
                         text = displayName,
-                        style = MaterialTheme.typography.titleLarge,
+                        style = MaterialTheme.typography.titleLarge.copy(shadow = headerTextShadow),
                         color = Color.White,
                         fontWeight = FontWeight.Bold
                     )
@@ -243,7 +311,7 @@ fun ProfileScreen(
                         } else {
                             "Offline • Queued locally"
                         },
-                        style = MaterialTheme.typography.labelLarge,
+                        style = MaterialTheme.typography.labelLarge.copy(shadow = headerTextShadow),
                         color = MintOnlineGlow
                     )
                 }
@@ -308,10 +376,6 @@ fun ProfileScreen(
                             append(if (isAppLockEnabled) "App Lock PIN on" else "Passcode off")
                             val statusLabel = if (profile?.accountStatus == "banned") "Banned" else "Active"
                             append(" • Status: $statusLabel")
-                            val reports = profile?.reportCount ?: 0L
-                            if (reports > 0L) {
-                                append(" ($reports/10 reports)")
-                            }
                         },
                         testTag = "account_security_row",
                         onClick = onOpenPasscodeSetup

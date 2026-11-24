@@ -31,6 +31,7 @@ import androidx.compose.material.icons.automirrored.filled.CallMade
 import androidx.compose.material.icons.automirrored.filled.CallReceived
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Close
@@ -39,9 +40,11 @@ import androidx.compose.material.icons.filled.DonutLarge
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.Button
@@ -100,6 +103,7 @@ import kotlin.math.max
 @Composable
 fun ChatsScreen(
     contactsState: UiState<List<ChatThread>>,
+    archivedChats: List<ChatThread> = emptyList(),
     profile: UserProfile? = null,
     activeStories: List<StoryItem> = emptyList(),
     selectedFilter: ChatPillFilter,
@@ -109,6 +113,8 @@ fun ChatsScreen(
     onSearchQueryChange: (String) -> Unit,
     onSelectFilter: (ChatPillFilter) -> Unit,
     onOpenProfile: () -> Unit,
+    onOpenPrivacySettings: () -> Unit = {},
+    onOpenArchivedFolder: () -> Unit = {},
     onOpenPremium: () -> Unit,
     onOpenChat: (String) -> Unit,
     onAvatarClick: (ChatThread) -> Unit = {},
@@ -116,6 +122,7 @@ fun ChatsScreen(
     onViewContact: (ChatThread) -> Unit = {},
     onToggleLockChat: (ChatThread) -> Unit = {},
     onToggleBlockChat: (ChatThread) -> Unit,
+    onToggleArchiveChat: (ChatThread) -> Unit = {},
     onDeleteChat: (ChatThread) -> Unit,
     onAddContactClick: () -> Unit,
     onPostStoryClick: () -> Unit = {},
@@ -193,15 +200,96 @@ fun ChatsScreen(
                                     tint = Color.White
                                 )
                             }
-                            IconButton(
-                                onClick = onOpenProfile,
-                                modifier = Modifier.testTag("header_profile_button")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.MoreVert,
-                                    contentDescription = "Open profile and settings",
-                                    tint = Color.White
-                                )
+                            var topMenuExpanded by remember { mutableStateOf(false) }
+                            Box {
+                                IconButton(
+                                    onClick = { topMenuExpanded = true },
+                                    modifier = Modifier.testTag("header_profile_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.MoreVert,
+                                        contentDescription = "More options",
+                                        tint = Color.White
+                                    )
+                                }
+                                DropdownMenu(
+                                    expanded = topMenuExpanded,
+                                    onDismissRequest = { topMenuExpanded = false },
+                                    containerColor = Color.White,
+                                    shape = RoundedCornerShape(16.dp),
+                                    shadowElevation = 10.dp,
+                                    modifier = Modifier
+                                        .width(215.dp)
+                                        .testTag("home_more_dropdown_menu")
+                                ) {
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                text = stringResource(R.string.privacy_settings_title),
+                                                color = LightOnSurface,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                        },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = Icons.Default.Lock,
+                                                contentDescription = null,
+                                                tint = EmeraldDark,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        },
+                                        onClick = {
+                                            topMenuExpanded = false
+                                            onOpenPrivacySettings()
+                                        },
+                                        modifier = Modifier.testTag("menu_privacy_settings")
+                                    )
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                text = "Profile & Settings",
+                                                color = LightOnSurface,
+                                                style = MaterialTheme.typography.bodyMedium
+                                            )
+                                        },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = Icons.Default.Person,
+                                                contentDescription = null,
+                                                tint = LightOnSurface,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        },
+                                        onClick = {
+                                            topMenuExpanded = false
+                                            onOpenProfile()
+                                        },
+                                        modifier = Modifier.testTag("menu_profile_settings")
+                                    )
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                text = "Add Chat by @username",
+                                                color = LightOnSurface,
+                                                style = MaterialTheme.typography.bodyMedium
+                                            )
+                                        },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = Icons.Default.Add,
+                                                contentDescription = null,
+                                                tint = EmeraldMid,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        },
+                                        onClick = {
+                                            topMenuExpanded = false
+                                            onAddContactClick()
+                                        },
+                                        modifier = Modifier.testTag("menu_add_chat")
+                                    )
+                                }
                             }
                         }
                     }
@@ -347,7 +435,8 @@ fun ChatsScreen(
                                     }
                                 }
                                 is UiState.Success -> {
-                                    if (contactsState.data.isEmpty()) {
+                                    val showArchivedEntry = selectedFilter == ChatPillFilter.CHATS && archivedChats.isNotEmpty()
+                                    if (contactsState.data.isEmpty() && !showArchivedEntry) {
                                         EmptyChatsState(onAddContactClick = onAddContactClick)
                                     } else {
                                         LazyColumn(
@@ -359,6 +448,28 @@ fun ChatsScreen(
                                                 bottom = 104.dp
                                             )
                                         ) {
+                                            if (showArchivedEntry) {
+                                                item(key = "archived_folder_row") {
+                                                    ArchivedFolderRow(
+                                                        archivedChats = archivedChats,
+                                                        onClick = onOpenArchivedFolder
+                                                    )
+                                                }
+                                            }
+                                            if (contactsState.data.isEmpty() && showArchivedEntry) {
+                                                item(key = "all_chats_archived_hint") {
+                                                    Text(
+                                                        text = "Your main inbox is clean. Tap Archived above to view or unarchive chats.",
+                                                        style = MaterialTheme.typography.bodyMedium,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        textAlign = TextAlign.Center,
+                                                        modifier = Modifier
+                                                            .fillMaxWidth()
+                                                            .padding(horizontal = 24.dp, vertical = 28.dp)
+                                                            .testTag("inbox_archived_hint")
+                                                    )
+                                                }
+                                            }
                                             items(contactsState.data, key = { it.id }) { thread ->
                                                 ChatListRow(
                                                     thread = thread,
@@ -367,6 +478,7 @@ fun ChatsScreen(
                                                     onAvatarClick = { onAvatarClick(thread) },
                                                     onRenameChat = { onRenameChat(thread) },
                                                     onViewContact = { onViewContact(thread) },
+                                                    onToggleArchive = { onToggleArchiveChat(thread) },
                                                     onToggleBlock = { onToggleBlockChat(thread) },
                                                     onDeleteChat = { onDeleteChat(thread) }
                                                 )
@@ -484,15 +596,88 @@ private fun FilterPillChip(
     }
 }
 
+@Composable
+fun ArchivedFolderRow(
+    archivedChats: List<ChatThread>,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val unreadArchivedCount = archivedChats.count { !it.blocked && it.unreadCount > 0L }
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 12.dp)
+            .testTag("archived_folder_row"),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(46.dp)
+                .clip(CircleShape)
+                .background(EmeraldMid.copy(alpha = 0.14f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.Archive,
+                contentDescription = stringResource(R.string.archived_folder_title),
+                tint = EmeraldDark,
+                modifier = Modifier.size(22.dp)
+            )
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = stringResource(R.string.archived_folder_title),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            val previewNames = archivedChats.take(3).joinToString(", ") { it.name }
+            if (previewNames.isNotBlank()) {
+                Text(
+                    text = previewNames,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(12.dp))
+                .background(if (unreadArchivedCount > 0) EmeraldBright else MaterialTheme.colorScheme.surfaceVariant)
+                .padding(horizontal = 9.dp, vertical = 3.dp)
+                .testTag("archived_folder_count"),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = archivedChats.size.toString(),
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = if (unreadArchivedCount > 0) Color.White else EmeraldDark
+            )
+        }
+    }
+    HorizontalDivider(
+        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
+        modifier = Modifier.padding(horizontal = 14.dp)
+    )
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ChatListRow(
+fun ChatListRow(
     thread: ChatThread,
     hasActiveStory: Boolean = false,
+    showQuickUnarchive: Boolean = false,
     onOpenChat: () -> Unit,
     onAvatarClick: () -> Unit,
     onRenameChat: () -> Unit,
     onViewContact: () -> Unit,
+    onToggleArchive: () -> Unit = {},
     onToggleBlock: () -> Unit,
     onDeleteChat: () -> Unit
 ) {
@@ -690,6 +875,20 @@ private fun ChatListRow(
                             )
                         }
                     }
+                    if (showQuickUnarchive && thread.archived) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        IconButton(
+                            onClick = onToggleArchive,
+                            modifier = Modifier.testTag("quick_unarchive_button_${thread.id}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Unarchive,
+                                contentDescription = stringResource(R.string.menu_unarchive_chat),
+                                tint = EmeraldDark,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -749,6 +948,28 @@ private fun ChatListRow(
                     onViewContact()
                 },
                 modifier = Modifier.testTag("popup_view_contact_${thread.id}")
+            )
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        text = if (thread.archived) "Unarchive" else "Archive",
+                        color = LightOnSurface,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                },
+                leadingIcon = {
+                    Icon(
+                        imageVector = if (thread.archived) Icons.Default.Unarchive else Icons.Default.Archive,
+                        contentDescription = null,
+                        tint = EmeraldDark,
+                        modifier = Modifier.size(18.dp)
+                    )
+                },
+                onClick = {
+                    menuExpanded = false
+                    onToggleArchive()
+                },
+                modifier = Modifier.testTag("popup_archive_chat_${thread.id}")
             )
             DropdownMenuItem(
                 text = {

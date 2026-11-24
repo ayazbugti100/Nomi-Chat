@@ -20,9 +20,13 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.AddPhotoAlternate
@@ -46,6 +50,7 @@ import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -54,6 +59,7 @@ import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -65,6 +71,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -72,13 +79,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import coil.compose.AsyncImage
 import com.example.R
-import com.example.data.model.BAN_REPORT_LIMIT
 import com.example.data.model.ChatThread
+import com.example.data.model.StoryFontStyle
 import com.example.data.model.StoryItem
 import com.example.data.model.ThemeMode
 import com.example.ui.components.AvatarCircle
@@ -91,6 +100,7 @@ import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.GoldCrown
 import com.example.ui.theme.MintLight
 import com.example.ui.theme.MintOnlineGlow
+import com.example.ui.theme.toFontFamily
 import com.example.ui.viewmodel.UsernameSearchState
 import kotlin.math.max
 
@@ -276,6 +286,15 @@ fun AddContactDialog(
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
+                                        if (usernameSearchState.result.bio.isNotBlank()) {
+                                            Text(
+                                                text = usernameSearchState.result.bio,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = EmeraldDark,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
                                     }
                                     Button(
                                         onClick = {
@@ -666,75 +685,74 @@ fun AvatarPreviewDialog(
             shadowElevation = 14.dp
         ) {
             Column {
-                // WhatsApp-style compact avatar header + large preview area
+                // Dedicated top header bar cleanly separated from circular avatar showcase
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(EmeraldDeep)
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = thread.name,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        if (thread.username.isNotBlank()) {
+                            Text(
+                                text = "@${thread.username}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MintOnlineGlow,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (isOnline) EmeraldBright.copy(alpha = 0.28f) else Color.White.copy(alpha = 0.16f)
+                    ) {
+                        Text(
+                            text = statusLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isOnline) MintOnlineGlow else Color.White.copy(alpha = 0.9f),
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
+                    }
+                }
+
+                // Spacious circular profile showcase displaying the full photo cleanly without cropping
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(250.dp)
+                        .height(236.dp)
                         .background(
                             brush = Brush.verticalGradient(
                                 listOf(EmeraldDeep, EmeraldDark, EmeraldMid)
                             )
                         )
+                        .padding(18.dp),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        AvatarCircle(
-                            name = thread.name,
-                            photoData = thread.photoData,
-                            isGroup = isGroup,
-                            isChannel = isChannel,
-                            showOnlineDot = isOnline,
-                            hasStoryRing = hasActiveStory,
-                            size = 132.dp,
-                            borderColor = Color.White.copy(alpha = 0.7f)
-                        )
-                    }
-
-                    // Semi-transparent top name strip
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .align(Alignment.TopCenter)
-                            .background(Color.Black.copy(alpha = 0.34f))
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = thread.name,
-                                style = MaterialTheme.typography.titleMedium,
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            if (thread.username.isNotBlank()) {
-                                Text(
-                                    text = "@${thread.username}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MintOnlineGlow,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        }
-                        Surface(
-                            shape = RoundedCornerShape(10.dp),
-                            color = if (isOnline) EmeraldBright.copy(alpha = 0.28f) else Color.White.copy(alpha = 0.16f)
-                        ) {
-                            Text(
-                                text = statusLabel,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (isOnline) MintOnlineGlow else Color.White.copy(alpha = 0.9f),
-                                fontWeight = FontWeight.SemiBold,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                            )
-                        }
-                    }
+                    AvatarCircle(
+                        name = thread.name,
+                        photoData = thread.photoData,
+                        isGroup = isGroup,
+                        isChannel = isChannel,
+                        showOnlineDot = isOnline,
+                        hasStoryRing = hasActiveStory,
+                        size = 188.dp,
+                        borderColor = Color.White.copy(alpha = 0.85f),
+                        imageContentScale = ContentScale.Fit,
+                        imageBackgroundColor = Color(0xFF0A241A),
+                        modifier = Modifier.testTag("avatar_preview_circle")
+                    )
                 }
 
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
@@ -832,7 +850,10 @@ fun ContactProfileDialog(
                     photoData = contact.photoData,
                     isGroup = contact.threadType == "group",
                     showOnlineDot = contact.online && !contact.blocked && contact.accountStatus != "banned",
-                    size = 64.dp
+                    size = 84.dp,
+                    borderColor = EmeraldMid.copy(alpha = 0.45f),
+                    imageContentScale = ContentScale.Fit,
+                    imageBackgroundColor = Color(0xFF0A241A)
                 )
                 Text(
                     text = contact.name,
@@ -863,6 +884,22 @@ fun ContactProfileDialog(
         },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (contact.bio.isNotBlank()) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("contact_profile_bio")
+                    ) {
+                        Text(
+                            text = contact.bio,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                        )
+                    }
+                }
                 Surface(
                     shape = RoundedCornerShape(12.dp),
                     color = MintLight.copy(alpha = 0.7f)
@@ -945,29 +982,12 @@ fun ReportAccountDialog(
             )
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(
-                    text = "Submit a safety report for @${contact.username.ifBlank { contact.id }}. Each user can report once. Accounts reaching $BAN_REPORT_LIMIT unique reports are automatically banned.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Surface(
-                    shape = RoundedCornerShape(10.dp),
-                    color = if (contact.accountStatus == "banned") ErrorContainerLight else MintLight
-                ) {
-                    Text(
-                        text = if (contact.accountStatus == "banned") {
-                            "Status: Banned (${contact.reportCount}/$BAN_REPORT_LIMIT reports)"
-                        } else {
-                            "Current reports: ${contact.reportCount} / $BAN_REPORT_LIMIT"
-                        },
-                        style = MaterialTheme.typography.labelMedium,
-                        color = if (contact.accountStatus == "banned") ErrorRed else EmeraldDeep,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
-                    )
-                }
-            }
+            Text(
+                text = "Submit a safety report for @${contact.username.ifBlank { contact.id }}. Our moderation team will review this account for policy violations.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag("report_dialog_message")
+            )
         },
         confirmButton = {
             Button(
@@ -990,10 +1010,12 @@ fun ReportAccountDialog(
 fun StoryPickerDialog(
     isPosting: Boolean,
     onDismiss: () -> Unit,
-    onPostStory: (uri: Uri, caption: String) -> Unit
+    onPostStory: (uri: Uri?, caption: String, storyFont: String) -> Unit
 ) {
     var selectedUri by remember { mutableStateOf<Uri?>(null) }
     var caption by remember { mutableStateOf("") }
+    var selectedFont by remember { mutableStateOf(StoryFontStyle.NOTO_NASTALIQ) }
+    val selectedFontFamily = remember(selectedFont) { selectedFont.toFontFamily() }
 
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -1017,7 +1039,9 @@ fun StoryPickerDialog(
             shadowElevation = 12.dp
         ) {
             Column(
-                modifier = Modifier.padding(20.dp),
+                modifier = Modifier
+                    .verticalScroll(rememberScrollState())
+                    .padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Row(
@@ -1051,7 +1075,7 @@ fun StoryPickerDialog(
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "Auto-expires after 24 hours",
+                                text = "Photo or styled English / اردو text • 24h",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1065,22 +1089,69 @@ fun StoryPickerDialog(
                     }
                 }
 
-                if (selectedUri == null) {
-                    Surface(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(148.dp)
-                            .clip(RoundedCornerShape(16.dp))
-                            .clickable(enabled = !isPosting) {
-                                photoPickerLauncher.launch(
-                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                )
-                            }
-                            .testTag("story_pick_gallery_box"),
-                        shape = RoundedCornerShape(16.dp),
-                        color = MintLight.copy(alpha = 0.65f),
-                        border = BorderStroke(1.dp, EmeraldMid.copy(alpha = 0.35f))
-                    ) {
+                // Live Story Preview (photo + text/name OR styled emerald text card)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(176.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(
+                            brush = Brush.linearGradient(
+                                listOf(EmeraldDeep, EmeraldDark, EmeraldMid)
+                            )
+                        )
+                        .clickable(enabled = !isPosting && selectedUri == null) {
+                            photoPickerLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                            )
+                        }
+                        .testTag("story_pick_gallery_box"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (selectedUri != null) {
+                        AsyncImage(
+                            model = selectedUri,
+                            contentDescription = "Selected story preview",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color.Black.copy(alpha = if (caption.isNotBlank()) 0.34f else 0.10f))
+                        )
+                    }
+
+                    if (caption.isNotBlank()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .align(if (selectedUri != null) Alignment.BottomCenter else Alignment.Center)
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = caption,
+                                style = MaterialTheme.typography.titleLarge.copy(
+                                    fontFamily = selectedFontFamily,
+                                    fontSize = if (selectedUri != null) 19.sp else 23.sp,
+                                    lineHeight = if (selectedUri != null) 28.sp else 34.sp,
+                                    textDirection = TextDirection.Content,
+                                    shadow = Shadow(
+                                        color = Color.Black.copy(alpha = 0.65f),
+                                        blurRadius = 6f
+                                    )
+                                ),
+                                color = Color.White,
+                                textAlign = TextAlign.Center,
+                                maxLines = 4,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("story_preview_text")
+                            )
+                        }
+                    } else if (selectedUri == null) {
                         Column(
                             modifier = Modifier
                                 .fillMaxSize()
@@ -1091,39 +1162,43 @@ fun StoryPickerDialog(
                             Icon(
                                 imageVector = Icons.Default.AddPhotoAlternate,
                                 contentDescription = "Choose photo",
-                                tint = EmeraldDark,
-                                modifier = Modifier.size(36.dp)
+                                tint = Color.White,
+                                modifier = Modifier.size(34.dp)
                             )
-                            Spacer(modifier = Modifier.height(8.dp))
+                            Spacer(modifier = Modifier.height(6.dp))
                             Text(
-                                text = "Tap to choose a photo for your story",
+                                text = "Tap to add photo, or type text below",
                                 style = MaterialTheme.typography.bodyMedium,
-                                color = EmeraldDeep,
+                                color = Color.White,
                                 fontWeight = FontWeight.SemiBold,
                                 textAlign = TextAlign.Center
                             )
                             Text(
-                                text = "Uses system photo picker — no extra permissions needed",
+                                text = "Supports English & اردو with 10 stylish fonts",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                color = MintOnlineGlow,
                                 textAlign = TextAlign.Center
                             )
                         }
                     }
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(190.dp)
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(Color.Black.copy(alpha = 0.08f))
-                    ) {
-                        AsyncImage(
-                            model = selectedUri,
-                            contentDescription = "Selected story preview",
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
-                        )
+
+                    if (selectedUri != null && !isPosting) {
+                        Surface(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(8.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable { selectedUri = null },
+                            color = Color.Black.copy(alpha = 0.55f),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text(
+                                text = "Clear photo",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
                     }
                 }
 
@@ -1178,14 +1253,74 @@ fun StoryPickerDialog(
                     value = caption,
                     onValueChange = { if (it.length <= 140) caption = it },
                     enabled = !isPosting,
-                    label = { Text("Caption (Optional)") },
-                    placeholder = { Text("Share a status note...") },
-                    singleLine = true,
+                    label = { Text("Story Text or Name (English / اردو)") },
+                    placeholder = { Text("Write a name or message in English or اردو...") },
+                    textStyle = LocalTextStyle.current.copy(
+                        fontFamily = selectedFontFamily,
+                        textDirection = TextDirection.Content
+                    ),
+                    maxLines = 3,
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("story_caption_input")
                 )
+
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "Font Style (10 English & اردو Fonts)",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = EmeraldDeep,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    LazyRow(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("story_font_selector"),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(StoryFontStyle.entries, key = { it.key }) { fontStyle ->
+                            val isSelected = fontStyle == selectedFont
+                            val itemFontFamily = remember(fontStyle) { fontStyle.toFontFamily() }
+                            Surface(
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable(enabled = !isPosting) { selectedFont = fontStyle }
+                                    .testTag("story_font_chip_${fontStyle.key}"),
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isSelected) EmeraldDark else MintLight.copy(alpha = 0.7f),
+                                border = BorderStroke(
+                                    width = if (isSelected) 1.5.dp else 1.dp,
+                                    color = if (isSelected) EmeraldDark else EmeraldMid.copy(alpha = 0.35f)
+                                )
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text(
+                                        text = fontStyle.displayName,
+                                        style = MaterialTheme.typography.labelMedium.copy(fontFamily = itemFontFamily),
+                                        color = if (isSelected) Color.White else EmeraldDeep,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1
+                                    )
+                                    Text(
+                                        text = fontStyle.urduSample,
+                                        style = MaterialTheme.typography.labelMedium.copy(
+                                            fontFamily = itemFontFamily,
+                                            fontSize = 13.sp,
+                                            textDirection = TextDirection.Rtl
+                                        ),
+                                        color = if (isSelected) MintOnlineGlow else EmeraldDark,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1201,10 +1336,9 @@ fun StoryPickerDialog(
                     Spacer(modifier = Modifier.width(8.dp))
                     Button(
                         onClick = {
-                            val uri = selectedUri ?: return@Button
-                            onPostStory(uri, caption)
+                            onPostStory(selectedUri, caption, selectedFont.key)
                         },
-                        enabled = selectedUri != null && !isPosting,
+                        enabled = (selectedUri != null || caption.trim().isNotEmpty()) && !isPosting,
                         colors = ButtonDefaults.buttonColors(containerColor = EmeraldDark),
                         shape = RoundedCornerShape(14.dp),
                         modifier = Modifier.testTag("story_post_button")
@@ -1239,6 +1373,9 @@ fun StoryViewerDialog(
     var currentIndex by remember(stories) { mutableIntStateOf(0) }
     val safeIndex = currentIndex.coerceIn(0, stories.lastIndex)
     val story = stories[safeIndex]
+    val storyFontFamily = remember(story.storyFont) {
+        StoryFontStyle.fromKey(story.storyFont).toFontFamily()
+    }
 
     val decodedMedia = remember(story.id, story.mediaData) {
         if (story.mediaData.startsWith("data:image")) {
@@ -1273,6 +1410,16 @@ fun StoryViewerDialog(
                         contentDescription = "Story by ${story.authorName}",
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                brush = Brush.verticalGradient(
+                                    listOf(EmeraldDeep, EmeraldDark, EmeraldMid)
+                                )
+                            )
                     )
                 }
 
@@ -1396,24 +1543,64 @@ fun StoryViewerDialog(
                 }
 
                 if (story.caption.isNotBlank()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .align(Alignment.BottomCenter)
-                            .background(
-                                Brush.verticalGradient(
-                                    listOf(Color.Transparent, Color.Black.copy(alpha = 0.78f))
-                                )
+                    if (decodedMedia == null) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .align(Alignment.Center)
+                                .padding(horizontal = 24.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = story.caption,
+                                style = MaterialTheme.typography.headlineMedium.copy(
+                                    fontFamily = storyFontFamily,
+                                    fontSize = 28.sp,
+                                    lineHeight = 42.sp,
+                                    textDirection = TextDirection.Content,
+                                    shadow = Shadow(
+                                        color = Color.Black.copy(alpha = 0.55f),
+                                        blurRadius = 8f
+                                    )
+                                ),
+                                color = Color.White,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("story_viewer_caption")
                             )
-                            .padding(horizontal = 18.dp, vertical = 18.dp)
-                    ) {
-                        Text(
-                            text = story.caption,
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = Color.White,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .align(Alignment.BottomCenter)
+                                .background(
+                                    Brush.verticalGradient(
+                                        listOf(Color.Transparent, Color.Black.copy(alpha = 0.82f))
+                                    )
+                                )
+                                .padding(horizontal = 20.dp, vertical = 22.dp)
+                        ) {
+                            Text(
+                                text = story.caption,
+                                style = MaterialTheme.typography.titleLarge.copy(
+                                    fontFamily = storyFontFamily,
+                                    fontSize = 22.sp,
+                                    lineHeight = 34.sp,
+                                    textDirection = TextDirection.Content,
+                                    shadow = Shadow(
+                                        color = Color.Black.copy(alpha = 0.7f),
+                                        blurRadius = 6f
+                                    )
+                                ),
+                                color = Color.White,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("story_viewer_caption")
+                            )
+                        }
                     }
                 }
             }

@@ -365,6 +365,21 @@ test("Directory supports owner photoData sync and Stories enforce 24h validity a
       authorPhotoData: "data:image/jpeg;base64,BBB",
       mediaData: "data:image/jpeg;base64,STORY",
       caption: "Hello 24h",
+      storyFont: "noto_nastaliq",
+      createdAtMs: nowMs,
+      expiresAtMs: nowMs + 86400000,
+      createdAt: created,
+    })
+  );
+
+  await assertSucceeds(
+    aliceDb.collection("stories").doc("story_text_urdu").set({
+      userId: ALICE_UID,
+      authorName: "Alice",
+      authorUsername: "alice_photo",
+      mediaData: "text_card:emerald",
+      caption: "السلام علیکم Nomi",
+      storyFont: "gulzar",
       createdAtMs: nowMs,
       expiresAtMs: nowMs + 86400000,
       createdAt: created,
@@ -391,4 +406,344 @@ test("Directory supports owner photoData sync and Stories enforce 24h validity a
   await assertSucceeds(aliceDb.collection("stories").doc("story_1").delete());
 });
 
+test("Owner can set/update bannerData on profile, directory, and contacts while blocking non-owners and oversized banners", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const created = new Date(Date.now() - 5000);
+  const validBanner = "data:image/jpeg;base64,BANNER_VALID";
+  const oversizedBanner = "x".repeat(150001);
 
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).set({
+      userId: ALICE_UID,
+      displayName: "Alice",
+      username: "alice_banner",
+      bio: "Bio",
+      dob: "2000-01-01",
+      provider: "username",
+      bannerData: validBanner,
+      online: true,
+      verified: false,
+      premiumUnlocked: false,
+      accountStatus: "active",
+      reportCount: 0,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  await assertSucceeds(
+    aliceDb.collection("directory").doc("alice_banner").set({
+      ownerUid: ALICE_UID,
+      username: "alice_banner",
+      displayName: "Alice",
+      provider: "username",
+      bannerData: validBanner,
+      online: true,
+      accountStatus: "active",
+      reportCount: 0,
+      reportedByUids: [],
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  await assertSucceeds(
+    aliceDb.collection("directory").doc("alice_banner").update({
+      bannerData: "data:image/jpeg;base64,BANNER_UPDATED",
+      updatedAt: new Date(Date.now() - 1000),
+    })
+  );
+
+  await assertFails(
+    bobDb.collection("directory").doc("alice_banner").update({
+      bannerData: "data:image/jpeg;base64,HIJACKED",
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+
+  await assertFails(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      bannerData: oversizedBanner,
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+
+  await assertSucceeds(
+    bobDb.collection("users").doc(BOB_UID).collection("contacts").doc("c_alice").set({
+      userId: BOB_UID,
+      name: "Alice",
+      username: "alice_banner",
+      phone: "",
+      threadType: "chat",
+      bannerData: "data:image/jpeg;base64,BANNER_UPDATED",
+      online: true,
+      typing: false,
+      unreadCount: 0,
+      lastMessageText: "",
+      lastMessageFromMe: false,
+      lastMessageTimeLabel: "",
+      pinned: false,
+      peerUid: ALICE_UID,
+      isRegisteredPeer: true,
+      accountStatus: "active",
+      reportCount: 0,
+      reportedBy: [],
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+});
+
+test("Chat settings (mute, theme, disappearing) and voice message relay enforce schema and size bounds", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const created = new Date(Date.now() - 5000);
+  const contactRef = aliceDb.collection("users").doc(ALICE_UID).collection("contacts").doc("c_bob");
+
+  await assertSucceeds(
+    contactRef.set({
+      userId: ALICE_UID,
+      name: "Bob",
+      username: "bob_user",
+      phone: "@bob_user",
+      threadType: "chat",
+      online: false,
+      typing: false,
+      unreadCount: 0,
+      lastMessageText: "",
+      lastMessageFromMe: false,
+      lastMessageTimeLabel: "",
+      pinned: false,
+      muted: false,
+      disappearingSeconds: 0,
+      chatTheme: "classic",
+      peerUid: BOB_UID,
+      isRegisteredPeer: true,
+      accountStatus: "active",
+      reportCount: 0,
+      reportedBy: [],
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  await assertSucceeds(
+    contactRef.update({
+      muted: true,
+      disappearingSeconds: 86400,
+      chatTheme: "ocean",
+      updatedAt: new Date(Date.now() - 1000),
+    })
+  );
+
+  await assertSucceeds(
+    contactRef.collection("messages").doc("m_voice_1").set({
+      userId: ALICE_UID,
+      contactId: "c_bob",
+      sender: "me",
+      text: "🎤 Voice message (0:05)",
+      messageType: "voice",
+      mediaData: "data:audio/mp4;base64,AAAA",
+      durationSec: 5,
+      expiresAtMs: Date.now() + 86400000,
+      timeLabel: "8:00 PM",
+      aiGenerated: false,
+      createdAt: created,
+    })
+  );
+
+  await assertSucceeds(
+    aliceDb.collection("direct_messages").doc("dm_voice_1").set({
+      fromUid: ALICE_UID,
+      toUid: BOB_UID,
+      fromUsername: "alice_user",
+      fromDisplayName: "Alice",
+      toUsername: "bob_user",
+      text: "🎤 Voice message (0:05)",
+      messageType: "voice",
+      mediaData: "data:audio/mp4;base64,AAAA",
+      durationSec: 5,
+      timeLabel: "8:00 PM",
+      createdAt: created,
+    })
+  );
+
+  // Oversized voice mediaData (> 240000) or invalid messageType must fail
+  await assertFails(
+    aliceDb.collection("direct_messages").doc("dm_voice_oversized").set({
+      fromUid: ALICE_UID,
+      toUid: BOB_UID,
+      fromUsername: "alice_user",
+      fromDisplayName: "Alice",
+      toUsername: "bob_user",
+      text: "Too big",
+      messageType: "voice",
+      mediaData: "a".repeat(240001),
+      durationSec: 5,
+      timeLabel: "8:00 PM",
+      createdAt: created,
+    })
+  );
+
+  await assertFails(
+    contactRef.collection("messages").doc("m_bad_type").set({
+      userId: ALICE_UID,
+      contactId: "c_bob",
+      sender: "me",
+      text: "Invalid type",
+      messageType: "exe",
+      timeLabel: "8:00 PM",
+      aiGenerated: false,
+      createdAt: created,
+    })
+  );
+});
+
+test("Profile privacy settings (profileVisibility, allowedViewerUids, maxProfileViewers, bio) validate cleanly and block invalid values", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const created = new Date(Date.now() - 5000);
+
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).set({
+      userId: ALICE_UID,
+      displayName: "Alice",
+      username: "alice_priv",
+      bio: "Private bio",
+      dob: "2000-01-01",
+      provider: "username",
+      profileVisibility: "everyone",
+      allowedViewerUids: [],
+      maxProfileViewers: 0,
+      online: true,
+      verified: false,
+      premiumUnlocked: false,
+      accountStatus: "active",
+      reportCount: 0,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  await assertSucceeds(
+    aliceDb.collection("directory").doc("alice_priv").set({
+      ownerUid: ALICE_UID,
+      username: "alice_priv",
+      displayName: "Alice",
+      bio: "Private bio",
+      provider: "username",
+      profileVisibility: "selected",
+      allowedViewerUids: [BOB_UID],
+      maxProfileViewers: 2,
+      online: true,
+      accountStatus: "active",
+      reportCount: 0,
+      reportedByUids: [],
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      profileVisibility: "nobody",
+      allowedViewerUids: [BOB_UID],
+      maxProfileViewers: 1,
+      updatedAt: new Date(Date.now() - 1000),
+    })
+  );
+
+  // Invalid visibility enum must fail
+  await assertFails(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      profileVisibility: "friends_of_friends",
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+
+  // Negative or oversized maxProfileViewers must fail
+  await assertFails(
+    aliceDb.collection("directory").doc("alice_priv").update({
+      maxProfileViewers: 501,
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+
+  // Contact bio is allowed cleanly
+  await assertSucceeds(
+    bobDb.collection("users").doc(BOB_UID).collection("contacts").doc("c_alice_p").set({
+      userId: BOB_UID,
+      name: "Alice",
+      username: "alice_priv",
+      phone: "@alice_priv",
+      threadType: "chat",
+      bio: "Private bio",
+      online: true,
+      typing: false,
+      unreadCount: 0,
+      lastMessageText: "",
+      lastMessageFromMe: false,
+      lastMessageTimeLabel: "",
+      pinned: false,
+      peerUid: ALICE_UID,
+      isRegisteredPeer: true,
+      archived: false,
+      accountStatus: "active",
+      reportCount: 0,
+      reportedBy: [],
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+});
+
+test("Chat archiving allows owner boolean archived updates and rejects invalid types or cross-user access", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const created = new Date(Date.now() - 2000);
+  const contactRef = aliceDb.collection("users").doc(ALICE_UID).collection("contacts").doc("c_arch");
+
+  await assertSucceeds(
+    contactRef.set({
+      userId: ALICE_UID,
+      name: "Bob",
+      username: "bob",
+      phone: "@bob",
+      threadType: "chat",
+      online: false,
+      typing: false,
+      unreadCount: 0,
+      lastMessageText: "",
+      lastMessageFromMe: false,
+      lastMessageTimeLabel: "",
+      pinned: false,
+      archived: false,
+      accountStatus: "active",
+      reportCount: 0,
+      reportedBy: [],
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  await assertSucceeds(
+    contactRef.update({
+      archived: true,
+      updatedAt: new Date(Date.now() - 1000),
+    })
+  );
+
+  await assertFails(
+    contactRef.update({
+      archived: "yes",
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+
+  await assertFails(
+    bobDb.collection("users").doc(ALICE_UID).collection("contacts").doc("c_arch").update({
+      archived: false,
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+});

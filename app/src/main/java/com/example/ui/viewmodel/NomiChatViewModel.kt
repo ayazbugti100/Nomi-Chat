@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.provider.OpenableColumns
 import android.util.Base64
 import android.util.Log
 import androidx.lifecycle.ViewModel
@@ -14,6 +15,8 @@ import com.example.data.model.ChatPillFilter
 import com.example.data.model.ChatThread
 import com.example.data.model.DirectoryLookupResult
 import com.example.data.model.IncomingMessageAlert
+import com.example.data.model.ProfileVisibilityMode
+import com.example.data.model.StoryFontStyle
 import com.example.data.model.StoryItem
 import com.example.data.model.ThemeMode
 import com.example.data.model.UiState
@@ -195,6 +198,7 @@ class NomiChatViewModel(
             is UiState.Success -> {
                 val q = query.trim().lowercase()
                 val filtered = state.data.filter { thread ->
+                    val matchesInbox = !thread.archived
                     val matchesTab = when (filter) {
                         ChatPillFilter.GROUPS -> thread.threadType == "group"
                         else -> true
@@ -203,7 +207,7 @@ class NomiChatViewModel(
                         thread.name.lowercase().contains(q) ||
                         thread.username.lowercase().contains(q) ||
                         thread.phone.lowercase().contains(q)
-                    matchesTab && matchesQuery
+                    matchesInbox && matchesTab && matchesQuery
                 }
                 val ranked = filtered.sortedWith(
                     compareByDescending<ChatThread> { it.pinned }
@@ -219,11 +223,45 @@ class NomiChatViewModel(
         initialValue = UiState.Loading
     )
 
+    val allThreadsState: StateFlow<List<ChatThread>> = allContactsState
+        .map { state -> (state as? UiState.Success)?.data.orEmpty() }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
+            initialValue = emptyList()
+        )
+
+    val archivedChatsState: StateFlow<List<ChatThread>> = allContactsState
+        .map { state ->
+            (state as? UiState.Success)?.data.orEmpty()
+                .filter { it.archived }
+                .sortedWith(
+                    compareByDescending<ChatThread> { it.pinned }
+                        .thenByDescending { it.unreadCount > 0L }
+                        .thenByDescending { it.updatedAt?.seconds ?: 0L }
+                )
+        }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
+            initialValue = emptyList()
+        )
+
+    val blockedContactsState: StateFlow<List<ChatThread>> = allContactsState
+        .map { state ->
+            (state as? UiState.Success)?.data.orEmpty().filter { it.blocked }
+        }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
+            initialValue = emptyList()
+        )
+
     val totalUnreadCount: StateFlow<Int> = allContactsState
         .map { state ->
             when (state) {
                 is UiState.Success -> state.data
-                    .filter { !it.blocked }
+                    .filter { !it.blocked && !it.archived }
                     .sumOf { it.unreadCount.coerceAtLeast(0L) }
                     .toInt()
                 else -> 0
@@ -356,6 +394,9 @@ class NomiChatViewModel(
                 val matchesUser = alert.recipientUserId.isEmpty() || alert.recipientUserId == currentUserId
                 if (!matchesUser) return@collect
                 if (!preferences.value.notificationsEnabled) return@collect
+                val matchingContact = (allContactsState.value as? UiState.Success)?.data
+                    ?.firstOrNull { it.id == alert.contactId }
+                if (matchingContact?.muted == true || matchingContact?.blocked == true) return@collect
                 val viewingSameThreadInForeground = isAppInForeground && _activeContactId.value == alert.contactId
                 if (!viewingSameThreadInForeground) {
                     _incomingNotificationEvents.tryEmit(alert)
@@ -487,7 +528,7 @@ class NomiChatViewModel(
                         lastSuggestedMessageId != suggestionKey
                     if (shouldGenerate) {
                         lastSuggestedMessageId = suggestionKey
-                        generateThreeSmartReplies(contact, msgState.data)
+                        generateThreeSmartReplies(contact, msgState.data, showErrorFeedback = false)
                     }
                 }
             }
@@ -564,6 +605,22 @@ class NomiChatViewModel(
         }
     }
 
+    fun toggleArchiveChat(thread: ChatThread) {
+        val nextArchived = !thread.archived
+        viewModelScope.launch {
+            repository.toggleArchiveChat(currentUserId, thread.id, nextArchived)
+                .onSuccess {
+                    if (nextArchived && _activeContactId.value == thread.id) {
+                        _activeContactId.value = null
+                    }
+                    _popupMessage.value = if (nextArchived) "Chat moved to Archived" else "Chat unarchived"
+                }
+                .onFailure { err ->
+                    _snackbarMessage.value = err.localizedMessage ?: "Unable to update archive status."
+                }
+        }
+    }
+
     fun renameChat(thread: ChatThread, newName: String) {
         val cleanName = newName.trim().take(60)
         if (cleanName.isEmpty()) {
@@ -596,6 +653,61 @@ class NomiChatViewModel(
         }
     }
 
+    fun toggleMuteChat(thread: ChatThread) {
+        val nextMuted = !thread.muted
+        viewModelScope.launch {
+            repository.toggleMuteChat(currentUserId, thread.id, nextMuted)
+                .onSuccess {
+                    _popupMessage.value = if (nextMuted) "Notifications muted" else "Notifications unmuted"
+                }
+                .onFailure { err ->
+                    _snackbarMessage.value = err.localizedMessage ?: "Unable to update mute setting."
+                }
+        }
+    }
+
+    fun setDisappearingMessages(thread: ChatThread, seconds: Long) {
+        viewModelScope.launch {
+            repository.setDisappearingMessages(currentUserId, thread.id, seconds)
+                .onSuccess {
+                    _popupMessage.value = when (seconds) {
+                        86_400L -> "Disappearing messages: 24 hours"
+                        604_800L -> "Disappearing messages: 7 days"
+                        7_776_000L -> "Disappearing messages: 90 days"
+                        else -> "Disappearing messages turned off"
+                    }
+                }
+                .onFailure { err ->
+                    _snackbarMessage.value = err.localizedMessage ?: "Unable to update disappearing messages."
+                }
+        }
+    }
+
+    fun setChatTheme(thread: ChatThread, themeKey: String) {
+        viewModelScope.launch {
+            repository.setChatTheme(currentUserId, thread.id, themeKey)
+                .onSuccess {
+                    val label = com.example.data.model.ChatThemeStyle.fromKey(themeKey).label
+                    _popupMessage.value = "Chat theme: $label"
+                }
+                .onFailure { err ->
+                    _snackbarMessage.value = err.localizedMessage ?: "Unable to update chat theme."
+                }
+        }
+    }
+
+    fun clearChatMessages(thread: ChatThread) {
+        viewModelScope.launch {
+            repository.clearChatMessages(currentUserId, thread.id)
+                .onSuccess {
+                    _popupMessage.value = "Chat messages cleared"
+                }
+                .onFailure { err ->
+                    _snackbarMessage.value = err.localizedMessage ?: "Unable to clear messages."
+                }
+        }
+    }
+
     fun sendMessage(text: String) {
         val contact = activeContact.value ?: return
         if (contact.accountStatus == "banned") {
@@ -624,11 +736,149 @@ class NomiChatViewModel(
         }
     }
 
+    fun sendVoiceMessage(mediaData: String, durationSec: Long) {
+        val contact = activeContact.value ?: return
+        if (contact.accountStatus == "banned") {
+            _popupMessage.value = "This account is banned."
+            return
+        }
+        if (contact.blocked) {
+            _popupMessage.value = "This user is blocked. Unblock to send voice messages."
+            return
+        }
+        if (mediaData.isBlank()) return
+        val safeDuration = durationSec.coerceIn(1L, 600L)
+        viewModelScope.launch {
+            _quickSuggestions.value = emptyList()
+            repository.sendMessage(
+                userId = currentUserId,
+                contactId = contact.id,
+                sender = "me",
+                text = "",
+                aiGenerated = false,
+                messageType = "voice",
+                mediaData = mediaData,
+                durationSec = safeDuration
+            ).onFailure { err ->
+                _snackbarMessage.value = err.localizedMessage ?: "Failed to send voice message."
+            }
+        }
+    }
+
+    fun sendImageMessageFromUri(context: Context, uri: Uri) {
+        val contact = activeContact.value ?: return
+        if (contact.accountStatus == "banned") {
+            _popupMessage.value = "This account is banned."
+            return
+        }
+        if (contact.blocked) {
+            _popupMessage.value = "This user is blocked. Unblock to send photos."
+            return
+        }
+        viewModelScope.launch {
+            val encoded = withContext(Dispatchers.IO) {
+                encodeStoryMediaDataUri(context, uri)
+            }
+            if (encoded == null) {
+                _snackbarMessage.value = "Unable to process selected photo."
+                return@launch
+            }
+            _quickSuggestions.value = emptyList()
+            repository.sendMessage(
+                userId = currentUserId,
+                contactId = contact.id,
+                sender = "me",
+                text = "📷 Photo",
+                aiGenerated = false,
+                messageType = "image",
+                mediaData = encoded
+            ).onFailure { err ->
+                _snackbarMessage.value = err.localizedMessage ?: "Failed to send photo."
+            }
+        }
+    }
+
+    fun sendImageMessageFromBitmap(bitmap: Bitmap) {
+        val contact = activeContact.value ?: return
+        if (contact.accountStatus == "banned") {
+            _popupMessage.value = "This account is banned."
+            return
+        }
+        if (contact.blocked) {
+            _popupMessage.value = "This user is blocked. Unblock to send photos."
+            return
+        }
+        viewModelScope.launch {
+            val encoded = withContext(Dispatchers.IO) {
+                encodeBitmapToDataUri(bitmap)
+            }
+            if (encoded == null) {
+                _snackbarMessage.value = "Unable to encode captured photo."
+                return@launch
+            }
+            _quickSuggestions.value = emptyList()
+            repository.sendMessage(
+                userId = currentUserId,
+                contactId = contact.id,
+                sender = "me",
+                text = "📷 Photo",
+                aiGenerated = false,
+                messageType = "image",
+                mediaData = encoded
+            ).onFailure { err ->
+                _snackbarMessage.value = err.localizedMessage ?: "Failed to send photo."
+            }
+        }
+    }
+
+    fun sendFileAttachmentMessage(context: Context, uri: Uri) {
+        val contact = activeContact.value ?: return
+        if (contact.accountStatus == "banned") {
+            _popupMessage.value = "This account is banned."
+            return
+        }
+        if (contact.blocked) {
+            _popupMessage.value = "This user is blocked. Unblock to send attachments."
+            return
+        }
+        viewModelScope.launch {
+            val fileName = withContext(Dispatchers.IO) {
+                resolveDisplayFileName(context, uri)
+            }
+            _quickSuggestions.value = emptyList()
+            repository.sendMessage(
+                userId = currentUserId,
+                contactId = contact.id,
+                sender = "me",
+                text = "📎 $fileName",
+                aiGenerated = false,
+                messageType = "file"
+            ).onFailure { err ->
+                _snackbarMessage.value = err.localizedMessage ?: "Failed to send attachment."
+            }
+        }
+    }
+
+    fun logVoiceCallAction() {
+        val contact = activeContact.value ?: return
+        if (contact.accountStatus == "banned" || contact.blocked) return
+        viewModelScope.launch {
+            repository.sendMessage(
+                userId = currentUserId,
+                contactId = contact.id,
+                sender = "me",
+                text = "📞 Voice call",
+                aiGenerated = false,
+                messageType = "call"
+            )
+        }
+    }
+
     fun requestQuickSuggestions() {
         val contact = activeContact.value ?: return
         val history = (activeMessagesState.value as? UiState.Success)?.data.orEmpty()
         viewModelScope.launch {
-            generateThreeSmartReplies(contact, history)
+            generateThreeSmartReplies(contact, history, showErrorFeedback = true)
         }
     }
 
@@ -636,21 +886,35 @@ class NomiChatViewModel(
         _quickSuggestions.value = emptyList()
     }
 
-    private suspend fun generateThreeSmartReplies(contact: ChatThread, history: List<ChatMessage>) {
+    private suspend fun generateThreeSmartReplies(
+        contact: ChatThread,
+        history: List<ChatMessage>,
+        showErrorFeedback: Boolean = false
+    ) {
         if (_isGeneratingSuggestions.value) return
         _isGeneratingSuggestions.value = true
-        val myName = (profileState.value as? UiState.Success)?.data?.displayName ?: "Friend"
-
-        smartReplyRepository.generateQuickSuggestions(
-            userName = myName,
-            contactName = contact.name,
-            recentMessages = history
-        ).onSuccess { chips ->
-            _quickSuggestions.value = chips.take(3)
-        }.onFailure { err ->
-            _snackbarMessage.value = "Could not load smart suggestions: ${err.localizedMessage ?: "Try again"}"
+        try {
+            val myName = (profileState.value as? UiState.Success)?.data?.displayName ?: "Friend"
+            smartReplyRepository.generateQuickSuggestions(
+                userName = myName,
+                contactName = contact.name,
+                recentMessages = history
+            ).onSuccess { chips ->
+                _quickSuggestions.value = chips.take(3)
+            }.onFailure { err ->
+                Log.w(TAG, "Smart suggestions unavailable: ${err.localizedMessage}", err)
+                if (showErrorFeedback) {
+                    val msg = if (!networkStatus.value.isConnected) {
+                        "Connect to the internet for smart suggestions."
+                    } else {
+                        "Smart suggestions temporarily unavailable."
+                    }
+                    _snackbarMessage.value = msg
+                }
+            }
+        } finally {
+            _isGeneratingSuggestions.value = false
         }
-        _isGeneratingSuggestions.value = false
     }
 
     fun reportActiveContact() {
@@ -684,7 +948,7 @@ class NomiChatViewModel(
         val myHandle = (profileState.value as? UiState.Success)?.data?.username.orEmpty()
         viewModelScope.launch {
             _usernameSearchState.value = UsernameSearchState.Loading
-            repository.lookupUserByUsername(clean)
+            repository.lookupUserByUsername(clean, viewerUserId = currentUserId)
                 .onSuccess { found ->
                     _usernameSearchState.value = when {
                         found == null || !found.username.equals(clean, ignoreCase = true) ->
@@ -717,7 +981,7 @@ class NomiChatViewModel(
         val myHandle = (profileState.value as? UiState.Success)?.data?.username.orEmpty()
         viewModelScope.launch {
             _usernameSearchState.value = UsernameSearchState.Loading
-            val lookupResult = repository.lookupUserByUsername(clean)
+            val lookupResult = repository.lookupUserByUsername(clean, viewerUserId = currentUserId)
             val found = lookupResult.getOrNull()
             if (lookupResult.isFailure || found == null || !found.username.equals(clean, ignoreCase = true)) {
                 _usernameSearchState.value = UsernameSearchState.NotFound("User not found")
@@ -825,6 +1089,45 @@ class NomiChatViewModel(
         }
     }
 
+    fun updateProfileBannerFromUri(context: Context, uri: Uri) {
+        viewModelScope.launch {
+            val encoded = withContext(Dispatchers.IO) {
+                encodeBannerDataUri(context, uri)
+            }
+            if (encoded == null) {
+                _snackbarMessage.value = "Unable to process selected banner image."
+                return@launch
+            }
+            repository.updateProfile(
+                userId = currentUserId,
+                bannerData = encoded
+            ).onSuccess {
+                _popupMessage.value = "Profile banner updated"
+            }.onFailure { err ->
+                _snackbarMessage.value = err.localizedMessage ?: "Failed to upload banner."
+            }
+        }
+    }
+
+    fun updatePrivacySettings(
+        visibility: ProfileVisibilityMode,
+        allowedViewerIds: List<String>,
+        maxViewers: Long
+    ) {
+        viewModelScope.launch {
+            repository.updatePrivacySettings(
+                userId = currentUserId,
+                profileVisibility = visibility.key,
+                allowedViewerUids = allowedViewerIds,
+                maxProfileViewers = maxViewers
+            ).onSuccess {
+                _popupMessage.value = "Privacy settings updated"
+            }.onFailure { err ->
+                _snackbarMessage.value = err.localizedMessage ?: "Unable to update privacy settings."
+            }
+        }
+    }
+
     fun setThemeMode(mode: ThemeMode) {
         viewModelScope.launch {
             preferencesRepository.setThemeMode(mode)
@@ -863,16 +1166,26 @@ class NomiChatViewModel(
 
     fun postStoryFromUri(
         context: Context,
-        uri: Uri,
+        uri: Uri?,
         caption: String,
+        storyFont: String = StoryFontStyle.NOTO_NASTALIQ.key,
         onSuccess: () -> Unit
     ) {
         if (_isPostingStory.value) return
+        val cleanCaption = caption.trim()
+        if (uri == null && cleanCaption.isEmpty()) {
+            _snackbarMessage.value = "Choose a photo or enter story text."
+            return
+        }
         viewModelScope.launch {
             _isPostingStory.value = true
             try {
-                val encoded = withContext(Dispatchers.IO) {
-                    encodeStoryMediaDataUri(context, uri)
+                val encoded = if (uri != null) {
+                    withContext(Dispatchers.IO) {
+                        encodeStoryMediaDataUri(context, uri)
+                    }
+                } else {
+                    "text_card:emerald"
                 }
                 if (encoded == null) {
                     _snackbarMessage.value = "Unable to process selected image."
@@ -881,7 +1194,8 @@ class NomiChatViewModel(
                 repository.postStory(
                     userId = currentUserId,
                     mediaData = encoded,
-                    caption = caption
+                    caption = cleanCaption,
+                    storyFont = StoryFontStyle.fromKey(storyFont).key
                 ).onSuccess {
                     storyNowTickMs.value = System.currentTimeMillis()
                     _popupMessage.value = "Story posted for 24 hours"
@@ -924,15 +1238,27 @@ class NomiChatViewModel(
         return try {
             val input = context.contentResolver.openInputStream(uri) ?: return null
             val original = input.use { BitmapFactory.decodeStream(it) } ?: return null
-            val maxDim = 220
-            val scale = maxDim.toFloat() / max(original.width, original.height).toFloat()
-            val targetW = if (scale < 1f) (original.width * scale).toInt().coerceAtLeast(1) else original.width
-            val targetH = if (scale < 1f) (original.height * scale).toInt().coerceAtLeast(1) else original.height
-            val scaled = Bitmap.createScaledBitmap(original, targetW, targetH, true)
-            val baos = ByteArrayOutputStream()
-            scaled.compress(Bitmap.CompressFormat.JPEG, 75, baos)
-            val bytes = baos.toByteArray()
-            "data:image/jpeg;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
+            var maxDim = 320
+            var dataUri: String? = null
+            while (maxDim >= 160 && dataUri == null) {
+                val scale = maxDim.toFloat() / max(original.width, original.height).toFloat()
+                val targetW = if (scale < 1f) (original.width * scale).toInt().coerceAtLeast(1) else original.width
+                val targetH = if (scale < 1f) (original.height * scale).toInt().coerceAtLeast(1) else original.height
+                val scaled = Bitmap.createScaledBitmap(original, targetW, targetH, true)
+                var quality = 82
+                while (quality >= 50) {
+                    val baos = ByteArrayOutputStream()
+                    scaled.compress(Bitmap.CompressFormat.JPEG, quality, baos)
+                    val candidate = "data:image/jpeg;base64," + Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
+                    if (candidate.length <= 140_000) {
+                        dataUri = candidate
+                        break
+                    }
+                    quality -= 10
+                }
+                maxDim = (maxDim * 3) / 4
+            }
+            dataUri
         } catch (e: Exception) {
             Log.e(TAG, "Failed to encode avatar image", e)
             null
@@ -943,6 +1269,15 @@ class NomiChatViewModel(
         return try {
             val input = context.contentResolver.openInputStream(uri) ?: return null
             val original = input.use { BitmapFactory.decodeStream(it) } ?: return null
+            encodeBitmapToDataUri(original)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to encode story media", e)
+            null
+        }
+    }
+
+    private fun encodeBitmapToDataUri(original: Bitmap): String? {
+        return try {
             var maxDim = 720
             var quality = 74
             var dataUri: String? = null
@@ -967,7 +1302,53 @@ class NomiChatViewModel(
             }
             dataUri
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to encode story media", e)
+            Log.e(TAG, "Failed to encode bitmap media", e)
+            null
+        }
+    }
+
+    private fun resolveDisplayFileName(context: Context, uri: Uri): String {
+        val queried = runCatching {
+            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (idx >= 0) cursor.getString(idx) else null
+                    } else null
+                }
+        }.getOrNull()
+        return queried?.trim()?.takeIf { it.isNotBlank() }?.take(80)
+            ?: uri.lastPathSegment?.substringAfterLast('/')?.take(80)
+            ?: "Document"
+    }
+
+    private fun encodeBannerDataUri(context: Context, uri: Uri): String? {
+        return try {
+            val input = context.contentResolver.openInputStream(uri) ?: return null
+            val original = input.use { BitmapFactory.decodeStream(it) } ?: return null
+            var maxDim = 720
+            var dataUri: String? = null
+            while (maxDim >= 280 && dataUri == null) {
+                val scale = maxDim.toFloat() / max(original.width, original.height).toFloat()
+                val targetW = if (scale < 1f) (original.width * scale).toInt().coerceAtLeast(1) else original.width
+                val targetH = if (scale < 1f) (original.height * scale).toInt().coerceAtLeast(1) else original.height
+                val scaled = Bitmap.createScaledBitmap(original, targetW, targetH, true)
+                var quality = 80
+                while (quality >= 42) {
+                    val baos = ByteArrayOutputStream()
+                    scaled.compress(Bitmap.CompressFormat.JPEG, quality, baos)
+                    val candidate = "data:image/jpeg;base64," + Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
+                    if (candidate.length <= 140_000) {
+                        dataUri = candidate
+                        break
+                    }
+                    quality -= 10
+                }
+                maxDim = (maxDim * 3) / 4
+            }
+            dataUri
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to encode banner image", e)
             null
         }
     }

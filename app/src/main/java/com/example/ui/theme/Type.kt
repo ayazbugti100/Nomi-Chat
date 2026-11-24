@@ -72,3 +72,29 @@ val NomiTypography = Typography(
         lineHeight = 14.sp
     )
 )
+
+val NotoNastaliqStoryFont = FontFamily(Font(R.font.noto_nastaliq_urdu, FontWeight.Normal))
+val GulzarStoryFont = FontFamily(Font(R.font.gulzar, FontWeight.Normal))
+val AmiriStoryFont = FontFamily(Font(R.font.amiri, FontWeight.Normal))
+val ScheherazadeStoryFont = FontFamily(Font(R.font.scheherazade_new, FontWeight.Normal))
+val LateefStoryFont = FontFamily(Font(R.font.lateef, FontWeight.Normal))
+val CairoStoryFont = FontFamily(Font(R.font.cairo, FontWeight.Normal))
+val VazirmatnStoryFont = FontFamily(Font(R.font.vazirmatn, FontWeight.Normal))
+val IbmPlexStoryFont = FontFamily(Font(R.font.ibm_plex_sans_arabic, FontWeight.Medium))
+val ElMessiriStoryFont = FontFamily(Font(R.font.el_messiri, FontWeight.Normal))
+val MirzaStoryFont = FontFamily(Font(R.font.mirza, FontWeight.Bold))
+
+fun com.example.data.model.StoryFontStyle.toFontFamily(): FontFamily {
+    return when (this) {
+        com.example.data.model.StoryFontStyle.NOTO_NASTALIQ -> NotoNastaliqStoryFont
+        com.example.data.model.StoryFontStyle.GULZAR -> GulzarStoryFont
+        com.example.data.model.StoryFontStyle.AMIRI -> AmiriStoryFont
+        com.example.data.model.StoryFontStyle.SCHEHERAZADE -> ScheherazadeStoryFont
+        com.example.data.model.StoryFontStyle.LATEEF -> LateefStoryFont
+        com.example.data.model.StoryFontStyle.CAIRO -> CairoStoryFont
+        com.example.data.model.StoryFontStyle.VAZIRMATN -> VazirmatnStoryFont
+        com.example.data.model.StoryFontStyle.IBM_PLEX -> IbmPlexStoryFont
+        com.example.data.model.StoryFontStyle.EL_MESSIRI -> ElMessiriStoryFont
+        com.example.data.model.StoryFontStyle.MIRZA -> MirzaStoryFont
+    }
+}

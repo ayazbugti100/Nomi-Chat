@@ -30,6 +30,10 @@ service cloud.firestore {
              data.dob is string && data.dob.size() >= 4 && data.dob.size() <= 20 &&
              data.provider in ['google', 'username'] &&
              (!('photoData' in data) || (data.photoData is string && data.photoData.size() <= 150000)) &&
+             (!('bannerData' in data) || (data.bannerData is string && data.bannerData.size() <= 150000)) &&
+             (!('profileVisibility' in data) || data.profileVisibility in ['everyone', 'selected', 'nobody']) &&
+             (!('allowedViewerUids' in data) || (data.allowedViewerUids is list && data.allowedViewerUids.size() <= 500 && (data.allowedViewerUids.size() == 0 || data.allowedViewerUids[0] is string))) &&
+             (!('maxProfileViewers' in data) || (data.maxProfileViewers is int && data.maxProfileViewers >= 0 && data.maxProfileViewers <= 500)) &&
              data.online is bool &&
              data.verified is bool &&
              data.premiumUnlocked is bool &&
@@ -43,7 +47,12 @@ service cloud.firestore {
              data.username is string && data.username.size() >= 1 && data.username.size() <= 40 &&
              data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60 &&
              (!('provider' in data) || data.provider in ['google', 'username']) &&
+             (!('bio' in data) || (data.bio is string && data.bio.size() <= 200)) &&
              (!('photoData' in data) || (data.photoData is string && data.photoData.size() <= 150000)) &&
+             (!('bannerData' in data) || (data.bannerData is string && data.bannerData.size() <= 150000)) &&
+             (!('profileVisibility' in data) || data.profileVisibility in ['everyone', 'selected', 'nobody']) &&
+             (!('allowedViewerUids' in data) || (data.allowedViewerUids is list && data.allowedViewerUids.size() <= 500 && (data.allowedViewerUids.size() == 0 || data.allowedViewerUids[0] is string))) &&
+             (!('maxProfileViewers' in data) || (data.maxProfileViewers is int && data.maxProfileViewers >= 0 && data.maxProfileViewers <= 500)) &&
              (!('online' in data) || data.online is bool) &&
              data.accountStatus in ['active', 'banned'] &&
              data.reportCount is int && data.reportCount >= 0 && data.reportCount <= 50 &&
@@ -60,7 +69,9 @@ service cloud.firestore {
              data.username is string && data.username.size() >= 1 && data.username.size() <= 40 &&
              data.phone is string && data.phone.size() <= 30 &&
              data.threadType in ['chat', 'group'] &&
+             (!('bio' in data) || (data.bio is string && data.bio.size() <= 200)) &&
              (!('photoData' in data) || (data.photoData is string && data.photoData.size() <= 150000)) &&
+             (!('bannerData' in data) || (data.bannerData is string && data.bannerData.size() <= 150000)) &&
              data.online is bool &&
              data.typing is bool &&
              data.unreadCount is int && data.unreadCount >= 0 && data.unreadCount <= 99999 &&
@@ -70,6 +81,10 @@ service cloud.firestore {
              data.pinned is bool &&
              (!('locked' in data) || data.locked is bool) &&
              (!('blocked' in data) || data.blocked is bool) &&
+             (!('archived' in data) || data.archived is bool) &&
+             (!('muted' in data) || data.muted is bool) &&
+             (!('disappearingSeconds' in data) || (data.disappearingSeconds is int && data.disappearingSeconds >= 0 && data.disappearingSeconds <= 7776000)) &&
+             (!('chatTheme' in data) || (data.chatTheme is string && data.chatTheme.size() >= 1 && data.chatTheme.size() <= 40)) &&
              (!('customRenamed' in data) || data.customRenamed is bool) &&
              (!('peerUid' in data) || (data.peerUid is string && data.peerUid.size() <= 128)) &&
              (!('isRegisteredPeer' in data) || data.isRegisteredPeer is bool) &&
@@ -87,6 +102,10 @@ service cloud.firestore {
              data.contactId is string && isValidId(data.contactId) &&
              data.sender in ['me', 'them'] &&
              data.text is string && data.text.size() >= 1 && data.text.size() <= 2000 &&
+             (!('messageType' in data) || data.messageType in ['text', 'voice', 'image', 'file', 'call']) &&
+             (!('mediaData' in data) || (data.mediaData is string && data.mediaData.size() <= 240000)) &&
+             (!('durationSec' in data) || (data.durationSec is int && data.durationSec >= 0 && data.durationSec <= 600)) &&
+             (!('expiresAtMs' in data) || (data.expiresAtMs is int && data.expiresAtMs >= 0)) &&
              data.timeLabel is string && data.timeLabel.size() >= 1 && data.timeLabel.size() <= 30 &&
              data.aiGenerated is bool;
     }
@@ -98,6 +117,7 @@ service cloud.firestore {
              (!('authorPhotoData' in data) || (data.authorPhotoData is string && data.authorPhotoData.size() <= 150000)) &&
              data.mediaData is string && data.mediaData.size() >= 1 && data.mediaData.size() <= 240000 &&
              data.caption is string && data.caption.size() <= 140 &&
+             (!('storyFont' in data) || (data.storyFont is string && data.storyFont.size() >= 1 && data.storyFont.size() <= 40)) &&
              data.createdAtMs is int && data.createdAtMs > 0 &&
              data.expiresAtMs is int && data.expiresAtMs > data.createdAtMs &&
              (data.expiresAtMs - data.createdAtMs) <= 86400000;
@@ -129,7 +149,8 @@ service cloud.firestore {
                          'accountStatus', 'reportCount', 'createdAt', 'updatedAt'
                        ]) &&
                        incoming().keys().hasOnly([
-                         'userId', 'displayName', 'username', 'bio', 'dob', 'provider', 'photoData',
+                         'userId', 'displayName', 'username', 'bio', 'dob', 'provider', 'photoData', 'bannerData',
+                         'profileVisibility', 'allowedViewerUids', 'maxProfileViewers',
                          'online', 'verified', 'premiumUnlocked',
                          'accountStatus', 'reportCount', 'createdAt', 'updatedAt'
                        ]) &&
@@ -148,7 +169,8 @@ service cloud.firestore {
                        incoming().reportCount == existing().reportCount &&
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                        incoming().diff(existing()).affectedKeys().hasOnly([
-                         'displayName', 'username', 'bio', 'dob', 'photoData',
+                         'displayName', 'username', 'bio', 'dob', 'photoData', 'bannerData',
+                         'profileVisibility', 'allowedViewerUids', 'maxProfileViewers',
                          'online', 'verified', 'premiumUnlocked', 'deletedContactIds', 'updatedAt'
                        ]);
 
@@ -171,10 +193,11 @@ service cloud.firestore {
                            'createdAt', 'updatedAt'
                          ]) &&
                          incoming().keys().hasOnly([
-                           'userId', 'name', 'username', 'phone', 'threadType', 'photoData',
+                           'userId', 'name', 'username', 'phone', 'threadType', 'bio', 'photoData', 'bannerData',
                            'online', 'typing', 'unreadCount', 'lastMessageText',
                            'lastMessageFromMe', 'lastMessageTimeLabel', 'pinned',
-                           'locked', 'blocked', 'customRenamed', 'peerUid', 'isRegisteredPeer',
+                           'locked', 'blocked', 'archived', 'muted', 'disappearingSeconds', 'chatTheme',
+                           'customRenamed', 'peerUid', 'isRegisteredPeer',
                            'accountStatus', 'reportCount', 'reportedBy',
                            'createdAt', 'updatedAt'
                          ]) &&
@@ -191,9 +214,10 @@ service cloud.firestore {
                          incoming().createdAt == existing().createdAt &&
                          incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                          incoming().diff(existing()).affectedKeys().hasOnly([
-                           'name', 'username', 'phone', 'threadType', 'photoData', 'online', 'typing',
+                           'name', 'username', 'phone', 'threadType', 'bio', 'photoData', 'bannerData', 'online', 'typing',
                            'unreadCount', 'lastMessageText', 'lastMessageFromMe',
-                           'lastMessageTimeLabel', 'pinned', 'locked', 'blocked',
+                           'lastMessageTimeLabel', 'pinned', 'locked', 'blocked', 'archived',
+                           'muted', 'disappearingSeconds', 'chatTheme',
                            'customRenamed', 'peerUid', 'isRegisteredPeer',
                            'accountStatus', 'reportCount', 'reportedBy', 'updatedAt'
                          ]);
@@ -221,6 +245,7 @@ service cloud.firestore {
                            ]) &&
                            incoming().keys().hasOnly([
                              'userId', 'contactId', 'sender', 'text',
+                             'messageType', 'mediaData', 'durationSec', 'expiresAtMs',
                              'timeLabel', 'aiGenerated', 'createdAt'
                            ]) &&
                            incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
@@ -291,7 +316,8 @@ service cloud.firestore {
                          'reportCount', 'reportedByUids', 'createdAt', 'updatedAt'
                        ]) &&
                        incoming().keys().hasOnly([
-                         'ownerUid', 'username', 'displayName', 'provider', 'photoData', 'online',
+                         'ownerUid', 'username', 'displayName', 'provider', 'bio', 'photoData', 'bannerData',
+                         'profileVisibility', 'allowedViewerUids', 'maxProfileViewers', 'online',
                          'accountStatus', 'reportCount', 'reportedByUids', 'createdAt', 'updatedAt'
                        ]) &&
                        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
@@ -309,10 +335,14 @@ service cloud.firestore {
                        incoming().createdAt == existing().createdAt &&
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                        (
-                         // Owner updating display name, photo, or presence without altering moderation state
+                         // Owner updating display name, bio, photo, banner, privacy rules, or presence without altering moderation state
                          ('ownerUid' in existing() &&
                           existing().ownerUid == request.auth.uid &&
-                          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoData', 'online', 'updatedAt'])) ||
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'displayName', 'bio', 'photoData', 'bannerData',
+                            'profileVisibility', 'allowedViewerUids', 'maxProfileViewers',
+                            'online', 'updatedAt'
+                          ])) ||
                          // Any signed-in reporter appending their own unique UID once
                          (!(request.auth.uid in existing().reportedByUids) &&
                           request.auth.uid in incoming().reportedByUids &&
@@ -338,7 +368,7 @@ service cloud.firestore {
                        ]) &&
                        incoming().keys().hasOnly([
                          'userId', 'authorName', 'authorUsername', 'authorPhotoData',
-                         'mediaData', 'caption', 'createdAtMs', 'expiresAtMs', 'createdAt'
+                         'mediaData', 'caption', 'storyFont', 'createdAtMs', 'expiresAtMs', 'createdAt'
                        ]) &&
                        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
                        isValidStory(incoming());
@@ -363,6 +393,9 @@ service cloud.firestore {
                        incoming().fromDisplayName is string && incoming().fromDisplayName.size() >= 1 && incoming().fromDisplayName.size() <= 60 &&
                        incoming().toUsername is string && incoming().toUsername.size() >= 1 && incoming().toUsername.size() <= 40 &&
                        incoming().text is string && incoming().text.size() >= 1 && incoming().text.size() <= 2000 &&
+                       (!('messageType' in incoming()) || incoming().messageType in ['text', 'voice', 'image', 'file', 'call']) &&
+                       (!('mediaData' in incoming()) || (incoming().mediaData is string && incoming().mediaData.size() <= 240000)) &&
+                       (!('durationSec' in incoming()) || (incoming().durationSec is int && incoming().durationSec >= 0 && incoming().durationSec <= 600)) &&
                        incoming().timeLabel is string && incoming().timeLabel.size() >= 1 && incoming().timeLabel.size() <= 30 &&
                        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
                        incoming().keys().hasAll([
@@ -371,7 +404,8 @@ service cloud.firestore {
                        ]) &&
                        incoming().keys().hasOnly([
                          'fromUid', 'toUid', 'fromUsername', 'fromDisplayName',
-                         'toUsername', 'text', 'timeLabel', 'createdAt'
+                         'toUsername', 'text', 'messageType', 'mediaData', 'durationSec',
+                         'timeLabel', 'createdAt'
                        ]);
 
       allow update: if false;

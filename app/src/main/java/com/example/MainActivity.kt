@@ -97,12 +97,14 @@ import com.example.ui.screens.AddContactDialog
 import com.example.ui.screens.AppLockOverlay
 import com.example.ui.screens.AppLockSetupDialog
 import com.example.ui.screens.AppearanceDialog
+import com.example.ui.screens.ArchivedChatsScreen
 import com.example.ui.screens.AvatarPreviewDialog
 import com.example.ui.screens.ChatsScreen
 import com.example.ui.screens.ContactProfileDialog
 import com.example.ui.screens.ConversationScreen
 import com.example.ui.screens.EditSingleFieldDialog
 import com.example.ui.screens.PremiumFeaturesDialog
+import com.example.ui.screens.PrivacySettingsScreen
 import com.example.ui.screens.ProfileScreen
 import com.example.ui.screens.ReportAccountDialog
 import com.example.ui.screens.StoryPickerDialog
@@ -479,7 +481,12 @@ private fun NomiChatMainShell(
     val isPostingStory by viewModel.isPostingStory.collectAsStateWithLifecycle()
     val inAppAlertBanner by viewModel.inAppAlertBanner.collectAsStateWithLifecycle()
 
+    val rawAllThreads by viewModel.allThreadsState.collectAsStateWithLifecycle()
+    val archivedChats by viewModel.archivedChatsState.collectAsStateWithLifecycle()
+    val blockedContacts by viewModel.blockedContactsState.collectAsStateWithLifecycle()
     var activeModal by remember { mutableStateOf(ActiveModal.NONE) }
+    var isPrivacySettingsOpen by remember { mutableStateOf(false) }
+    var isArchivedFolderOpen by remember { mutableStateOf(false) }
     var activeStoryAuthorKey by remember { mutableStateOf<String?>(null) }
     var avatarPreviewThreadId by remember { mutableStateOf<String?>(null) }
     var viewContactThreadId by remember { mutableStateOf<String?>(null) }
@@ -488,14 +495,15 @@ private fun NomiChatMainShell(
     val snackbarHostState = remember { SnackbarHostState() }
 
     val allThreads = (contactsState as? UiState.Success)?.data.orEmpty()
+    val lookupThreads = rawAllThreads.ifEmpty { allThreads }
     val activeStoryGroup = remember(activeStoryAuthorKey, activeStories) {
         val key = activeStoryAuthorKey ?: return@remember emptyList()
         activeStories.filter { it.userId.ifBlank { it.authorUsername } == key }
     }
-    val avatarPreviewThread = avatarPreviewThreadId?.let { id -> allThreads.firstOrNull { it.id == id } }
-    val viewContactThread = viewContactThreadId?.let { id -> allThreads.firstOrNull { it.id == id } }
-    val renameThread = renameThreadId?.let { id -> allThreads.firstOrNull { it.id == id } }
-    val reportThread = reportThreadId?.let { id -> allThreads.firstOrNull { it.id == id } }
+    val avatarPreviewThread = avatarPreviewThreadId?.let { id -> lookupThreads.firstOrNull { it.id == id } }
+    val viewContactThread = viewContactThreadId?.let { id -> lookupThreads.firstOrNull { it.id == id } }
+    val renameThread = renameThreadId?.let { id -> lookupThreads.firstOrNull { it.id == id } }
+    val reportThread = reportThreadId?.let { id -> lookupThreads.firstOrNull { it.id == id } }
 
     LaunchedEffect(activeStoryAuthorKey, activeStoryGroup) {
         if (activeStoryAuthorKey != null && activeStoryGroup.isEmpty()) {
@@ -573,11 +581,13 @@ private fun NomiChatMainShell(
                 .widthIn(max = 600.dp),
             snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
             bottomBar = {
-                if (activeContact == null) {
+                if (activeContact == null && !isPrivacySettingsOpen && !isArchivedFolderOpen) {
                     NomiBottomBar(
                         selectedTab = bottomTab,
                         totalUnreadCount = totalUnreadCount,
                         onSelectTab = { tab ->
+                            isPrivacySettingsOpen = false
+                            isArchivedFolderOpen = false
                             onSelectBottomTab(tab)
                             when (tab) {
                                 MainBottomTab.CHATS -> viewModel.selectPillFilter(ChatPillFilter.CHATS)
@@ -596,7 +606,13 @@ private fun NomiChatMainShell(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(bottom = if (activeContact == null) innerPadding.calculateBottomPadding() else 0.dp)
+                    .padding(
+                        bottom = if (activeContact == null && !isPrivacySettingsOpen && !isArchivedFolderOpen) {
+                            innerPadding.calculateBottomPadding()
+                        } else {
+                            0.dp
+                        }
+                    )
             ) {
                 val currentThread = activeContact
                 if (currentThread != null) {
@@ -611,9 +627,45 @@ private fun NomiChatMainShell(
                         onRequestSuggestions = viewModel::requestQuickSuggestions,
                         onDismissSuggestions = viewModel::dismissQuickSuggestions,
                         onSendMessage = viewModel::sendMessage,
+                        onSendVoiceMessage = viewModel::sendVoiceMessage,
+                        onSendImageUri = { uri -> viewModel.sendImageMessageFromUri(context, uri) },
+                        onSendCameraBitmap = viewModel::sendImageMessageFromBitmap,
+                        onSendFileUri = { uri -> viewModel.sendFileAttachmentMessage(context, uri) },
+                        onVoiceCallInitiated = viewModel::logVoiceCallAction,
                         onReportContact = viewModel::reportActiveContact,
                         onToggleBlockContact = { viewModel.toggleBlockChat(currentThread) },
+                        onToggleArchiveContact = { viewModel.toggleArchiveChat(currentThread) },
+                        onToggleMuteContact = { viewModel.toggleMuteChat(currentThread) },
+                        onSetDisappearingMessages = { sec -> viewModel.setDisappearingMessages(currentThread, sec) },
+                        onSetChatTheme = { themeKey -> viewModel.setChatTheme(currentThread, themeKey) },
+                        onToggleLockChat = { viewModel.toggleLockChat(currentThread) },
+                        onClearMessages = { viewModel.clearChatMessages(currentThread) },
+                        onDeleteChat = { viewModel.deleteChatPermanently(currentThread) },
+                        onShowNotice = onShowGlobalPopup,
                         onBack = viewModel::closeConversation
+                    )
+                } else if (isPrivacySettingsOpen) {
+                    PrivacySettingsScreen(
+                        profile = profile,
+                        allThreads = rawAllThreads,
+                        blockedContacts = blockedContacts,
+                        onSavePrivacySettings = viewModel::updatePrivacySettings,
+                        onUnblockContact = viewModel::toggleBlockChat,
+                        onShowNotice = onShowGlobalPopup,
+                        onBack = { isPrivacySettingsOpen = false }
+                    )
+                } else if (isArchivedFolderOpen) {
+                    ArchivedChatsScreen(
+                        archivedChats = archivedChats,
+                        activeStories = activeStories,
+                        onOpenChat = viewModel::openConversation,
+                        onAvatarClick = { thread -> avatarPreviewThreadId = thread.id },
+                        onRenameChat = { thread -> renameThreadId = thread.id },
+                        onViewContact = { thread -> viewContactThreadId = thread.id },
+                        onUnarchiveChat = viewModel::toggleArchiveChat,
+                        onToggleBlockChat = viewModel::toggleBlockChat,
+                        onDeleteChat = viewModel::deleteChatPermanently,
+                        onBack = { isArchivedFolderOpen = false }
                     )
                 } else if (bottomTab == MainBottomTab.SETTINGS) {
                     ProfileScreen(
@@ -630,6 +682,7 @@ private fun NomiChatMainShell(
                         onEditUsernameClick = { activeModal = ActiveModal.EDIT_USERNAME },
                         onEditDobClick = { activeModal = ActiveModal.EDIT_DOB },
                         onPhotoPicked = { uri -> viewModel.updateProfilePhotoFromUri(context, uri) },
+                        onBannerPicked = { uri -> viewModel.updateProfileBannerFromUri(context, uri) },
                         onOpenPasscodeSetup = { activeModal = ActiveModal.PASSCODE },
                         onToggleNotifications = viewModel::setNotificationsEnabled,
                         onOpenAppearancePicker = { activeModal = ActiveModal.APPEARANCE },
@@ -684,6 +737,7 @@ private fun NomiChatMainShell(
                 } else {
                     ChatsScreen(
                         contactsState = contactsState,
+                        archivedChats = archivedChats,
                         profile = profile,
                         activeStories = activeStories,
                         selectedFilter = selectedFilter,
@@ -702,6 +756,8 @@ private fun NomiChatMainShell(
                             )
                         },
                         onOpenProfile = { onSelectBottomTab(MainBottomTab.SETTINGS) },
+                        onOpenPrivacySettings = { isPrivacySettingsOpen = true },
+                        onOpenArchivedFolder = { isArchivedFolderOpen = true },
                         onOpenPremium = { activeModal = ActiveModal.PREMIUM },
                         onOpenChat = viewModel::openConversation,
                         onAvatarClick = { thread -> avatarPreviewThreadId = thread.id },
@@ -709,6 +765,7 @@ private fun NomiChatMainShell(
                         onViewContact = { thread -> viewContactThreadId = thread.id },
                         onToggleLockChat = viewModel::toggleLockChat,
                         onToggleBlockChat = viewModel::toggleBlockChat,
+                        onToggleArchiveChat = viewModel::toggleArchiveChat,
                         onDeleteChat = viewModel::deleteChatPermanently,
                         onAddContactClick = {
                             viewModel.resetUsernameSearch()
@@ -816,11 +873,12 @@ private fun NomiChatMainShell(
         ActiveModal.POST_STORY -> StoryPickerDialog(
             isPosting = isPostingStory,
             onDismiss = { activeModal = ActiveModal.NONE },
-            onPostStory = { uri, caption ->
+            onPostStory = { uri, caption, storyFont ->
                 viewModel.postStoryFromUri(
                     context = context,
                     uri = uri,
                     caption = caption,
+                    storyFont = storyFont,
                     onSuccess = { activeModal = ActiveModal.NONE }
                 )
             }
