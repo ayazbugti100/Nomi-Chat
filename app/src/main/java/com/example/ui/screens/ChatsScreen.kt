@@ -348,11 +348,6 @@ fun ChatsScreen(
                         modifier = Modifier.padding(top = 14.dp, bottom = 10.dp)
                     )
 
-                    GoPremiumBanner(
-                        onClick = onOpenPremium,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
-                    )
-
                     AnimatedVisibility(visible = !networkStatus.isConnected) {
                         Surface(
                             modifier = Modifier

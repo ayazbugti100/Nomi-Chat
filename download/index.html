@@ -68,6 +68,20 @@
       font-size: 12px;
       color: #6b7280;
     }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    .spinner {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      border-radius: 50%;
+      border-top-color: #ffffff;
+      animation: spin 0.8s linear infinite;
+      vertical-align: middle;
+    }
   </style>
 </head>
 <body>
@@ -104,7 +118,7 @@
           type="button"
           id="username-add-btn"
           onclick="handleUsernameAdd(document.getElementById('username-input').value)"
-          style="background-color: #075e54; color: #ffffff; border: none; border-radius: 10px; padding: 10px 16px; font-size: 14px; font-weight: 600; cursor: pointer;"
+          style="background-color: #075e54; color: #ffffff; border: none; border-radius: 10px; padding: 10px 16px; font-size: 14px; font-weight: 600; cursor: pointer; min-width: 68px;"
         >
           Add
         </button>
@@ -124,18 +138,27 @@
     async function handleUsernameAdd(username) {
       const cleanUsername = (username || "").trim().toLowerCase();
       const messageBox = document.getElementById("username-message");
+      const addBtn = document.getElementById("username-add-btn");
 
       if (!cleanUsername) {
         messageBox.style.color = "red";
         messageBox.textContent = "Please enter a username.";
+        if (typeof navigator.vibrate === "function") navigator.vibrate(100);
         return;
       }
 
       if (!navigator.onLine) {
         messageBox.style.color = "red";
         messageBox.textContent = "Internet connection is required to add a username.";
+        if (typeof navigator.vibrate === "function") navigator.vibrate(100);
         return;
       }
+
+      // Disable button and show spinner
+      addBtn.disabled = true;
+      addBtn.style.opacity = "0.7";
+      addBtn.style.cursor = "not-allowed";
+      addBtn.innerHTML = '<span class="spinner"></span>';
 
       messageBox.style.color = "#555";
       messageBox.textContent = "Checking username...";
@@ -153,12 +176,14 @@
         if (checkData && checkData.banned === true) {
           messageBox.style.color = "red";
           messageBox.textContent = "This account is banned, so it cannot be added here.";
+          if (typeof navigator.vibrate === "function") navigator.vibrate(100);
           return;
         }
 
         if (checkData && checkData.exists === true) {
           messageBox.style.color = "red";
           messageBox.textContent = "This username is already added. You cannot add it again.";
+          if (typeof navigator.vibrate === "function") navigator.vibrate(100);
           return;
         }
 
@@ -173,22 +198,32 @@
         if (addRes && addRes.ok) {
           messageBox.style.color = "green";
           messageBox.textContent = "Username added successfully.";
+          if (typeof navigator.vibrate === "function") navigator.vibrate([50, 50, 50]);
         } else if (!addRes) {
-          // If offline or endpoint unreachable due to network
           if (!navigator.onLine) {
             messageBox.style.color = "red";
             messageBox.textContent = "Internet connection is required to add a username.";
+            if (typeof navigator.vibrate === "function") navigator.vibrate(100);
           } else {
             messageBox.style.color = "green";
             messageBox.textContent = "Username added successfully.";
+            if (typeof navigator.vibrate === "function") navigator.vibrate([50, 50, 50]);
           }
         } else {
           messageBox.style.color = "red";
           messageBox.textContent = "Could not add username. Please try again.";
+          if (typeof navigator.vibrate === "function") navigator.vibrate(100);
         }
       } catch (err) {
         messageBox.style.color = "red";
         messageBox.textContent = "Network error occurred while adding the username.";
+        if (typeof navigator.vibrate === "function") navigator.vibrate(100);
+      } finally {
+        // Re-enable button and restore text
+        addBtn.disabled = false;
+        addBtn.style.opacity = "1";
+        addBtn.style.cursor = "pointer";
+        addBtn.textContent = "Add";
       }
     }
   </script>
