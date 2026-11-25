@@ -26,6 +26,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.CallMade
 import androidx.compose.material.icons.automirrored.filled.CallReceived
@@ -52,6 +53,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -59,6 +61,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -100,12 +103,14 @@ import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.LightOnSurface
 import kotlin.math.max
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatsScreen(
     contactsState: UiState<List<ChatThread>>,
     archivedChats: List<ChatThread> = emptyList(),
     profile: UserProfile? = null,
     activeStories: List<StoryItem> = emptyList(),
+    seenStoryIds: Set<String> = emptySet(),
     selectedFilter: ChatPillFilter,
     isSearchVisible: Boolean,
     searchQuery: String,
@@ -128,6 +133,8 @@ fun ChatsScreen(
     onPostStoryClick: () -> Unit = {},
     onOpenStoryGroup: (List<StoryItem>) -> Unit = {},
     networkStatus: NetworkStatus = NetworkStatus(),
+    isRefreshing: Boolean = false,
+    onRefresh: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val myUserId = profile?.userId.orEmpty()
@@ -140,15 +147,16 @@ fun ChatsScreen(
                 (!profile?.username.isNullOrBlank() && story.authorUsername.equals(profile?.username, ignoreCase = true))
         }
     }
-    val activeStoryAuthorUids = remember(activeStories) {
-        activeStories.mapNotNull { it.userId.takeIf(String::isNotBlank) }.toSet()
+    fun storiesForThread(thread: ChatThread): List<StoryItem> {
+        return activeStories.filter { story ->
+            (thread.peerUid.isNotBlank() && story.userId == thread.peerUid) ||
+                (thread.username.isNotBlank() && story.authorUsername.equals(thread.username, ignoreCase = true))
+        }
     }
-    val activeStoryUsernames = remember(activeStories) {
-        activeStories.mapNotNull { it.authorUsername.takeIf(String::isNotBlank)?.lowercase() }.toSet()
-    }
-    fun threadHasActiveStory(thread: ChatThread): Boolean {
-        return (thread.peerUid.isNotBlank() && activeStoryAuthorUids.contains(thread.peerUid)) ||
-            (thread.username.isNotBlank() && activeStoryUsernames.contains(thread.username.lowercase()))
+    fun threadHasActiveStory(thread: ChatThread): Boolean = storiesForThread(thread).isNotEmpty()
+    fun threadStorySeen(thread: ChatThread): Boolean {
+        val list = storiesForThread(thread)
+        return list.isNotEmpty() && list.all { it.id in seenStoryIds }
     }
     Box(modifier = modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -380,108 +388,120 @@ fun ChatsScreen(
 
                     Spacer(modifier = Modifier.height(6.dp))
 
-                    if (selectedFilter == ChatPillFilter.CHATS && activeStories.isNotEmpty()) {
+                    if (selectedFilter == ChatPillFilter.CHATS) {
                         StoriesStripRow(
                             profile = profile,
                             myStories = myStories,
                             allStories = activeStories,
+                            seenStoryIds = seenStoryIds,
                             onPostStoryClick = onPostStoryClick,
                             onOpenStoryGroup = onOpenStoryGroup
                         )
                     }
 
-                    when (selectedFilter) {
-                        ChatPillFilter.STATUS -> {
-                            StatusOverviewList(
-                                profile = profile,
-                                myStories = myStories,
-                                allStories = activeStories,
-                                contacts = (contactsState as? UiState.Success)?.data.orEmpty(),
-                                threadHasStory = ::threadHasActiveStory,
-                                onPostStoryClick = onPostStoryClick,
-                                onOpenStoryGroup = onOpenStoryGroup,
-                                onOpenChat = onOpenChat
-                            )
-                        }
-                        ChatPillFilter.CALLS -> {
-                            CallsOverviewList(
-                                contacts = (contactsState as? UiState.Success)?.data.orEmpty(),
-                                threadHasStory = ::threadHasActiveStory,
-                                onOpenChat = onOpenChat
-                            )
-                        }
-                        else -> {
-                            when (contactsState) {
-                                is UiState.Loading -> {
-                                    Box(
-                                        modifier = Modifier.fillMaxSize(),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        CircularProgressIndicator(color = EmeraldMid)
-                                    }
-                                }
-                                is UiState.Error -> {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxSize()
-                                            .padding(24.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = contactsState.message,
-                                            style = MaterialTheme.typography.bodyLarge,
-                                            color = MaterialTheme.colorScheme.error
-                                        )
-                                    }
-                                }
-                                is UiState.Success -> {
-                                    val showArchivedEntry = selectedFilter == ChatPillFilter.CHATS && archivedChats.isNotEmpty()
-                                    if (contactsState.data.isEmpty() && !showArchivedEntry) {
-                                        EmptyChatsState(onAddContactClick = onAddContactClick)
-                                    } else {
-                                        LazyColumn(
+                    PullToRefreshBox(
+                        isRefreshing = isRefreshing,
+                        onRefresh = onRefresh,
+                        modifier = Modifier.weight(1f).fillMaxWidth()
+                    ) {
+                        when (selectedFilter) {
+                            ChatPillFilter.STATUS -> {
+                                StatusOverviewList(
+                                    profile = profile,
+                                    myStories = myStories,
+                                    allStories = activeStories,
+                                    seenStoryIds = seenStoryIds,
+                                    contacts = (contactsState as? UiState.Success)?.data.orEmpty(),
+                                    threadHasStory = ::threadHasActiveStory,
+                                    threadStorySeen = ::threadStorySeen,
+                                    onPostStoryClick = onPostStoryClick,
+                                    onOpenStoryGroup = onOpenStoryGroup,
+                                    onOpenChat = onOpenChat
+                                )
+                            }
+                            ChatPillFilter.CALLS -> {
+                                CallsOverviewList(
+                                    contacts = (contactsState as? UiState.Success)?.data.orEmpty(),
+                                    threadHasStory = ::threadHasActiveStory,
+                                    threadStorySeen = ::threadStorySeen,
+                                    onOpenChat = onOpenChat
+                                )
+                            }
+                            else -> {
+                                when (contactsState) {
+                                    is UiState.Loading -> {
+                                        Box(
                                             modifier = Modifier.fillMaxSize(),
-                                            contentPadding = PaddingValues(
-                                                start = 10.dp,
-                                                end = 10.dp,
-                                                top = 4.dp,
-                                                bottom = 104.dp
-                                            )
+                                            contentAlignment = Alignment.Center
                                         ) {
-                                            if (showArchivedEntry) {
-                                                item(key = "archived_folder_row") {
-                                                    ArchivedFolderRow(
-                                                        archivedChats = archivedChats,
-                                                        onClick = onOpenArchivedFolder
-                                                    )
-                                                }
-                                            }
-                                            if (contactsState.data.isEmpty() && showArchivedEntry) {
-                                                item(key = "all_chats_archived_hint") {
-                                                    Text(
-                                                        text = "Your main inbox is clean. Tap Archived above to view or unarchive chats.",
-                                                        style = MaterialTheme.typography.bodyMedium,
-                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                        textAlign = TextAlign.Center,
-                                                        modifier = Modifier
-                                                            .fillMaxWidth()
-                                                            .padding(horizontal = 24.dp, vertical = 28.dp)
-                                                            .testTag("inbox_archived_hint")
-                                                    )
-                                                }
-                                            }
-                                            items(contactsState.data, key = { it.id }) { thread ->
-                                                ChatListRow(
-                                                    thread = thread,
-                                                    hasActiveStory = threadHasActiveStory(thread),
-                                                    onOpenChat = { onOpenChat(thread.id) },
-                                                    onAvatarClick = { onAvatarClick(thread) },
-                                                    onRenameChat = { onRenameChat(thread) },
-                                                    onViewContact = { onViewContact(thread) },
-                                                    onToggleArchive = { onToggleArchiveChat(thread) },
-                                                    onToggleBlock = { onToggleBlockChat(thread) },
-                                                    onDeleteChat = { onDeleteChat(thread) }
+                                            CircularProgressIndicator(color = EmeraldMid)
+                                        }
+                                    }
+                                    is UiState.Error -> {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .verticalScroll(rememberScrollState())
+                                                .padding(24.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = contactsState.message,
+                                                style = MaterialTheme.typography.bodyLarge,
+                                                color = MaterialTheme.colorScheme.error
+                                            )
+                                        }
+                                    }
+                                    is UiState.Success -> {
+                                        val showArchivedEntry = selectedFilter == ChatPillFilter.CHATS && archivedChats.isNotEmpty()
+                                        if (contactsState.data.isEmpty() && !showArchivedEntry) {
+                                            EmptyChatsState(onAddContactClick = onAddContactClick)
+                                        } else {
+                                            LazyColumn(
+                                                modifier = Modifier.fillMaxSize(),
+                                                contentPadding = PaddingValues(
+                                                    start = 10.dp,
+                                                    end = 10.dp,
+                                                    top = 4.dp,
+                                                    bottom = 104.dp
                                                 )
+                                            ) {
+                                                if (showArchivedEntry) {
+                                                    item(key = "archived_folder_row") {
+                                                        ArchivedFolderRow(
+                                                            archivedChats = archivedChats,
+                                                            onClick = onOpenArchivedFolder
+                                                        )
+                                                    }
+                                                }
+                                                if (contactsState.data.isEmpty() && showArchivedEntry) {
+                                                    item(key = "all_chats_archived_hint") {
+                                                        Text(
+                                                            text = "Your main inbox is clean. Tap Archived above to view or unarchive chats.",
+                                                            style = MaterialTheme.typography.bodyMedium,
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                            textAlign = TextAlign.Center,
+                                                            modifier = Modifier
+                                                                .fillMaxWidth()
+                                                                .padding(horizontal = 24.dp, vertical = 28.dp)
+                                                                .testTag("inbox_archived_hint")
+                                                        )
+                                                    }
+                                                }
+                                                items(contactsState.data, key = { it.id }) { thread ->
+                                                    ChatListRow(
+                                                        thread = thread,
+                                                        hasActiveStory = threadHasActiveStory(thread),
+                                                        storyRingSeen = threadStorySeen(thread),
+                                                        onOpenChat = { onOpenChat(thread.id) },
+                                                        onAvatarClick = { onAvatarClick(thread) },
+                                                        onRenameChat = { onRenameChat(thread) },
+                                                        onViewContact = { onViewContact(thread) },
+                                                        onToggleArchive = { onToggleArchiveChat(thread) },
+                                                        onToggleBlock = { onToggleBlockChat(thread) },
+                                                        onDeleteChat = { onDeleteChat(thread) }
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -672,6 +692,7 @@ fun ArchivedFolderRow(
 fun ChatListRow(
     thread: ChatThread,
     hasActiveStory: Boolean = false,
+    storyRingSeen: Boolean = false,
     showQuickUnarchive: Boolean = false,
     onOpenChat: () -> Unit,
     onAvatarClick: () -> Unit,
@@ -714,6 +735,7 @@ fun ChatListRow(
                     isChannel = isChannel,
                     showOnlineDot = thread.online && !thread.blocked,
                     hasStoryRing = hasActiveStory && !thread.blocked,
+                    storyRingSeen = storyRingSeen,
                     size = 52.dp
                 )
             }
@@ -1026,6 +1048,7 @@ private fun StoriesStripRow(
     profile: UserProfile?,
     myStories: List<StoryItem>,
     allStories: List<StoryItem>,
+    seenStoryIds: Set<String>,
     onPostStoryClick: () -> Unit,
     onOpenStoryGroup: (List<StoryItem>) -> Unit
 ) {
@@ -1040,6 +1063,7 @@ private fun StoriesStripRow(
             .values
             .toList()
     }
+    val myAllSeen = myStories.isNotEmpty() && myStories.all { it.id in seenStoryIds }
 
     Row(
         modifier = Modifier
@@ -1052,7 +1076,7 @@ private fun StoriesStripRow(
     ) {
         Column(
             modifier = Modifier
-                .width(62.dp)
+                .width(64.dp)
                 .clip(RoundedCornerShape(12.dp))
                 .clickable {
                     if (myStories.isNotEmpty()) onOpenStoryGroup(myStories) else onPostStoryClick()
@@ -1065,20 +1089,22 @@ private fun StoriesStripRow(
                     name = profile?.displayName?.ifBlank { "My Story" } ?: "My Story",
                     photoData = profile?.photoData,
                     hasStoryRing = myStories.isNotEmpty(),
-                    size = 54.dp
+                    storyRingSeen = myAllSeen,
+                    size = 56.dp
                 )
                 Box(
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
-                        .size(20.dp)
+                        .size(22.dp)
                         .clip(CircleShape)
-                        .background(EmeraldDark)
-                        .clickable(onClick = onPostStoryClick),
+                        .background(EmeraldBright)
+                        .clickable(onClick = onPostStoryClick)
+                        .testTag("my_story_add_plus"),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Default.Add,
-                        contentDescription = "Add 24-hour story",
+                        contentDescription = "Add story photo or video",
                         tint = Color.White,
                         modifier = Modifier.size(14.dp)
                     )
@@ -1086,7 +1112,7 @@ private fun StoriesStripRow(
             }
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "My Story",
+                text = if (myStories.isNotEmpty()) "My Story" else "Add Story",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
@@ -1097,9 +1123,10 @@ private fun StoriesStripRow(
 
         peerGroups.forEach { group ->
             val first = group.firstOrNull() ?: return@forEach
+            val isSeen = group.isNotEmpty() && group.all { it.id in seenStoryIds }
             Column(
                 modifier = Modifier
-                    .width(62.dp)
+                    .width(64.dp)
                     .clip(RoundedCornerShape(12.dp))
                     .clickable { onOpenStoryGroup(group) }
                     .testTag("peer_story_item_${first.authorUsername}"),
@@ -1109,7 +1136,8 @@ private fun StoriesStripRow(
                     name = first.authorName,
                     photoData = first.authorPhotoData,
                     hasStoryRing = true,
-                    size = 54.dp
+                    storyRingSeen = isSeen,
+                    size = 56.dp
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
@@ -1130,8 +1158,10 @@ private fun StatusOverviewList(
     profile: UserProfile?,
     myStories: List<StoryItem>,
     allStories: List<StoryItem>,
+    seenStoryIds: Set<String>,
     contacts: List<ChatThread>,
     threadHasStory: (ChatThread) -> Boolean,
+    threadStorySeen: (ChatThread) -> Boolean,
     onPostStoryClick: () -> Unit,
     onOpenStoryGroup: (List<StoryItem>) -> Unit,
     onOpenChat: (String) -> Unit
@@ -1223,6 +1253,7 @@ private fun StatusOverviewList(
 
         items(peerStoryGroups, key = { it.first().id }) { group ->
             val first = group.first()
+            val isSeen = group.isNotEmpty() && group.all { it.id in seenStoryIds }
             val remainingHrs = max(1, ((first.expiresAtMs - System.currentTimeMillis()) / 3_600_000L).toInt())
             Row(
                 modifier = Modifier
@@ -1237,6 +1268,7 @@ private fun StatusOverviewList(
                     name = first.authorName,
                     photoData = first.authorPhotoData,
                     hasStoryRing = true,
+                    storyRingSeen = isSeen,
                     size = 50.dp
                 )
                 Column(modifier = Modifier.weight(1f)) {
@@ -1289,6 +1321,7 @@ private fun StatusOverviewList(
                     isGroup = thread.threadType == "group",
                     borderColor = if (threadHasStory(thread)) null else EmeraldBright,
                     hasStoryRing = threadHasStory(thread),
+                    storyRingSeen = threadStorySeen(thread),
                     showOnlineDot = true,
                     size = 50.dp
                 )
@@ -1313,6 +1346,7 @@ private fun StatusOverviewList(
 private fun CallsOverviewList(
     contacts: List<ChatThread>,
     threadHasStory: (ChatThread) -> Boolean,
+    threadStorySeen: (ChatThread) -> Boolean,
     onOpenChat: (String) -> Unit
 ) {
     val callEntries = contacts.filter { it.threadType == "chat" }
@@ -1343,6 +1377,7 @@ private fun CallsOverviewList(
                     name = thread.name,
                     photoData = thread.photoData,
                     hasStoryRing = threadHasStory(thread),
+                    storyRingSeen = threadStorySeen(thread),
                     showOnlineDot = thread.online,
                     size = 48.dp
                 )
@@ -1390,6 +1425,7 @@ private fun EmptyChatsState(onAddContactClick: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(32.dp)
             .testTag("empty_chats_state"),
         horizontalAlignment = Alignment.CenterHorizontally,

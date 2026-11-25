@@ -48,6 +48,7 @@ data class UserProfile(
     val userId: String = "",
     val displayName: String = "",
     val username: String = "",
+    val email: String = "",
     val bio: String = "Dream Big... 💚",
     val dob: String = "2000-01-01",
     val provider: String = "google",
@@ -57,6 +58,7 @@ data class UserProfile(
     val allowedViewerUids: List<String> = emptyList(),
     val maxProfileViewers: Long = 0L,
     val online: Boolean = true,
+    val showOnlineStatus: Boolean = true,
     val verified: Boolean = true,
     val premiumUnlocked: Boolean = true,
     val accountStatus: String = "active",
@@ -81,6 +83,7 @@ data class UserDirectoryEntry(
     val allowedViewerUids: List<String> = emptyList(),
     val maxProfileViewers: Long = 0L,
     val online: Boolean = false,
+    val showOnlineStatus: Boolean = true,
     val accountStatus: String = "active",
     val reportCount: Long = 0L,
     val reportedByUids: List<String> = emptyList(),
@@ -182,12 +185,148 @@ data class StoryItem(
     val authorUsername: String = "",
     val authorPhotoData: String? = null,
     val mediaData: String = "",
+    val mediaType: String = "image",
     val caption: String = "",
     val storyFont: String = StoryFontStyle.NOTO_NASTALIQ.key,
+    val musicTag: String = "",
+    val overlayText: String = "",
+    val overlayColorHex: Long = 0xFFFFFFFFL,
+    val overlayYFraction: Double = 0.5,
+    val stickersJson: String = "",
+    val drawingJson: String = "",
+    val cropMode: String = "crop",
+    val rotationDegrees: Long = 0L,
+    val viewedByUids: List<String> = emptyList(),
+    val likedByUids: List<String> = emptyList(),
     val createdAtMs: Long = 0L,
     val expiresAtMs: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null
 )
+
+@Keep
+@IgnoreExtraProperties
+data class StoryViewRecord(
+    @DocumentId val id: String = "",
+    val viewerUid: String = "",
+    val viewerName: String = "",
+    val viewerUsername: String = "",
+    val viewerPhotoData: String? = null,
+    val liked: Boolean = false,
+    val reactionEmoji: String = "",
+    val viewedAtMs: Long = 0L,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+data class StoryStickerOverlay(
+    val id: String,
+    val text: String,
+    val xFraction: Float = 0.5f,
+    val yFraction: Float = 0.45f
+)
+
+data class StoryDrawStroke(
+    val colorHex: Long,
+    val strokeWidth: Float = 8f,
+    val points: List<Pair<Float, Float>>
+)
+
+object StoryOverlayCodec {
+    fun encodeStickers(stickers: List<StoryStickerOverlay>): String {
+        if (stickers.isEmpty()) return ""
+        val arr = org.json.JSONArray()
+        stickers.take(20).forEach { s ->
+            arr.put(
+                org.json.JSONObject().apply {
+                    put("id", s.id)
+                    put("text", s.text)
+                    put("x", s.xFraction.toDouble())
+                    put("y", s.yFraction.toDouble())
+                }
+            )
+        }
+        return arr.toString()
+    }
+
+    fun decodeStickers(json: String): List<StoryStickerOverlay> {
+        if (json.isBlank()) return emptyList()
+        return runCatching {
+            val arr = org.json.JSONArray(json)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val text = obj.optString("text").takeIf { it.isNotBlank() } ?: continue
+                    add(
+                        StoryStickerOverlay(
+                            id = obj.optString("id", "st_$i"),
+                            text = text,
+                            xFraction = obj.optDouble("x", 0.5).toFloat().coerceIn(0.08f, 0.92f),
+                            yFraction = obj.optDouble("y", 0.45).toFloat().coerceIn(0.12f, 0.85f)
+                        )
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun encodeStrokes(strokes: List<StoryDrawStroke>): String {
+        if (strokes.isEmpty()) return ""
+        val arr = org.json.JSONArray()
+        strokes.take(60).forEach { stroke ->
+            if (stroke.points.isEmpty()) return@forEach
+            val ptsArr = org.json.JSONArray()
+            // Downsample slightly if very dense to keep payload compact
+            val step = if (stroke.points.size > 60) 2 else 1
+            stroke.points.forEachIndexed { idx, (x, y) ->
+                if (idx % step == 0 || idx == stroke.points.lastIndex) {
+                    ptsArr.put(
+                        org.json.JSONArray().apply {
+                            put((x * 1000f).toInt() / 1000.0)
+                            put((y * 1000f).toInt() / 1000.0)
+                        }
+                    )
+                }
+            }
+            arr.put(
+                org.json.JSONObject().apply {
+                    put("c", stroke.colorHex)
+                    put("w", stroke.strokeWidth.toDouble())
+                    put("p", ptsArr)
+                }
+            )
+        }
+        return arr.toString().take(23500)
+    }
+
+    fun decodeStrokes(json: String): List<StoryDrawStroke> {
+        if (json.isBlank()) return emptyList()
+        return runCatching {
+            val arr = org.json.JSONArray(json)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val ptsArr = obj.optJSONArray("p") ?: continue
+                    val pts = buildList {
+                        for (j in 0 until ptsArr.length()) {
+                            val pt = ptsArr.optJSONArray(j) ?: continue
+                            if (pt.length() >= 2) {
+                                add(pt.optDouble(0).toFloat() to pt.optDouble(1).toFloat())
+                            }
+                        }
+                    }
+                    if (pts.isNotEmpty()) {
+                        add(
+                            StoryDrawStroke(
+                                colorHex = obj.optLong("c", 0xFFFFFFFFL),
+                                strokeWidth = obj.optDouble("w", 8.0).toFloat(),
+                                points = pts
+                            )
+                        )
+                    }
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+}
 
 @Keep
 @IgnoreExtraProperties
@@ -201,6 +340,9 @@ data class ChatMessage(
     val mediaData: String? = null,
     val durationSec: Long = 0L,
     val expiresAtMs: Long = 0L,
+    val replyToText: String? = null,
+    val replyToSender: String? = null,
+    val replyToMessageId: String? = null,
     val timeLabel: String = "",
     val aiGenerated: Boolean = false,
     @ServerTimestamp val createdAt: Timestamp? = null

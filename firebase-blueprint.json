@@ -30,6 +30,10 @@
           "enum": ["google", "username"],
           "description": "Authentication registration provider."
         },
+        "email": {
+          "type": "string",
+          "description": "Authenticated user's Google or contact email address."
+        },
         "photoData": {
           "type": "string",
           "description": "Optional compressed JPEG data URI for profile avatar."
@@ -54,6 +58,10 @@
         "online": {
           "type": "boolean",
           "description": "Whether the user appears online."
+        },
+        "showOnlineStatus": {
+          "type": "boolean",
+          "description": "Privacy preference controlling whether online presence is shared with contacts."
         },
         "verified": {
           "type": "boolean",
@@ -149,6 +157,10 @@
         "online": {
           "type": "boolean",
           "description": "Real-time online presence indicator for the handle owner."
+        },
+        "showOnlineStatus": {
+          "type": "boolean",
+          "description": "Privacy preference controlling whether online presence is visible to others."
         },
         "accountStatus": {
           "type": "string",
@@ -353,6 +365,18 @@
           "type": "integer",
           "description": "Optional disappearing-message expiry epoch millis."
         },
+        "replyToText": {
+          "type": "string",
+          "description": "Optional quoted reply preview snippet."
+        },
+        "replyToSender": {
+          "type": "string",
+          "description": "Optional display name or sender of the message being replied to."
+        },
+        "replyToMessageId": {
+          "type": "string",
+          "description": "Optional ID of the message being replied to."
+        },
         "timeLabel": {
           "type": "string",
           "description": "Formatted time label for the bubble."
@@ -436,7 +460,7 @@
     },
     "StoryItem": {
       "title": "StoryItem",
-      "description": "24-hour expiring photo story/status posted by an authenticated user.",
+      "description": "24-hour expiring photo, video, or text story/status posted by an authenticated user.",
       "type": "object",
       "properties": {
         "userId": {
@@ -457,15 +481,61 @@
         },
         "mediaData": {
           "type": "string",
-          "description": "Compressed story image JPEG data URI."
+          "description": "Compressed story image JPEG or video MP4 data URI, or text card key."
+        },
+        "mediaType": {
+          "type": "string",
+          "enum": ["image", "video", "text"],
+          "description": "Story media kind."
         },
         "caption": {
           "type": "string",
-          "description": "Optional story caption or text overlay."
+          "description": "Optional bottom story caption."
         },
         "storyFont": {
           "type": "string",
           "description": "Font style key for rendering story text (English & Urdu)."
+        },
+        "musicTag": {
+          "type": "string",
+          "description": "Optional selected music track tag."
+        },
+        "overlayText": {
+          "type": "string",
+          "description": "Optional floating canvas text overlay."
+        },
+        "overlayColorHex": {
+          "type": "integer",
+          "description": "ARGB color integer for overlayText."
+        },
+        "overlayYFraction": {
+          "type": "number",
+          "description": "Normalized vertical position (0..1) of overlayText."
+        },
+        "stickersJson": {
+          "type": "string",
+          "description": "Serialized JSON array of sticker overlays."
+        },
+        "drawingJson": {
+          "type": "string",
+          "description": "Serialized JSON array of freehand drawing strokes."
+        },
+        "cropMode": {
+          "type": "string",
+          "enum": ["crop", "fit"],
+          "description": "Media scaling mode."
+        },
+        "rotationDegrees": {
+          "type": "integer",
+          "description": "Rotation in degrees (0, 90, 180, 270)."
+        },
+        "viewedByUids": {
+          "type": "array",
+          "description": "List of viewer UIDs who have opened this story."
+        },
+        "likedByUids": {
+          "type": "array",
+          "description": "List of viewer UIDs who liked this story."
         },
         "createdAtMs": {
           "type": "integer",
@@ -491,6 +561,92 @@
         "expiresAtMs",
         "createdAt"
       ]
+    },
+    "StoryViewRecord": {
+      "title": "StoryViewRecord",
+      "description": "Real-time story view, like, and emoji reaction submitted by a viewer.",
+      "type": "object",
+      "properties": {
+        "viewerUid": {
+          "type": "string",
+          "description": "Viewer Firebase Auth UID."
+        },
+        "viewerName": {
+          "type": "string",
+          "description": "Viewer display name."
+        },
+        "viewerUsername": {
+          "type": "string",
+          "description": "Viewer handle."
+        },
+        "viewerPhotoData": {
+          "type": "string",
+          "description": "Optional viewer avatar JPEG data URI."
+        },
+        "liked": {
+          "type": "boolean",
+          "description": "Whether the viewer liked the story."
+        },
+        "reactionEmoji": {
+          "type": "string",
+          "description": "Optional emoji reaction selected by the viewer."
+        },
+        "viewedAtMs": {
+          "type": "integer",
+          "description": "Epoch milliseconds when viewed."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "viewerUid",
+        "viewerName",
+        "viewerUsername",
+        "liked",
+        "reactionEmoji",
+        "viewedAtMs",
+        "updatedAt"
+      ]
+    },
+    "UsernameReservation": {
+      "title": "UsernameReservation",
+      "description": "Unique active or permanently retired/locked username reservation.",
+      "type": "object",
+      "properties": {
+        "username": {
+          "type": "string",
+          "description": "Normalized unique username."
+        },
+        "ownerUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of active owner, or empty string once retired."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "retired"],
+          "description": "Reservation status; retired usernames stay permanently locked against reuse."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "username",
+        "ownerUid",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -501,6 +657,10 @@
     "/users/{userId}/credentials/{username}": {
       "schema": { "$ref": "#/entities/UserCredentialRecord" },
       "description": "Owner-only salted password credential records keyed by username."
+    },
+    "/usernames/{username}": {
+      "schema": { "$ref": "#/entities/UsernameReservation" },
+      "description": "Permanent unique username reservation and retired-handle lock registry."
     },
     "/directory/{username}": {
       "schema": { "$ref": "#/entities/UserDirectoryEntry" },
@@ -517,6 +677,10 @@
     "/stories/{storyId}": {
       "schema": { "$ref": "#/entities/StoryItem" },
       "description": "24-hour user stories/statuses."
+    },
+    "/stories/{storyId}/views/{viewerId}": {
+      "schema": { "$ref": "#/entities/StoryViewRecord" },
+      "description": "Real-time views, likes, and reactions on a story."
     }
   }
 }

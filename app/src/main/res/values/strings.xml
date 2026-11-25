@@ -56,4 +56,18 @@
     <string name="archived_folder_title">Archived</string>
     <string name="menu_archive_chat">Archive chat</string>
     <string name="menu_unarchive_chat">Unarchive chat</string>
+    <string name="set_name">Set Name</string>
+    <string name="add_username">Add Username</string>
+    <string name="dob_title">Date of Birth</string>
+    <string name="app_lock_title">App Lock</string>
+    <string name="app_lock_desc">Set up and manage PIN/passcode lock</string>
+    <string name="change_password_title">Change Password</string>
+    <string name="change_password_desc">Update account password securely</string>
+    <string name="privacy_settings_desc">Online status, profile photo &amp; blocked contacts</string>
+    <string name="show_online_status_title">Show Online Status</string>
+    <string name="show_online_status_desc">Allow contacts to see when you are active</string>
+    <string name="status_hidden">Status Hidden</string>
+    <string name="search_settings_hint">Search profile &amp; settings…</string>
+    <string name="tap_to_change_banner">Tap to change banner</string>
 </resources>
+

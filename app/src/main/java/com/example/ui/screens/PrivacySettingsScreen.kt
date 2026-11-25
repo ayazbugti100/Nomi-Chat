@@ -52,6 +52,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
@@ -96,7 +98,8 @@ fun PrivacySettingsScreen(
     onSavePrivacySettings: (
         visibility: ProfileVisibilityMode,
         allowedViewerIds: List<String>,
-        maxViewers: Long
+        maxViewers: Long,
+        showOnlineStatus: Boolean
     ) -> Unit,
     onUnblockContact: (ChatThread) -> Unit,
     onShowNotice: (String) -> Unit,
@@ -108,15 +111,18 @@ fun PrivacySettingsScreen(
     val serverMode = ProfileVisibilityMode.fromKey(profile?.profileVisibility)
     val serverAllowed = profile?.allowedViewerUids.orEmpty()
     val serverMax = (profile?.maxProfileViewers ?: 0L).coerceIn(0L, 500L)
+    val serverOnlineStatus = profile?.showOnlineStatus ?: true
 
     var selectedMode by remember(serverMode) { mutableStateOf(serverMode) }
     var allowedIds by remember(serverAllowed) { mutableStateOf(serverAllowed) }
     var maxViewers by remember(serverMax) { mutableLongStateOf(serverMax) }
+    var showOnlineStatus by remember(serverOnlineStatus) { mutableStateOf(serverOnlineStatus) }
 
-    LaunchedEffect(serverMode, serverAllowed, serverMax) {
+    LaunchedEffect(serverMode, serverAllowed, serverMax, serverOnlineStatus) {
         selectedMode = serverMode
         allowedIds = serverAllowed
         maxViewers = serverMax
+        showOnlineStatus = serverOnlineStatus
     }
 
     BackHandler {
@@ -146,7 +152,8 @@ fun PrivacySettingsScreen(
     fun commitSettings(
         nextMode: ProfileVisibilityMode = selectedMode,
         nextAllowed: List<String> = allowedIds,
-        nextMax: Long = maxViewers
+        nextMax: Long = maxViewers,
+        nextShowOnlineStatus: Boolean = showOnlineStatus
     ) {
         val cleanMax = nextMax.coerceIn(0L, 500L)
         val trimmedAllowed = if (cleanMax > 0L && nextAllowed.size > cleanMax.toInt()) {
@@ -157,7 +164,8 @@ fun PrivacySettingsScreen(
         selectedMode = nextMode
         allowedIds = trimmedAllowed
         maxViewers = cleanMax
-        onSavePrivacySettings(nextMode, trimmedAllowed, cleanMax)
+        showOnlineStatus = nextShowOnlineStatus
+        onSavePrivacySettings(nextMode, trimmedAllowed, cleanMax, nextShowOnlineStatus)
     }
 
     Column(
@@ -259,6 +267,61 @@ fun PrivacySettingsScreen(
                     .padding(horizontal = 16.dp, vertical = 14.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
+                // 0. Show Online Status toggle
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(20.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { commitSettings(nextShowOnlineStatus = !showOnlineStatus) }
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(MintLight),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Public,
+                                contentDescription = null,
+                                tint = EmeraldDark,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = stringResource(R.string.show_online_status_title),
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = stringResource(R.string.show_online_status_desc),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = showOnlineStatus,
+                            onCheckedChange = { enabled ->
+                                commitSettings(nextShowOnlineStatus = enabled)
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = EmeraldDark
+                            ),
+                            modifier = Modifier.testTag("privacy_online_status_switch")
+                        )
+                    }
+                }
+
                 // 1. Show Profile to Others (Yes / Selected People / No)
                 Card(
                     modifier = Modifier.fillMaxWidth(),

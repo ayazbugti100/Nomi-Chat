@@ -1,10 +1,5 @@
 package com.example.ui.screens
 
-import android.net.Uri
-import android.util.Base64
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -16,30 +11,23 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
-import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Block
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDone
-import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DonutLarge
-import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.WorkspacePremium
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -50,19 +38,15 @@ import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -71,24 +55,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import coil.compose.AsyncImage
 import com.example.R
 import com.example.data.model.ChatThread
-import com.example.data.model.StoryFontStyle
-import com.example.data.model.StoryItem
 import com.example.data.model.ThemeMode
 import com.example.ui.components.AvatarCircle
 import com.example.ui.theme.EmeraldBright
@@ -100,9 +79,7 @@ import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.GoldCrown
 import com.example.ui.theme.MintLight
 import com.example.ui.theme.MintOnlineGlow
-import com.example.ui.theme.toFontFamily
 import com.example.ui.viewmodel.UsernameSearchState
-import kotlin.math.max
 
 @Composable
 fun EditSingleFieldDialog(
@@ -111,43 +88,68 @@ fun EditSingleFieldDialog(
     initialValue: String,
     maxLength: Int,
     sanitizeUsername: Boolean = false,
+    isSaving: Boolean = false,
+    errorText: String? = null,
+    onClearError: () -> Unit = {},
     onDismiss: () -> Unit,
     onSave: (String) -> Unit
 ) {
     var value by remember(initialValue) { mutableStateOf(initialValue) }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!isSaving) onDismiss() },
         title = { Text(title, style = MaterialTheme.typography.titleMedium) },
         text = {
-            OutlinedTextField(
-                value = value,
-                onValueChange = { raw ->
-                    val cleaned = if (sanitizeUsername) {
-                        raw.lowercase().filter { it.isLetterOrDigit() || it == '_' }
-                    } else raw
-                    if (cleaned.length <= maxLength) value = cleaned
-                },
-                label = { Text(label) },
-                singleLine = true,
-                shape = RoundedCornerShape(14.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("edit_field_input")
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = { raw ->
+                        onClearError()
+                        val cleaned = if (sanitizeUsername) {
+                            raw.lowercase().filter { it.isLetterOrDigit() || it == '_' || it == '.' }
+                        } else raw
+                        if (cleaned.length <= maxLength) value = cleaned
+                    },
+                    label = { Text(label) },
+                    singleLine = true,
+                    enabled = !isSaving,
+                    isError = !errorText.isNullOrBlank(),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("edit_field_input")
+                )
+                if (!errorText.isNullOrBlank()) {
+                    Text(
+                        text = errorText,
+                        color = ErrorRed,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.testTag("edit_field_error")
+                    )
+                }
+            }
         },
         confirmButton = {
             Button(
                 onClick = { onSave(value) },
-                enabled = value.trim().length >= if (sanitizeUsername) 2 else 1,
+                enabled = !isSaving && value.trim().length >= if (sanitizeUsername) 2 else 1,
                 colors = ButtonDefaults.buttonColors(containerColor = EmeraldDark),
                 modifier = Modifier.testTag("edit_field_save_button")
             ) {
+                if (isSaving) {
+                    CircularProgressIndicator(
+                        color = Color.White,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
                 Text("Save", color = Color.White)
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(onClick = onDismiss, enabled = !isSaving) {
                 Text("Cancel")
             }
         }
@@ -157,6 +159,7 @@ fun EditSingleFieldDialog(
 @Composable
 fun AddContactDialog(
     usernameSearchState: UsernameSearchState = UsernameSearchState.Idle,
+    offlinePopupMessage: String? = null,
     onSearchUsername: (String) -> Unit = {},
     onResetSearch: () -> Unit = {},
     onDismiss: () -> Unit,
@@ -361,6 +364,25 @@ fun AddContactDialog(
                             .fillMaxWidth()
                             .testTag("add_contact_username_input")
                     )
+                }
+
+                if (!offlinePopupMessage.isNullOrBlank()) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("add_contact_offline_popup"),
+                        shape = RoundedCornerShape(12.dp),
+                        color = ErrorContainerLight,
+                        border = BorderStroke(1.dp, ErrorRed.copy(alpha = 0.45f))
+                    ) {
+                        Text(
+                            text = offlinePopupMessage,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = ErrorRed,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                        )
+                    }
                 }
             }
         },
@@ -659,6 +681,7 @@ fun AppLockOverlay(
 fun AvatarPreviewDialog(
     thread: ChatThread,
     hasActiveStory: Boolean = false,
+    storyRingSeen: Boolean = false,
     onDismiss: () -> Unit,
     onOpenChat: () -> Unit,
     onViewContact: () -> Unit,
@@ -747,6 +770,7 @@ fun AvatarPreviewDialog(
                         isChannel = isChannel,
                         showOnlineDot = isOnline,
                         hasStoryRing = hasActiveStory,
+                        storyRingSeen = storyRingSeen,
                         size = 188.dp,
                         borderColor = Color.White.copy(alpha = 0.85f),
                         imageContentScale = ContentScale.Fit,
@@ -1007,604 +1031,266 @@ fun ReportAccountDialog(
 }
 
 @Composable
-fun StoryPickerDialog(
-    isPosting: Boolean,
+fun EditProfileDialog(
+    initialDisplayName: String,
+    initialBio: String,
+    initialUsername: String,
+    initialDob: String,
+    isSaving: Boolean,
+    errorText: String? = null,
+    onClearError: () -> Unit = {},
     onDismiss: () -> Unit,
-    onPostStory: (uri: Uri?, caption: String, storyFont: String) -> Unit
+    onSave: (displayName: String, bio: String, username: String, dob: String) -> Unit
 ) {
-    var selectedUri by remember { mutableStateOf<Uri?>(null) }
-    var caption by remember { mutableStateOf("") }
-    var selectedFont by remember { mutableStateOf(StoryFontStyle.NOTO_NASTALIQ) }
-    val selectedFontFamily = remember(selectedFont) { selectedFont.toFontFamily() }
+    var displayName by remember(initialDisplayName) { mutableStateOf(initialDisplayName) }
+    var bio by remember(initialBio) { mutableStateOf(initialBio) }
+    var username by remember(initialUsername) { mutableStateOf(initialUsername) }
+    var dob by remember(initialDob) { mutableStateOf(initialDob) }
+    var validationError by remember { mutableStateOf<String?>(null) }
+    val shownError = validationError ?: errorText
 
-    val photoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
-        if (uri != null) selectedUri = uri
-    }
-
-    val filePickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri != null) selectedUri = uri
-    }
-
-    Dialog(onDismissRequest = { if (!isPosting) onDismiss() }) {
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("story_picker_dialog"),
-            shape = RoundedCornerShape(24.dp),
-            color = MaterialTheme.colorScheme.surface,
-            shadowElevation = 12.dp
-        ) {
-            Column(
-                modifier = Modifier
-                    .verticalScroll(rememberScrollState())
-                    .padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(34.dp)
-                                .clip(CircleShape)
-                                .background(MintLight),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.DonutLarge,
-                                contentDescription = null,
-                                tint = EmeraldDark,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                        Column {
-                            Text(
-                                text = "Post 24-Hour Story",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = EmeraldDeep,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "Photo or styled English / اردو text • 24h",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                    IconButton(
-                        onClick = { if (!isPosting) onDismiss() },
-                        modifier = Modifier.testTag("story_picker_close")
-                    ) {
-                        Icon(Icons.Default.Close, contentDescription = "Close")
-                    }
-                }
-
-                // Live Story Preview (photo + text/name OR styled emerald text card)
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(176.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(
-                            brush = Brush.linearGradient(
-                                listOf(EmeraldDeep, EmeraldDark, EmeraldMid)
-                            )
-                        )
-                        .clickable(enabled = !isPosting && selectedUri == null) {
-                            photoPickerLauncher.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                            )
-                        }
-                        .testTag("story_pick_gallery_box"),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (selectedUri != null) {
-                        AsyncImage(
-                            model = selectedUri,
-                            contentDescription = "Selected story preview",
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(Color.Black.copy(alpha = if (caption.isNotBlank()) 0.34f else 0.10f))
-                        )
-                    }
-
-                    if (caption.isNotBlank()) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .align(if (selectedUri != null) Alignment.BottomCenter else Alignment.Center)
-                                .padding(horizontal = 14.dp, vertical = 12.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = caption,
-                                style = MaterialTheme.typography.titleLarge.copy(
-                                    fontFamily = selectedFontFamily,
-                                    fontSize = if (selectedUri != null) 19.sp else 23.sp,
-                                    lineHeight = if (selectedUri != null) 28.sp else 34.sp,
-                                    textDirection = TextDirection.Content,
-                                    shadow = Shadow(
-                                        color = Color.Black.copy(alpha = 0.65f),
-                                        blurRadius = 6f
-                                    )
-                                ),
-                                color = Color.White,
-                                textAlign = TextAlign.Center,
-                                maxLines = 4,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("story_preview_text")
-                            )
-                        }
-                    } else if (selectedUri == null) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(16.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.AddPhotoAlternate,
-                                contentDescription = "Choose photo",
-                                tint = Color.White,
-                                modifier = Modifier.size(34.dp)
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "Tap to add photo, or type text below",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = Color.White,
-                                fontWeight = FontWeight.SemiBold,
-                                textAlign = TextAlign.Center
-                            )
-                            Text(
-                                text = "Supports English & اردو with 10 stylish fonts",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MintOnlineGlow,
-                                textAlign = TextAlign.Center
-                            )
-                        }
-                    }
-
-                    if (selectedUri != null && !isPosting) {
-                        Surface(
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .padding(8.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .clickable { selectedUri = null },
-                            color = Color.Black.copy(alpha = 0.55f),
-                            shape = RoundedCornerShape(10.dp)
-                        ) {
-                            Text(
-                                text = "Clear photo",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color.White,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                            )
-                        }
-                    }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = {
-                            photoPickerLauncher.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                            )
-                        },
-                        enabled = !isPosting,
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("story_pick_photos_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.AddPhotoAlternate,
-                            contentDescription = null,
-                            tint = EmeraldDark,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Photos", color = EmeraldDark, maxLines = 1)
-                    }
-
-                    OutlinedButton(
-                        onClick = {
-                            filePickerLauncher.launch(arrayOf("image/*"))
-                        },
-                        enabled = !isPosting,
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("story_pick_files_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.FolderOpen,
-                            contentDescription = null,
-                            tint = EmeraldDark,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Files", color = EmeraldDark, maxLines = 1)
-                    }
-                }
-
+    AlertDialog(
+        onDismissRequest = { if (!isSaving) onDismiss() },
+        title = { Text(stringResource(R.string.edit_profile)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(
-                    value = caption,
-                    onValueChange = { if (it.length <= 140) caption = it },
-                    enabled = !isPosting,
-                    label = { Text("Story Text or Name (English / اردو)") },
-                    placeholder = { Text("Write a name or message in English or اردو...") },
-                    textStyle = LocalTextStyle.current.copy(
-                        fontFamily = selectedFontFamily,
-                        textDirection = TextDirection.Content
-                    ),
-                    maxLines = 3,
-                    shape = RoundedCornerShape(12.dp),
+                    value = displayName,
+                    onValueChange = {
+                        displayName = it.take(60)
+                        validationError = null
+                        onClearError()
+                    },
+                    label = { Text("Display Name") },
+                    singleLine = true,
+                    enabled = !isSaving,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .testTag("story_caption_input")
+                        .testTag("edit_profile_name_input")
                 )
-
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                OutlinedTextField(
+                    value = username,
+                    onValueChange = {
+                        username = it.take(40)
+                        validationError = null
+                        onClearError()
+                    },
+                    label = { Text("Username") },
+                    prefix = { Text("@") },
+                    singleLine = true,
+                    enabled = !isSaving,
+                    isError = !shownError.isNullOrBlank(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("edit_profile_username_input")
+                )
+                OutlinedTextField(
+                    value = bio,
+                    onValueChange = {
+                        bio = it.take(200)
+                        validationError = null
+                        onClearError()
+                    },
+                    label = { Text(stringResource(R.string.bio_title)) },
+                    minLines = 2,
+                    maxLines = 3,
+                    enabled = !isSaving,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("edit_profile_bio_input")
+                )
+                OutlinedTextField(
+                    value = dob,
+                    onValueChange = {
+                        dob = it.take(20)
+                        validationError = null
+                        onClearError()
+                    },
+                    label = { Text("Date of Birth (YYYY-MM-DD)") },
+                    singleLine = true,
+                    enabled = !isSaving,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("edit_profile_dob_input")
+                )
+                if (!shownError.isNullOrBlank()) {
                     Text(
-                        text = "Font Style (10 English & اردو Fonts)",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = EmeraldDeep,
-                        fontWeight = FontWeight.SemiBold
+                        text = shownError,
+                        color = ErrorRed,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.testTag("edit_profile_error")
                     )
-                    LazyRow(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("story_font_selector"),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        items(StoryFontStyle.entries, key = { it.key }) { fontStyle ->
-                            val isSelected = fontStyle == selectedFont
-                            val itemFontFamily = remember(fontStyle) { fontStyle.toFontFamily() }
-                            Surface(
-                                modifier = Modifier
-                                    .minimumInteractiveComponentSize()
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .clickable(enabled = !isPosting) { selectedFont = fontStyle }
-                                    .testTag("story_font_chip_${fontStyle.key}"),
-                                shape = RoundedCornerShape(12.dp),
-                                color = if (isSelected) EmeraldDark else MintLight.copy(alpha = 0.7f),
-                                border = BorderStroke(
-                                    width = if (isSelected) 1.5.dp else 1.dp,
-                                    color = if (isSelected) EmeraldDark else EmeraldMid.copy(alpha = 0.35f)
-                                )
-                            ) {
-                                Column(
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                    horizontalAlignment = Alignment.CenterHorizontally
-                                ) {
-                                    Text(
-                                        text = fontStyle.displayName,
-                                        style = MaterialTheme.typography.labelMedium.copy(fontFamily = itemFontFamily),
-                                        color = if (isSelected) Color.White else EmeraldDeep,
-                                        fontWeight = FontWeight.Bold,
-                                        maxLines = 1
-                                    )
-                                    Text(
-                                        text = fontStyle.urduSample,
-                                        style = MaterialTheme.typography.labelMedium.copy(
-                                            fontFamily = itemFontFamily,
-                                            fontSize = 13.sp,
-                                            textDirection = TextDirection.Rtl
-                                        ),
-                                        color = if (isSelected) MintOnlineGlow else EmeraldDark,
-                                        maxLines = 1
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    TextButton(
-                        onClick = onDismiss,
-                        enabled = !isPosting
-                    ) {
-                        Text("Cancel")
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Button(
-                        onClick = {
-                            onPostStory(selectedUri, caption, selectedFont.key)
-                        },
-                        enabled = (selectedUri != null || caption.trim().isNotEmpty()) && !isPosting,
-                        colors = ButtonDefaults.buttonColors(containerColor = EmeraldDark),
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier.testTag("story_post_button")
-                    ) {
-                        if (isPosting) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
-                                strokeWidth = 2.dp,
-                                color = Color.White
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                        }
-                        Text(if (isPosting) "Posting..." else "Post Story", color = Color.White)
-                    }
                 }
             }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val cleanName = displayName.trim()
+                    val cleanUser = username.trim().removePrefix("@")
+                    val cleanDob = dob.trim()
+                    when {
+                        cleanName.isEmpty() -> validationError = "Display name cannot be empty."
+                        cleanUser.length < 2 -> validationError = "Username must be at least 2 characters."
+                        cleanDob.length < 4 -> validationError = "Enter a valid date of birth."
+                        else -> onSave(cleanName, bio.trim(), cleanUser, cleanDob)
+                    }
+                },
+                enabled = !isSaving,
+                colors = ButtonDefaults.buttonColors(containerColor = EmeraldDark),
+                modifier = Modifier.testTag("edit_profile_save_button")
+            ) {
+                if (isSaving) {
+                    CircularProgressIndicator(
+                        color = Color.White,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                Text(stringResource(R.string.save))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !isSaving) {
+                Text(stringResource(R.string.cancel))
+            }
         }
-    }
+    )
 }
 
 @Composable
-fun StoryViewerDialog(
-    stories: List<StoryItem>,
-    currentUserId: String,
+fun ChangePasswordDialog(
+    requireCurrentPassword: Boolean,
+    isChanging: Boolean,
     onDismiss: () -> Unit,
-    onDeleteStory: (StoryItem) -> Unit
+    onSubmit: (currentPassword: String, newPassword: String) -> Unit
 ) {
-    if (stories.isEmpty()) {
-        onDismiss()
-        return
-    }
-    var currentIndex by remember(stories) { mutableIntStateOf(0) }
-    val safeIndex = currentIndex.coerceIn(0, stories.lastIndex)
-    val story = stories[safeIndex]
-    val storyFontFamily = remember(story.storyFont) {
-        StoryFontStyle.fromKey(story.storyFont).toFontFamily()
-    }
+    var currentPassword by remember { mutableStateOf("") }
+    var newPassword by remember { mutableStateOf("") }
+    var confirmPassword by remember { mutableStateOf("") }
+    var showPasswords by remember { mutableStateOf(false) }
+    var validationError by remember { mutableStateOf<String?>(null) }
 
-    val decodedMedia = remember(story.id, story.mediaData) {
-        if (story.mediaData.startsWith("data:image")) {
-            val b64 = story.mediaData.substringAfter("base64,", "")
-            runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull()
-        } else null
-    }
+    val transformation = if (showPasswords) VisualTransformation.None else PasswordVisualTransformation()
 
-    val remainingMs = max(0L, story.expiresAtMs - System.currentTimeMillis())
-    val remainingHours = (remainingMs / 3_600_000L).toInt()
-    val remainingMinutes = ((remainingMs % 3_600_000L) / 60_000L).toInt()
-    val expiryLabel = when {
-        remainingHours >= 1 -> "${remainingHours}h left"
-        remainingMinutes >= 1 -> "${remainingMinutes}m left"
-        else -> "Expiring soon"
-    }
-
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 420.dp, max = 560.dp)
-                .testTag("story_viewer_dialog"),
-            shape = RoundedCornerShape(22.dp),
-            color = Color(0xFF0E1713),
-            shadowElevation = 16.dp
-        ) {
-            Box(modifier = Modifier.fillMaxSize()) {
-                if (decodedMedia != null) {
-                    AsyncImage(
-                        model = decodedMedia,
-                        contentDescription = "Story by ${story.authorName}",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(
-                                brush = Brush.verticalGradient(
-                                    listOf(EmeraldDeep, EmeraldDark, EmeraldMid)
-                                )
+    AlertDialog(
+        onDismissRequest = { if (!isChanging) onDismiss() },
+        icon = {
+            Icon(
+                imageVector = Icons.Default.Lock,
+                contentDescription = null,
+                tint = EmeraldDark
+            )
+        },
+        title = { Text(stringResource(R.string.change_password_title)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = currentPassword,
+                    onValueChange = {
+                        currentPassword = it
+                        validationError = null
+                    },
+                    label = {
+                        Text(
+                            if (requireCurrentPassword) "Current Password"
+                            else "Current Password (if already set)"
+                        )
+                    },
+                    singleLine = true,
+                    enabled = !isChanging,
+                    visualTransformation = transformation,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    trailingIcon = {
+                        IconButton(onClick = { showPasswords = !showPasswords }) {
+                            Icon(
+                                imageVector = if (showPasswords) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                contentDescription = if (showPasswords) "Hide password" else "Show password"
                             )
-                    )
-                }
-
-                // Invisible tap zones for previous / next story
-                Row(modifier = Modifier.fillMaxSize()) {
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxSize()
-                            .clickable {
-                                if (safeIndex > 0) currentIndex = safeIndex - 1
-                            }
-                    )
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxSize()
-                            .clickable {
-                                if (safeIndex < stories.lastIndex) {
-                                    currentIndex = safeIndex + 1
-                                } else {
-                                    onDismiss()
-                                }
-                            }
-                    )
-                }
-
-                // Top progress & author header
-                Column(
+                        }
+                    },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .align(Alignment.TopCenter)
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(Color.Black.copy(alpha = 0.72f), Color.Transparent)
-                            )
-                        )
-                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        stories.forEachIndexed { idx, _ ->
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(3.dp)
-                                    .clip(RoundedCornerShape(2.dp))
-                                    .background(
-                                        if (idx <= safeIndex) EmeraldBright else Color.White.copy(alpha = 0.35f)
-                                    )
-                            )
-                        }
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(
-                            modifier = Modifier.weight(1f),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            AvatarCircle(
-                                name = story.authorName,
-                                photoData = story.authorPhotoData,
-                                hasStoryRing = true,
-                                size = 38.dp
-                            )
-                            Column {
-                                Text(
-                                    text = story.authorName,
-                                    style = MaterialTheme.typography.titleSmall,
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    text = "@${story.authorUsername} • $expiryLabel",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MintOnlineGlow,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        }
-
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (story.userId == currentUserId) {
-                                IconButton(
-                                    onClick = {
-                                        onDeleteStory(story)
-                                        if (stories.size <= 1) onDismiss()
-                                    },
-                                    modifier = Modifier.testTag("story_viewer_delete")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.DeleteOutline,
-                                        contentDescription = "Delete story",
-                                        tint = Color.White
-                                    )
-                                }
-                            }
-                            IconButton(
-                                onClick = onDismiss,
-                                modifier = Modifier.testTag("story_viewer_close")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Close,
-                                    contentDescription = "Close story",
-                                    tint = Color.White
-                                )
-                            }
-                        }
-                    }
-                }
-
-                if (story.caption.isNotBlank()) {
-                    if (decodedMedia == null) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .align(Alignment.Center)
-                                .padding(horizontal = 24.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = story.caption,
-                                style = MaterialTheme.typography.headlineMedium.copy(
-                                    fontFamily = storyFontFamily,
-                                    fontSize = 28.sp,
-                                    lineHeight = 42.sp,
-                                    textDirection = TextDirection.Content,
-                                    shadow = Shadow(
-                                        color = Color.Black.copy(alpha = 0.55f),
-                                        blurRadius = 8f
-                                    )
-                                ),
-                                color = Color.White,
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("story_viewer_caption")
-                            )
-                        }
-                    } else {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .align(Alignment.BottomCenter)
-                                .background(
-                                    Brush.verticalGradient(
-                                        listOf(Color.Transparent, Color.Black.copy(alpha = 0.82f))
-                                    )
-                                )
-                                .padding(horizontal = 20.dp, vertical = 22.dp)
-                        ) {
-                            Text(
-                                text = story.caption,
-                                style = MaterialTheme.typography.titleLarge.copy(
-                                    fontFamily = storyFontFamily,
-                                    fontSize = 22.sp,
-                                    lineHeight = 34.sp,
-                                    textDirection = TextDirection.Content,
-                                    shadow = Shadow(
-                                        color = Color.Black.copy(alpha = 0.7f),
-                                        blurRadius = 6f
-                                    )
-                                ),
-                                color = Color.White,
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("story_viewer_caption")
-                            )
-                        }
-                    }
+                        .testTag("change_password_current_input")
+                )
+                OutlinedTextField(
+                    value = newPassword,
+                    onValueChange = {
+                        newPassword = it
+                        validationError = null
+                    },
+                    label = { Text("New Password") },
+                    singleLine = true,
+                    enabled = !isChanging,
+                    visualTransformation = transformation,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("change_password_new_input")
+                )
+                OutlinedTextField(
+                    value = confirmPassword,
+                    onValueChange = {
+                        confirmPassword = it
+                        validationError = null
+                    },
+                    label = { Text("Confirm New Password") },
+                    singleLine = true,
+                    enabled = !isChanging,
+                    visualTransformation = transformation,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("change_password_confirm_input")
+                )
+                if (validationError != null) {
+                    Text(
+                        text = validationError.orEmpty(),
+                        color = ErrorRed,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.testTag("change_password_error")
+                    )
                 }
             }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    when {
+                        requireCurrentPassword && currentPassword.isEmpty() ->
+                            validationError = "Enter your current password."
+                        newPassword.length < 6 ->
+                            validationError = "New password must be at least 6 characters."
+                        newPassword != confirmPassword ->
+                            validationError = "New passwords do not match."
+                        else -> onSubmit(currentPassword, newPassword)
+                    }
+                },
+                enabled = !isChanging,
+                colors = ButtonDefaults.buttonColors(containerColor = EmeraldDark),
+                modifier = Modifier.testTag("change_password_submit_button")
+            ) {
+                if (isChanging) {
+                    CircularProgressIndicator(
+                        color = Color.White,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                Text(stringResource(R.string.save))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !isChanging) {
+                Text(stringResource(R.string.cancel))
+            }
         }
-    }
+    )
 }
+
+
+
 

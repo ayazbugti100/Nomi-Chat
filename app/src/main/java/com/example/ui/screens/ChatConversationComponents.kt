@@ -11,6 +11,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -59,6 +60,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
@@ -83,6 +86,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -236,7 +240,9 @@ fun MessageBubble(
     searchQuery: String = "",
     isCurrentSearchMatch: Boolean = false,
     onToggleVoicePlayback: (ChatMessage) -> Unit = {},
-    onPreviewImage: (String) -> Unit = {}
+    onPreviewImage: (String) -> Unit = {},
+    onDeleteMessage: (ChatMessage) -> Unit = {},
+    onReplyMessage: (ChatMessage) -> Unit = {}
 ) {
     val isMe = msg.sender == "me"
     val bubbleColor = if (isMe) palette.bubbleMe else palette.bubbleThem
@@ -247,6 +253,8 @@ fun MessageBubble(
     } else {
         RoundedCornerShape(topStart = 4.dp, topEnd = 14.dp, bottomEnd = 14.dp, bottomStart = 14.dp)
     }
+
+    var showMessageMenu by remember { mutableStateOf(false) }
 
     val decodedImageBytes = remember(msg.messageType, msg.mediaData) {
         if (msg.messageType == "image" && !msg.mediaData.isNullOrBlank() && msg.mediaData.startsWith("data:image")) {
@@ -261,15 +269,44 @@ fun MessageBubble(
             .testTag("message_bubble_${msg.id}"),
         horizontalArrangement = if (isMe) Arrangement.End else Arrangement.Start
     ) {
-        Surface(
-            modifier = Modifier.widthIn(min = 96.dp, max = 304.dp),
-            shape = bubbleShape,
-            color = bubbleColor,
-            border = if (isCurrentSearchMatch) BorderStroke(2.dp, Color(0xFFFFB300)) else null,
-            shadowElevation = 1.dp
-        ) {
-            Column(modifier = Modifier.padding(horizontal = 11.dp, vertical = 8.dp)) {
-                when (msg.messageType) {
+        Box {
+            Surface(
+                modifier = Modifier
+                    .widthIn(min = 96.dp, max = 304.dp)
+                    .clickable { showMessageMenu = true },
+                shape = bubbleShape,
+                color = bubbleColor,
+                border = if (isCurrentSearchMatch) BorderStroke(2.dp, Color(0xFFFFB300)) else null,
+                shadowElevation = 1.dp
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 11.dp, vertical = 8.dp)) {
+                    if (!msg.replyToText.isNullOrBlank()) {
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 6.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            color = secondaryTextColor.copy(alpha = 0.12f)
+                        ) {
+                            Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+                                Text(
+                                    text = msg.replyToSender.orEmpty().ifBlank { "Reply" },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = palette.accent,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = msg.replyToText.orEmpty(),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = primaryTextColor.copy(alpha = 0.85f),
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+
+                    when (msg.messageType) {
                     "voice" -> {
                         val isThisPlaying = playbackState.playingMessageId == msg.id
                         val activePlaying = isThisPlaying && playbackState.isPlaying
@@ -480,7 +517,32 @@ fun MessageBubble(
                 }
             }
         }
+
+        DropdownMenu(
+            expanded = showMessageMenu,
+            onDismissRequest = { showMessageMenu = false },
+            containerColor = Color.White,
+            shape = RoundedCornerShape(14.dp)
+        ) {
+            DropdownMenuItem(
+                text = { Text("Reply") },
+                onClick = {
+                    showMessageMenu = false
+                    onReplyMessage(msg)
+                },
+                leadingIcon = { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, tint = EmeraldMid) }
+            )
+            DropdownMenuItem(
+                text = { Text("Delete permanently", color = DangerRed) },
+                onClick = {
+                    showMessageMenu = false
+                    onDeleteMessage(msg)
+                },
+                leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = DangerRed) }
+            )
+        }
     }
+}
 }
 
 private fun buildHighlightedText(text: String, query: String): AnnotatedString {

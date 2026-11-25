@@ -6,8 +6,12 @@ import com.example.data.local.LocalAuthOutcome
 import com.example.data.local.LocalAuthStore
 import com.example.data.model.ChatThread
 import com.example.data.model.IncomingMessageAlert
+import com.example.data.model.ProfileVisibilityMode
 import com.example.data.model.STORY_DURATION_MS
+import com.example.data.model.StoryDrawStroke
 import com.example.data.model.StoryFontStyle
+import com.example.data.model.StoryOverlayCodec
+import com.example.data.model.StoryStickerOverlay
 import com.example.data.model.ThemeMode
 import com.example.data.model.UserDirectoryEntry
 import com.example.data.network.NetworkConnectivityObserver
@@ -37,6 +41,7 @@ class ExampleRobolectricTest {
   fun setUp() {
     context = ApplicationProvider.getApplicationContext()
     File(context.filesDir, "nomi_auth_users.json").delete()
+    File(context.filesDir, "nomi_retired_usernames.json").delete()
   }
 
   @Test
@@ -59,7 +64,7 @@ class ExampleRobolectricTest {
     assertTrue(created is LocalAuthOutcome.Success)
 
     val duplicate = store.signUpUser("Other Name", "alexroe", "2000-01-01", "pass123", "pass123")
-    assertEquals(LocalAuthOutcome.Error("This username is already taken."), duplicate)
+    assertEquals(LocalAuthOutcome.Error("This username is already taken / already added."), duplicate)
 
     val wrongPass = store.returningLogin("alexroe", "wrongpass")
     assertEquals(LocalAuthOutcome.Error("Invalid username or password."), wrongPass)
@@ -101,7 +106,7 @@ class ExampleRobolectricTest {
       newUsername = "jamiefox"
     )
     assertTrue(takenResult.isFailure)
-    assertEquals("This username is already taken.", takenResult.exceptionOrNull()?.message)
+    assertEquals("This username is already taken / already added.", takenResult.exceptionOrNull()?.message)
 
     val moveResult = store.updateProfile(
       usernameKey = "alexroe",
@@ -113,7 +118,7 @@ class ExampleRobolectricTest {
     assertEquals("alex_new", moveResult.getOrNull())
 
     val oldLogin = store.returningLogin("alexroe", "pass123")
-    assertEquals(LocalAuthOutcome.Error("Invalid username or password."), oldLogin)
+    assertEquals(LocalAuthOutcome.Error("Account Not Found"), oldLogin)
 
     val newLogin = store.returningLogin("alex_new", "pass123")
     assertEquals(LocalAuthOutcome.Success("alex_new"), newLogin)
@@ -211,7 +216,7 @@ class ExampleRobolectricTest {
         threadType = "chat"
       )
       assertTrue("Expected failure for '$badInput'", res.isFailure)
-      assertEquals("User not found", res.exceptionOrNull()?.message)
+      assertEquals("Account Not Found", res.exceptionOrNull()?.message)
       assertEquals(null, store.lookupUserByUsername(badInput).getOrNull())
     }
     assertTrue(store.observeContacts("nomi_one").first().isEmpty())
@@ -955,5 +960,289 @@ class ExampleRobolectricTest {
     assertEquals(10L, tenth.count)
     assertFalse(tenth.message.contains("/10"))
     assertFalse(tenth.message.contains("10"))
+  }
+
+  @Test
+  fun `reply to message stores quoted reply fields and delivers cross-account`() = runTest {
+    val store = LocalAuthStore(context)
+    store.signUpUser("Alice Reply", "alice_rep", "2000-01-01", "pass123", "pass123")
+    store.signUpUser("Bob Reply", "bob_rep", "2000-01-01", "pass123", "pass123")
+
+    val cOnAlice = store.addContact("alice_rep", "", "@bob_rep", "", "chat").getOrThrow()
+    val cOnBob = store.addContact("bob_rep", "", "@alice_rep", "", "chat").getOrThrow()
+
+    // Bob sends message
+    store.sendMessage("bob_rep", cOnBob, "me", "Are you available for a call?", aiGenerated = false)
+    val bobMsgs = store.observeMessages("bob_rep", cOnBob).first()
+    assertEquals(1, bobMsgs.size)
+    val originalMsg = bobMsgs.first()
+
+    // Alice replies quoting Bob's message
+    store.sendMessage(
+      usernameKey = "alice_rep",
+      contactId = cOnAlice,
+      sender = "me",
+      text = "Yes, calling now!",
+      aiGenerated = false,
+      replyToText = originalMsg.text,
+      replyToSender = "Bob Reply",
+      replyToMessageId = originalMsg.id
+    )
+
+    val aliceMsgs = store.observeMessages("alice_rep", cOnAlice).first()
+    assertEquals(2, aliceMsgs.size)
+    val replyMsg = aliceMsgs.first { it.sender == "me" }
+    assertEquals("Yes, calling now!", replyMsg.text)
+    assertEquals("Are you available for a call?", replyMsg.replyToText)
+    assertEquals("Bob Reply", replyMsg.replyToSender)
+    assertEquals(originalMsg.id, replyMsg.replyToMessageId)
+
+    // Bob also receives Alice's quoted reply message
+    val bobReceived = store.observeMessages("bob_rep", cOnBob).first()
+    assertEquals(2, bobReceived.size)
+    val incomingReply = bobReceived.first { it.sender == "them" }
+    assertEquals("Yes, calling now!", replyMsg.text)
+    assertEquals("Are you available for a call?", incomingReply.replyToText)
+    assertEquals("Bob Reply", incomingReply.replyToSender)
+  }
+
+  @Test
+  fun `deleteMessage permanently removes message from thread and updates storage`() = runTest {
+    val store = LocalAuthStore(context)
+    store.signUpUser("David M", "david_m", "2000-01-01", "pass123", "pass123")
+    store.signUpUser("Eva M", "eva_m", "2000-01-01", "pass123", "pass123")
+
+    val contactId = store.addContact("david_m", "", "@eva_m", "", "chat").getOrThrow()
+    store.sendMessage("david_m", contactId, "me", "Message 1", aiGenerated = false)
+    store.sendMessage("david_m", contactId, "me", "Message to delete", aiGenerated = false)
+
+    var msgs = store.observeMessages("david_m", contactId).first()
+    assertEquals(2, msgs.size)
+    val toDelete = msgs.first { it.text == "Message to delete" }
+
+    val delRes = store.deleteMessage("david_m", contactId, toDelete.id)
+    assertTrue(delRes.isSuccess)
+
+    msgs = store.observeMessages("david_m", contactId).first()
+    assertEquals(1, msgs.size)
+    assertEquals("Message 1", msgs.first().text)
+
+    // Reloaded store also shows message gone
+    val reloaded = LocalAuthStore(context)
+    val reloadedMsgs = reloaded.observeMessages("david_m", contactId).first()
+    assertEquals(1, reloadedMsgs.size)
+    assertEquals("Message 1", reloadedMsgs.first().text)
+  }
+
+  @Test
+  fun `change username permanently locks old handle so lookups and logins return Account Not Found and reuse is rejected`() = runTest {
+    val store = LocalAuthStore(context)
+    store.signUpUser("Farhan Khan", "farhan_k", "2000-01-01", "pass123", "pass123")
+    store.signUpUser("Searcher", "searcher_u", "2000-01-01", "pass123", "pass123")
+
+    // Initially found by @farhan_k
+    val initialLookup = store.lookupUserByUsername("@farhan_k").getOrNull()
+    assertNotNull(initialLookup)
+    assertEquals("farhan_k", initialLookup?.username)
+
+    // Farhan updates username to @farhan_pro
+    val changeRes = store.updateProfile(
+      usernameKey = "farhan_k",
+      newUsername = "farhan_pro",
+      displayName = "Farhan Pro"
+    )
+    assertTrue(changeRes.isSuccess)
+
+    // Old username lookup must now fail with null / Account Not Found
+    val oldLookup = store.lookupUserByUsername("@farhan_k").getOrNull()
+    assertEquals(null, oldLookup)
+
+    // Adding or searching old username fails with "Account Not Found"
+    val addOldRes = store.addContact("searcher_u", "", "@farhan_k", "", "chat")
+    assertTrue(addOldRes.isFailure)
+    assertEquals("Account Not Found", addOldRes.exceptionOrNull()?.message)
+
+    // Returning login with the invalidated old username also returns "Account Not Found"
+    val oldLoginRes = store.returningLogin("farhan_k", "pass123")
+    assertEquals(LocalAuthOutcome.Error("Account Not Found"), oldLoginRes)
+
+    // New username lookup & login succeed
+    val newLookup = store.lookupUserByUsername("@farhan_pro").getOrNull()
+    assertNotNull(newLookup)
+    assertEquals("farhan_pro", newLookup?.username)
+    assertEquals("Farhan Pro", newLookup?.displayName)
+    assertEquals(LocalAuthOutcome.Success("farhan_pro"), store.returningLogin("farhan_pro", "pass123"))
+
+    // Previously used old username is permanently locked against both sign-up and username changes
+    val reRegisterOld = store.signUpUser("New Farhan", "farhan_k", "2002-02-02", "pass123", "pass123")
+    assertEquals(
+      LocalAuthOutcome.Error("This username is already taken / already added."),
+      reRegisterOld
+    )
+    val hijackAttempt = store.updateProfile(usernameKey = "searcher_u", newUsername = "farhan_k")
+    assertTrue(hijackAttempt.isFailure)
+    assertEquals("This username is already taken / already added.", hijackAttempt.exceptionOrNull()?.message)
+  }
+
+  @Test
+  fun `rich story editor metadata, real-time views sync, likes, emoji reactions, and replies work`() = runTest {
+    val store = LocalAuthStore(context)
+    store.signUpUser("Hina Tariq", "hina_t", "2000-01-01", "pass123", "pass123")
+    store.signUpUser("Zainab Ali", "zainab_a", "2001-02-03", "pass123", "pass123")
+    val viewerPhoto = "data:image/jpeg;base64,/9j/ZAINAB_AVATAR"
+    store.updateProfile(usernameKey = "zainab_a", photoData = viewerPhoto)
+
+    val stickers = listOf(StoryStickerOverlay(id = "s1", text = "🔥", xFraction = 0.35f, yFraction = 0.42f))
+    val strokes = listOf(StoryDrawStroke(colorHex = 0xFF00E676L, strokeWidth = 10f, points = listOf(0.1f to 0.2f, 0.4f to 0.6f)))
+    val stickersJson = StoryOverlayCodec.encodeStickers(stickers)
+    val strokesJson = StoryOverlayCodec.encodeStrokes(strokes)
+
+    val decodedStickers = StoryOverlayCodec.decodeStickers(stickersJson)
+    val decodedStrokes = StoryOverlayCodec.decodeStrokes(strokesJson)
+    assertEquals(1, decodedStickers.size)
+    assertEquals("🔥", decodedStickers.first().text)
+    assertEquals(1, decodedStrokes.size)
+    assertEquals(2, decodedStrokes.first().points.size)
+
+    val storyId = store.postStory(
+      usernameKey = "hina_t",
+      mediaData = "data:video/mp4;base64,AAAAIGZ0eXBtcDQy",
+      caption = "Road trip @zainab_a",
+      storyFont = StoryFontStyle.CAIRO.key,
+      mediaType = "video",
+      musicTag = "Lo-Fi Chill • Nomi Beats",
+      overlayText = "Weekend Vibes",
+      overlayColorHex = 0xFFFFD600L,
+      overlayYFraction = 0.32,
+      stickersJson = stickersJson,
+      drawingJson = strokesJson,
+      cropMode = "fit",
+      rotationDegrees = 90L
+    ).getOrThrow()
+
+    // Zainab fetches active stories and verifies rich metadata
+    var storiesForZainab = store.observeStories("zainab_a").first()
+    assertEquals(1, storiesForZainab.size)
+    val posted = storiesForZainab.first()
+    assertEquals(storyId, posted.id)
+    assertEquals("video", posted.mediaType)
+    assertEquals("Lo-Fi Chill • Nomi Beats", posted.musicTag)
+    assertEquals("Weekend Vibes", posted.overlayText)
+    assertEquals(0xFFFFD600L, posted.overlayColorHex)
+    assertEquals("fit", posted.cropMode)
+    assertEquals(90L, posted.rotationDegrees)
+    assertFalse("zainab_a" in posted.viewedByUids)
+
+    // Zainab opens story -> view recorded, seen ring state updated, owner sees live view record
+    store.recordStoryView("zainab_a", storyId).getOrThrow()
+    storiesForZainab = store.observeStories("zainab_a").first()
+    assertTrue("zainab_a" in storiesForZainab.first().viewedByUids)
+
+    // Zainab likes & reacts with 🔥 and sends text reply
+    store.reactToStory("zainab_a", storyId, liked = true, reactionEmoji = "🔥").getOrThrow()
+    store.replyToStory("zainab_a", posted, "Looks amazing!").getOrThrow()
+
+    // Owner checks live views list & counts
+    val views = store.observeStoryViews("hina_t", storyId).first()
+    assertEquals(1, views.size)
+    val record = views.first()
+    assertEquals("zainab_a", record.viewerUid)
+    assertEquals("Zainab Ali", record.viewerName)
+    assertEquals("zainab_a", record.viewerUsername)
+    assertEquals(viewerPhoto, record.viewerPhotoData)
+    assertTrue(record.liked)
+    assertEquals("🔥", record.reactionEmoji)
+
+    // Hina receives Zainab's story reply as a quoted chat message in her inbox
+    val hinaContacts = store.observeContacts("hina_t").first()
+    val zainabThread = hinaContacts.firstOrNull { it.username == "zainab_a" }
+    assertNotNull(zainabThread)
+    val msgsOnHina = store.observeMessages("hina_t", zainabThread!!.id).first()
+    assertEquals(1, msgsOnHina.size)
+    assertEquals("Looks amazing!", msgsOnHina.first().text)
+    assertTrue(msgsOnHina.first().replyToText?.contains("Story") == true)
+  }
+
+  @Test
+  fun `changePassword verifies current password, updates hash, and refreshes returning login`() = runTest {
+    val store = LocalAuthStore(context)
+    store.signUpUser("Ayesha Khan", "ayesha_k", "2000-01-01", "pass123", "pass123")
+
+    // Reject wrong current password
+    val wrongCurr = store.changePassword("ayesha_k", "wrongpw", "newpass99")
+    assertTrue(wrongCurr.isFailure)
+
+    // Reject too short new password
+    val shortPw = store.changePassword("ayesha_k", "pass123", "123")
+    assertTrue(shortPw.isFailure)
+
+    // Succeed with valid current + new password
+    val ok = store.changePassword("ayesha_k", "pass123", "newpass99")
+    assertTrue(ok.isSuccess)
+
+    // Old password fails returningLogin; new password succeeds
+    val oldLogin = store.returningLogin("ayesha_k", "pass123")
+    assertTrue(oldLogin is LocalAuthOutcome.Error)
+    val newLogin = store.returningLogin("ayesha_k", "newpass99")
+    assertTrue(newLogin is LocalAuthOutcome.Success)
+  }
+
+  @Test
+  fun `showOnlineStatus privacy toggle hides presence across contacts and directory merge`() = runTest {
+    val store = LocalAuthStore(context)
+    store.signUpUser("Usman Malik", "usman_m", "1999-05-05", "pass123", "pass123")
+    store.signUpUser("Bilal Ahmed", "bilal_a", "1998-03-03", "pass123", "pass123")
+    store.addContact("bilal_a", "Usman Malik", "@usman_m", "", "chat").getOrThrow()
+
+    // Initially Usman is online
+    var bilalContacts = store.observeContacts("bilal_a").first()
+    assertTrue(bilalContacts.first { it.username == "usman_m" }.online)
+
+    // Hide online status
+    store.updatePrivacySettings(
+      usernameKey = "usman_m",
+      profileVisibility = ProfileVisibilityMode.EVERYONE.key,
+      allowedViewerUids = emptyList(),
+      maxProfileViewers = 0L,
+      showOnlineStatus = false
+    ).getOrThrow()
+
+    val usmanProfile = store.observeProfile("usman_m").first()
+    assertNotNull(usmanProfile)
+    assertFalse(usmanProfile!!.showOnlineStatus)
+
+    bilalContacts = store.observeContacts("bilal_a").first()
+    assertFalse(bilalContacts.first { it.username == "usman_m" }.online)
+
+    // Even if presence heartbeat tries to set online = true, showOnlineStatus = false keeps it hidden
+    store.setUserPresence("usman_m", true)
+    bilalContacts = store.observeContacts("bilal_a").first()
+    assertFalse(bilalContacts.first { it.username == "usman_m" }.online)
+
+    // Directory merge also respects showOnlineStatus = false
+    val mergedHidden = NomiChatRepository.mergeThreadWithDirectory(
+      thread = ChatThread(id = "c1", userId = "bilal_a", name = "Usman", username = "usman_m", online = true),
+      entry = UserDirectoryEntry(
+        ownerUid = "uid_usman",
+        username = "usman_m",
+        displayName = "Usman",
+        online = true,
+        showOnlineStatus = false,
+        updatedAt = Timestamp.now()
+      )
+    )
+    assertFalse(mergedHidden.online)
+
+    // Re-enabling showOnlineStatus restores online visibility
+    store.updatePrivacySettings(
+      usernameKey = "usman_m",
+      profileVisibility = ProfileVisibilityMode.EVERYONE.key,
+      allowedViewerUids = emptyList(),
+      maxProfileViewers = 0L,
+      showOnlineStatus = true
+    ).getOrThrow()
+    assertTrue(store.refreshUserData("usman_m").isSuccess)
+    bilalContacts = store.observeContacts("bilal_a").first()
+    assertTrue(bilalContacts.first { it.username == "usman_m" }.online)
   }
 }

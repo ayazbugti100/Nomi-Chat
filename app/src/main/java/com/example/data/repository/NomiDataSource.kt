@@ -8,6 +8,7 @@ import com.example.data.model.IncomingMessageAlert
 import com.example.data.model.ReportOutcome
 import com.example.data.model.StoryFontStyle
 import com.example.data.model.StoryItem
+import com.example.data.model.StoryViewRecord
 import com.example.data.model.ThemeMode
 import com.example.data.model.UserProfile
 import com.example.data.model.UserSetupOutcome
@@ -26,12 +27,41 @@ interface NomiDataSource {
 
     fun observeStories(userId: String): Flow<List<StoryItem>> = emptyFlow()
 
+    fun observeStoryViews(userId: String, storyId: String): Flow<List<StoryViewRecord>> = emptyFlow()
+
     suspend fun postStory(
         userId: String,
         mediaData: String,
         caption: String = "",
-        storyFont: String = StoryFontStyle.NOTO_NASTALIQ.key
+        storyFont: String = StoryFontStyle.NOTO_NASTALIQ.key,
+        mediaType: String = "image",
+        musicTag: String = "",
+        overlayText: String = "",
+        overlayColorHex: Long = 0xFFFFFFFFL,
+        overlayYFraction: Double = 0.5,
+        stickersJson: String = "",
+        drawingJson: String = "",
+        cropMode: String = "crop",
+        rotationDegrees: Long = 0L
     ): Result<String> = Result.success("")
+
+    suspend fun recordStoryView(
+        userId: String,
+        storyId: String
+    ): Result<Unit> = Result.success(Unit)
+
+    suspend fun reactToStory(
+        userId: String,
+        storyId: String,
+        liked: Boolean? = null,
+        reactionEmoji: String? = null
+    ): Result<Unit> = Result.success(Unit)
+
+    suspend fun replyToStory(
+        userId: String,
+        story: StoryItem,
+        replyText: String
+    ): Result<Unit> = Result.success(Unit)
 
     suspend fun deleteStory(
         userId: String,
@@ -66,8 +96,17 @@ interface NomiDataSource {
         userId: String,
         profileVisibility: String,
         allowedViewerUids: List<String>,
-        maxProfileViewers: Long
+        maxProfileViewers: Long,
+        showOnlineStatus: Boolean = true
     ): Result<Unit> = Result.success(Unit)
+
+    suspend fun changePassword(
+        userId: String,
+        currentPassword: String,
+        newPassword: String
+    ): Result<Unit> = Result.success(Unit)
+
+    suspend fun refreshUserData(userId: String): Result<Unit> = Result.success(Unit)
 
     suspend fun syncAccountSettings(
         userId: String,
@@ -107,7 +146,16 @@ interface NomiDataSource {
         incrementUnreadIfThem: Boolean = true,
         messageType: String = "text",
         mediaData: String? = null,
-        durationSec: Long = 0L
+        durationSec: Long = 0L,
+        replyToText: String? = null,
+        replyToSender: String? = null,
+        replyToMessageId: String? = null
+    ): Result<Unit>
+
+    suspend fun deleteMessage(
+        userId: String,
+        contactId: String,
+        messageId: String
     ): Result<Unit>
 
     suspend fun startIncomingSync(userId: String, activeContactIdProvider: () -> String?) {}
@@ -115,6 +163,8 @@ interface NomiDataSource {
     suspend fun setUserPresence(userId: String, online: Boolean) {}
 
     suspend fun onNetworkReconnected() {}
+
+    suspend fun verifyActiveFirebaseConnection(): Boolean = true
 
     suspend fun markThreadRead(userId: String, contactId: String): Result<Unit>
 

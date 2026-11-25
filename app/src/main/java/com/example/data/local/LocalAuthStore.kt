@@ -11,6 +11,7 @@ import com.example.data.model.ReportOutcome
 import com.example.data.model.STORY_DURATION_MS
 import com.example.data.model.StoryFontStyle
 import com.example.data.model.StoryItem
+import com.example.data.model.StoryViewRecord
 import com.example.data.model.ThemeMode
 import com.example.data.model.UserProfile
 import com.example.data.repository.NomiChatRepository
@@ -49,6 +50,7 @@ data class LocalAccountSettings(
 
 class LocalAuthStore(context: Context) {
     private val file = File(context.applicationContext.filesDir, "nomi_auth_users.json")
+    private val retiredUsernamesFile = File(context.applicationContext.filesDir, "nomi_retired_usernames.json")
     private val mutex = Mutex()
     private val changeTick = MutableStateFlow(0L)
     private val _incomingAlerts = MutableSharedFlow<IncomingMessageAlert>(extraBufferCapacity = 24)
@@ -65,6 +67,32 @@ class LocalAuthStore(context: Context) {
     private fun writeRootUnlocked(root: JSONObject) {
         file.writeText(root.toString())
         changeTick.value = changeTick.value + 1L
+    }
+
+    private fun readRetiredUsernamesUnlocked(): MutableSet<String> {
+        if (!retiredUsernamesFile.exists()) return mutableSetOf()
+        return runCatching {
+            val raw = retiredUsernamesFile.readText()
+            if (raw.isBlank()) return@runCatching mutableSetOf<String>()
+            val arr = JSONArray(raw)
+            val set = mutableSetOf<String>()
+            for (i in 0 until arr.length()) {
+                val item = NomiChatRepository.normalizeUsername(arr.optString(i))
+                if (item.isNotBlank()) set.add(item)
+            }
+            set
+        }.getOrElse { mutableSetOf() }
+    }
+
+    private fun retireUsernameUnlocked(username: String) {
+        val clean = NomiChatRepository.normalizeUsername(username).take(40)
+        if (clean.isBlank()) return
+        val retired = readRetiredUsernamesUnlocked()
+        if (retired.add(clean)) {
+            val arr = JSONArray()
+            retired.forEach { arr.put(it) }
+            retiredUsernamesFile.writeText(arr.toString())
+        }
     }
 
     suspend fun signUpUser(
@@ -90,8 +118,9 @@ class LocalAuthStore(context: Context) {
 
         mutex.withLock {
             val root = readRootUnlocked()
-            if (findAccountKeyByUsernameUnlocked(root, user) != null) {
-                return@withContext LocalAuthOutcome.Error("This username is already taken.")
+            val retired = readRetiredUsernamesUnlocked()
+            if (retired.contains(user) || findAccountKeyByUsernameUnlocked(root, user) != null) {
+                return@withContext LocalAuthOutcome.Error("This username is already taken / already added.")
             }
 
             val salt = PasswordHasher.generateSalt()
@@ -111,6 +140,7 @@ class LocalAuthStore(context: Context) {
                 put("allowedViewerUids", JSONArray())
                 put("maxProfileViewers", 0L)
                 put("online", true)
+                put("showOnlineStatus", true)
                 put("passwordSalt", salt)
                 put("passwordHash", hash)
                 put("accountStatus", "active")
@@ -149,10 +179,14 @@ class LocalAuthStore(context: Context) {
 
         mutex.withLock {
             val root = readRootUnlocked()
+            val retired = readRetiredUsernamesUnlocked()
+            if (retired.contains(user)) {
+                return@withContext LocalAuthOutcome.Error("Account Not Found")
+            }
             val accountKey = findAccountKeyByUsernameUnlocked(root, user)
-                ?: return@withContext LocalAuthOutcome.Error("Invalid username or password.")
+                ?: return@withContext LocalAuthOutcome.Error("Account Not Found")
             val account = root.optJSONObject(accountKey)
-                ?: return@withContext LocalAuthOutcome.Error("Invalid username or password.")
+                ?: return@withContext LocalAuthOutcome.Error("Account Not Found")
             val salt = account.optString("passwordSalt", "")
             val expectedHash = account.optString("passwordHash", "")
             if (!PasswordHasher.verifyPassword(password, salt, expectedHash)) {
@@ -251,8 +285,10 @@ class LocalAuthStore(context: Context) {
             val root = readRootUnlocked()
             val accountKey = findAccountKeyByUsernameUnlocked(root, usernameKey) ?: return@withLock
             val account = root.optJSONObject(accountKey) ?: return@withLock
-            if (account.optBoolean("online", false) == online) return@withLock
-            account.put("online", online)
+            val showOnline = account.optBoolean("showOnlineStatus", true)
+            val effectiveOnline = online && showOnline
+            if (account.optBoolean("online", false) == effectiveOnline) return@withLock
+            account.put("online", effectiveOnline)
             account.put("updatedAtSec", System.currentTimeMillis() / 1000L)
             root.put(accountKey, account)
             writeRootUnlocked(root)
@@ -281,6 +317,7 @@ class LocalAuthStore(context: Context) {
                         val peerAccount = findAccountKeyByUsernameUnlocked(root, peerKey)?.let { root.optJSONObject(it) }
                         val realOnline = if (thread.threadType == "chat" && peerAccount != null) {
                             peerAccount.optString("accountStatus", "active") != "banned" &&
+                                peerAccount.optBoolean("showOnlineStatus", true) &&
                                 peerAccount.optBoolean("online", false)
                         } else {
                             false
@@ -363,17 +400,85 @@ class LocalAuthStore(context: Context) {
         }
     }
 
+    fun observeStoryViews(usernameKey: String, storyId: String): Flow<List<StoryViewRecord>> = changeTick.map {
+        withContext(Dispatchers.IO) {
+            mutex.withLock {
+                val root = readRootUnlocked()
+                val keys = root.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    val acc = root.optJSONObject(key) ?: continue
+                    val storiesArr = acc.optJSONArray("stories") ?: continue
+                    for (i in 0 until storiesArr.length()) {
+                        val sObj = storiesArr.optJSONObject(i) ?: continue
+                        if (sObj.optString("id") == storyId) {
+                            val viewsArr = sObj.optJSONArray("views") ?: return@withLock emptyList()
+                            return@withLock buildList {
+                                for (v in 0 until viewsArr.length()) {
+                                    val vObj = viewsArr.optJSONObject(v) ?: continue
+                                    val uid = vObj.optString("viewerUid")
+                                    if (uid.isBlank()) continue
+                                    val vAcc = root.optJSONObject(uid)
+                                    val livePhoto = if (vAcc != null && !vAcc.isNull("photoData")) {
+                                        vAcc.optString("photoData").takeIf { it.isNotBlank() }
+                                    } else {
+                                        if (vObj.isNull("viewerPhotoData")) null else vObj.optString("viewerPhotoData").takeIf { it.isNotBlank() }
+                                    }
+                                    val viewedAtMs = vObj.optLong("viewedAtMs", 0L)
+                                    add(
+                                        StoryViewRecord(
+                                            id = uid,
+                                            viewerUid = uid,
+                                            viewerName = vAcc?.optString("displayName")?.ifBlank { null }
+                                                ?: vObj.optString("viewerName", uid),
+                                            viewerUsername = vAcc?.optString("username")?.ifBlank { null }
+                                                ?: vObj.optString("viewerUsername", uid),
+                                            viewerPhotoData = livePhoto,
+                                            liked = vObj.optBoolean("liked", false),
+                                            reactionEmoji = vObj.optString("reactionEmoji", ""),
+                                            viewedAtMs = viewedAtMs,
+                                            updatedAt = Timestamp(viewedAtMs / 1000L, 0)
+                                        )
+                                    )
+                                }
+                            }.sortedByDescending { it.viewedAtMs }
+                        }
+                    }
+                }
+                emptyList()
+            }
+        }
+    }
+
     suspend fun postStory(
         usernameKey: String,
         mediaData: String,
         caption: String = "",
         storyFont: String = StoryFontStyle.NOTO_NASTALIQ.key,
+        mediaType: String = "image",
+        musicTag: String = "",
+        overlayText: String = "",
+        overlayColorHex: Long = 0xFFFFFFFFL,
+        overlayYFraction: Double = 0.5,
+        stickersJson: String = "",
+        drawingJson: String = "",
+        cropMode: String = "crop",
+        rotationDegrees: Long = 0L,
         createdAtMs: Long = System.currentTimeMillis()
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
-            require(mediaData.isNotBlank() && mediaData.length <= 240000) { "Story media is invalid or too large." }
+            require(mediaData.isNotBlank() && mediaData.length <= 920000) { "Story media is invalid or too large." }
             val cleanCaption = caption.trim().take(140)
             val normalizedFont = StoryFontStyle.fromKey(storyFont).key
+            val cleanMediaType = when (mediaType) {
+                "video", "text" -> mediaType
+                else -> "image"
+            }
+            val cleanCrop = if (cropMode == "fit") "fit" else "crop"
+            val cleanRotation = when (rotationDegrees) {
+                90L, 180L, 270L -> rotationDegrees
+                else -> 0L
+            }
             mutex.withLock {
                 val root = readRootUnlocked()
                 val accountKey = findAccountKeyByUsernameUnlocked(root, usernameKey)
@@ -394,8 +499,20 @@ class LocalAuthStore(context: Context) {
                     put("authorUsername", account.optString("username", accountKey).take(40))
                     if (authorPhoto != null) put("authorPhotoData", authorPhoto) else put("authorPhotoData", JSONObject.NULL)
                     put("mediaData", mediaData)
+                    put("mediaType", cleanMediaType)
                     put("caption", cleanCaption)
                     put("storyFont", normalizedFont)
+                    put("musicTag", musicTag.trim().take(80))
+                    put("overlayText", overlayText.trim().take(140))
+                    put("overlayColorHex", overlayColorHex)
+                    put("overlayYFraction", overlayYFraction.coerceIn(0.0, 1.0))
+                    put("stickersJson", stickersJson.take(4000))
+                    put("drawingJson", drawingJson.take(24000))
+                    put("cropMode", cleanCrop)
+                    put("rotationDegrees", cleanRotation)
+                    put("viewedByUids", JSONArray())
+                    put("likedByUids", JSONArray())
+                    put("views", JSONArray())
                     put("createdAtMs", createdAtMs)
                     put("expiresAtMs", expiresAtMs)
                 }
@@ -412,6 +529,202 @@ class LocalAuthStore(context: Context) {
                 storyId
             }
         }
+    }
+
+    suspend fun recordStoryView(viewerUsernameKey: String, storyId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            if (storyId.isBlank()) return@runCatching
+            mutex.withLock {
+                val root = readRootUnlocked()
+                val viewerKey = findAccountKeyByUsernameUnlocked(root, viewerUsernameKey) ?: return@runCatching
+                val viewerAcc = root.optJSONObject(viewerKey) ?: return@runCatching
+                val viewerName = viewerAcc.optString("displayName", viewerKey).take(60)
+                val viewerHandle = viewerAcc.optString("username", viewerKey).take(40)
+                val viewerPhoto = if (viewerAcc.isNull("photoData")) null else viewerAcc.optString("photoData").takeIf { it.isNotBlank() }
+
+                val keys = root.keys()
+                while (keys.hasNext()) {
+                    val ownerKey = keys.next()
+                    val ownerAcc = root.optJSONObject(ownerKey) ?: continue
+                    val storiesArr = ownerAcc.optJSONArray("stories") ?: continue
+                    for (i in 0 until storiesArr.length()) {
+                        val sObj = storiesArr.optJSONObject(i) ?: continue
+                        if (sObj.optString("id") == storyId) {
+                            if (ownerKey == viewerKey) return@runCatching
+                            val viewedArr = sObj.optJSONArray("viewedByUids") ?: JSONArray()
+                            var alreadyInViewed = false
+                            for (j in 0 until viewedArr.length()) {
+                                if (viewedArr.optString(j) == viewerKey) {
+                                    alreadyInViewed = true
+                                    break
+                                }
+                            }
+                            if (!alreadyInViewed) {
+                                viewedArr.put(viewerKey)
+                                sObj.put("viewedByUids", viewedArr)
+                            }
+                            val viewsArr = sObj.optJSONArray("views") ?: JSONArray()
+                            var existingViewObj: JSONObject? = null
+                            for (v in 0 until viewsArr.length()) {
+                                val vObj = viewsArr.optJSONObject(v) ?: continue
+                                if (vObj.optString("viewerUid") == viewerKey) {
+                                    existingViewObj = vObj
+                                    break
+                                }
+                            }
+                            if (existingViewObj == null) {
+                                viewsArr.put(
+                                    JSONObject().apply {
+                                        put("viewerUid", viewerKey)
+                                        put("viewerName", viewerName)
+                                        put("viewerUsername", viewerHandle)
+                                        if (viewerPhoto != null) put("viewerPhotoData", viewerPhoto) else put("viewerPhotoData", JSONObject.NULL)
+                                        put("liked", false)
+                                        put("reactionEmoji", "")
+                                        put("viewedAtMs", System.currentTimeMillis())
+                                    }
+                                )
+                                sObj.put("views", viewsArr)
+                            }
+                            ownerAcc.put("stories", storiesArr)
+                            root.put(ownerKey, ownerAcc)
+                            writeRootUnlocked(root)
+                            return@runCatching
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    suspend fun reactToStory(
+        viewerUsernameKey: String,
+        storyId: String,
+        liked: Boolean? = null,
+        reactionEmoji: String? = null
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            if (storyId.isBlank()) return@runCatching
+            mutex.withLock {
+                val root = readRootUnlocked()
+                val viewerKey = findAccountKeyByUsernameUnlocked(root, viewerUsernameKey) ?: return@runCatching
+                val viewerAcc = root.optJSONObject(viewerKey) ?: return@runCatching
+                val viewerName = viewerAcc.optString("displayName", viewerKey).take(60)
+                val viewerHandle = viewerAcc.optString("username", viewerKey).take(40)
+                val viewerPhoto = if (viewerAcc.isNull("photoData")) null else viewerAcc.optString("photoData").takeIf { it.isNotBlank() }
+
+                val keys = root.keys()
+                while (keys.hasNext()) {
+                    val ownerKey = keys.next()
+                    val ownerAcc = root.optJSONObject(ownerKey) ?: continue
+                    val storiesArr = ownerAcc.optJSONArray("stories") ?: continue
+                    for (i in 0 until storiesArr.length()) {
+                        val sObj = storiesArr.optJSONObject(i) ?: continue
+                        if (sObj.optString("id") == storyId) {
+                            val viewsArr = sObj.optJSONArray("views") ?: JSONArray()
+                            var existingViewObj: JSONObject? = null
+                            for (v in 0 until viewsArr.length()) {
+                                val vObj = viewsArr.optJSONObject(v) ?: continue
+                                if (vObj.optString("viewerUid") == viewerKey) {
+                                    existingViewObj = vObj
+                                    break
+                                }
+                            }
+                            if (existingViewObj == null) {
+                                existingViewObj = JSONObject().apply {
+                                    put("viewerUid", viewerKey)
+                                    put("viewerName", viewerName)
+                                    put("viewerUsername", viewerHandle)
+                                    if (viewerPhoto != null) put("viewerPhotoData", viewerPhoto) else put("viewerPhotoData", JSONObject.NULL)
+                                    put("liked", liked ?: false)
+                                    put("reactionEmoji", reactionEmoji.orEmpty().take(16))
+                                    put("viewedAtMs", System.currentTimeMillis())
+                                }
+                                viewsArr.put(existingViewObj)
+                            } else {
+                                if (liked != null) existingViewObj.put("liked", liked)
+                                if (reactionEmoji != null) existingViewObj.put("reactionEmoji", reactionEmoji.take(16))
+                            }
+                            sObj.put("views", viewsArr)
+
+                            if (liked != null) {
+                                val likedArr = sObj.optJSONArray("likedByUids") ?: JSONArray()
+                                val nextLiked = JSONArray()
+                                var found = false
+                                for (k in 0 until likedArr.length()) {
+                                    val uid = likedArr.optString(k)
+                                    if (uid == viewerKey) {
+                                        found = true
+                                        if (liked) nextLiked.put(uid)
+                                    } else if (uid.isNotBlank()) {
+                                        nextLiked.put(uid)
+                                    }
+                                }
+                                if (liked && !found) nextLiked.put(viewerKey)
+                                sObj.put("likedByUids", nextLiked)
+                            }
+                            ownerAcc.put("stories", storiesArr)
+                            root.put(ownerKey, ownerAcc)
+                            writeRootUnlocked(root)
+                            return@runCatching
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    suspend fun replyToStory(
+        usernameKey: String,
+        story: StoryItem,
+        replyText: String
+    ): Result<Unit> {
+        val cleanReply = replyText.trim().take(2000)
+        if (cleanReply.isBlank()) return Result.success(Unit)
+        val existingContactId = withContext(Dispatchers.IO) {
+            mutex.withLock {
+                val root = readRootUnlocked()
+                val accKey = findAccountKeyByUsernameUnlocked(root, usernameKey) ?: return@withLock null
+                val acc = root.optJSONObject(accKey) ?: return@withLock null
+                val contacts = acc.optJSONArray("contacts") ?: return@withLock null
+                for (i in 0 until contacts.length()) {
+                    val c = contacts.optJSONObject(i) ?: continue
+                    if ((story.userId.isNotBlank() && c.optString("peerUid") == story.userId) ||
+                        (story.authorUsername.isNotBlank() && c.optString("username").equals(story.authorUsername, ignoreCase = true))
+                    ) {
+                        return@withLock c.optString("id")
+                    }
+                }
+                null
+            }
+        }
+        val targetContactId = existingContactId ?: addContact(
+            usernameKey = usernameKey,
+            name = story.authorName.ifBlank { story.authorUsername },
+            contactUsername = story.authorUsername,
+            phone = "",
+            threadType = "chat",
+            peerUid = story.userId,
+            isRegisteredPeer = story.userId.isNotBlank()
+        ).getOrElse { return Result.failure(it) }
+
+        val storySnippet = when {
+            story.caption.isNotBlank() -> "Story: ${story.caption.take(80)}"
+            story.overlayText.isNotBlank() -> "Story: ${story.overlayText.take(80)}"
+            story.mediaType == "video" -> "Story: 🎬 Video"
+            else -> "Story: 📷 Photo"
+        }
+
+        return sendMessage(
+            usernameKey = usernameKey,
+            contactId = targetContactId,
+            sender = "me",
+            text = cleanReply,
+            aiGenerated = false,
+            replyToText = storySnippet,
+            replyToSender = story.authorName.ifBlank { story.authorUsername },
+            replyToMessageId = story.id
+        )
     }
 
     suspend fun deleteStory(usernameKey: String, storyId: String): Result<Unit> = withContext(Dispatchers.IO) {
@@ -517,12 +830,18 @@ class LocalAuthStore(context: Context) {
                 }
 
                 var movedUsername: String? = null
+                val previousStoredUsername = NomiChatRepository.normalizeUsername(account.optString("username", currentKey))
                 newUsername?.let { rawHandle ->
                     val nextUsername = NomiChatRepository.normalizeUsername(rawHandle).take(40)
                     require(nextUsername.isNotEmpty()) { "Invalid username." }
                     require(nextUsername.length in 2..40) { "Username must be between 2 and 40 characters." }
-                    if (nextUsername != currentKey && findAccountKeyByUsernameUnlocked(root, nextUsername) != null) {
-                        throw IllegalStateException("This username is already taken.")
+                    val retired = readRetiredUsernamesUnlocked()
+                    val isChanging = nextUsername != currentKey && nextUsername != previousStoredUsername
+                    if (isChanging && (retired.contains(nextUsername) || findAccountKeyByUsernameUnlocked(root, nextUsername) != null)) {
+                        throw IllegalStateException("This username is already taken / already added.")
+                    }
+                    if (!isChanging && retired.contains(nextUsername)) {
+                        throw IllegalStateException("This username is already taken / already added.")
                     }
                     account.put("username", nextUsername)
                     account.put("userId", nextUsername)
@@ -573,6 +892,10 @@ class LocalAuthStore(context: Context) {
                 val finalBannerData = if (account.isNull("bannerData")) null else account.optString("bannerData").takeIf { it.isNotBlank() }
 
                 if (movedUsername != null) {
+                    retireUsernameUnlocked(currentKey)
+                    if (previousStoredUsername.isNotBlank() && previousStoredUsername != movedUsername) {
+                        retireUsernameUnlocked(previousStoredUsername)
+                    }
                     root.remove(currentKey)
                     root.put(movedUsername!!, account)
                 } else {
@@ -630,7 +953,8 @@ class LocalAuthStore(context: Context) {
         usernameKey: String,
         profileVisibility: String,
         allowedViewerUids: List<String>,
-        maxProfileViewers: Long
+        maxProfileViewers: Long,
+        showOnlineStatus: Boolean = true
     ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             val cleanVisibility = ProfileVisibilityMode.fromKey(profileVisibility).key
@@ -650,6 +974,8 @@ class LocalAuthStore(context: Context) {
                 account.put("profileVisibility", cleanVisibility)
                 account.put("allowedViewerUids", JSONArray(cleanAllowed))
                 account.put("maxProfileViewers", cleanMax)
+                account.put("showOnlineStatus", showOnlineStatus)
+                account.put("online", showOnlineStatus)
                 account.put("updatedAtSec", System.currentTimeMillis() / 1000L)
                 root.put(accountKey, account)
 
@@ -681,6 +1007,7 @@ class LocalAuthStore(context: Context) {
                                 c.put("photoData", JSONObject.NULL)
                                 c.put("bannerData", JSONObject.NULL)
                             }
+                            c.put("online", showOnlineStatus)
                             changed = true
                         }
                     }
@@ -694,6 +1021,43 @@ class LocalAuthStore(context: Context) {
         }
     }
 
+    suspend fun changePassword(
+        usernameKey: String,
+        currentPassword: String,
+        newPassword: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            require(newPassword.length in 6..128) { "New password must be between 6 and 128 characters." }
+            mutex.withLock {
+                val root = readRootUnlocked()
+                val accountKey = findAccountKeyByUsernameUnlocked(root, usernameKey)
+                    ?: throw IllegalStateException("Account not found.")
+                val account = root.optJSONObject(accountKey)
+                    ?: throw IllegalStateException("Account not found.")
+                val existingSalt = account.optString("passwordSalt", "")
+                val existingHash = account.optString("passwordHash", "")
+                if (existingSalt.isNotBlank() && existingHash.isNotBlank()) {
+                    require(currentPassword.isNotEmpty()) { "Enter your current password." }
+                    if (!PasswordHasher.verifyPassword(currentPassword, existingSalt, existingHash)) {
+                        throw IllegalArgumentException("Current password is incorrect.")
+                    }
+                }
+                val newSalt = PasswordHasher.generateSalt()
+                val newHash = PasswordHasher.hashPassword(newPassword, newSalt)
+                account.put("passwordSalt", newSalt)
+                account.put("passwordHash", newHash)
+                account.put("updatedAtSec", System.currentTimeMillis() / 1000L)
+                root.put(accountKey, account)
+                writeRootUnlocked(root)
+            }
+        }
+    }
+
+    suspend fun refreshUserData(usernameKey: String): Result<Unit> = runCatching {
+        purgeExpiredStories(usernameKey)
+        changeTick.value = changeTick.value + 1L
+    }
+
     suspend fun lookupUserByUsername(
         usernameInput: String,
         viewerUserId: String = ""
@@ -701,6 +1065,8 @@ class LocalAuthStore(context: Context) {
         runCatching {
             val cleanHandle = NomiChatRepository.exactUsernameOrNull(usernameInput) ?: return@runCatching null
             mutex.withLock {
+                val retired = readRetiredUsernamesUnlocked()
+                if (retired.contains(cleanHandle)) return@runCatching null
                 val root = readRootUnlocked()
                 val key = findAccountKeyByUsernameUnlocked(root, cleanHandle) ?: return@runCatching null
                 val obj = root.optJSONObject(key) ?: return@runCatching null
@@ -761,9 +1127,13 @@ class LocalAuthStore(context: Context) {
 
                 if (validType == "chat") {
                     cleanHandle = NomiChatRepository.exactUsernameOrNull(contactUsername)
-                        ?: throw IllegalStateException("User not found")
+                        ?: throw IllegalStateException("Account Not Found")
+                    val retired = readRetiredUsernamesUnlocked()
+                    if (retired.contains(cleanHandle)) {
+                        throw IllegalStateException("Account Not Found")
+                    }
                     val foundKey = findAccountKeyByUsernameUnlocked(root, cleanHandle)
-                        ?: throw IllegalStateException("User not found")
+                        ?: throw IllegalStateException("Account Not Found")
                     if (foundKey == usernameKey) {
                         throw IllegalStateException("You cannot add your own username.")
                     }
@@ -772,12 +1142,13 @@ class LocalAuthStore(context: Context) {
                         candidateObj.optString("accountStatus", "active") == "banned" ||
                         !candidateObj.optString("username", foundKey).equals(cleanHandle, ignoreCase = true)
                     ) {
-                        throw IllegalStateException("User not found")
+                        throw IllegalStateException("Account Not Found")
                     }
                     resolvedPeerUid = foundKey
                     resolvedIsPeer = true
                     val registeredPeerDisplayName = candidateObj.optString("displayName").trim()
-                    peerOnline = candidateObj.optBoolean("online", false)
+                    peerOnline = candidateObj.optBoolean("showOnlineStatus", true) &&
+                        candidateObj.optBoolean("online", false)
                     val viewerHandle = account.optString("username", usernameKey)
                     val visible = canAccountShowProfileTo(candidateObj, usernameKey, viewerHandle)
                     peerBio = if (visible) candidateObj.optString("bio", "").take(200) else ""
@@ -910,7 +1281,10 @@ class LocalAuthStore(context: Context) {
         incrementUnreadIfThem: Boolean = true,
         messageType: String = "text",
         mediaData: String? = null,
-        durationSec: Long = 0L
+        durationSec: Long = 0L,
+        replyToText: String? = null,
+        replyToSender: String? = null,
+        replyToMessageId: String? = null
     ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             mutex.withLock {
@@ -983,6 +1357,9 @@ class LocalAuthStore(context: Context) {
                         put("timeLabel", timeLabel)
                         put("aiGenerated", aiGenerated)
                         put("createdAtSec", nowSec)
+                        if (!replyToText.isNullOrBlank()) put("replyToText", replyToText) else put("replyToText", JSONObject.NULL)
+                        if (!replyToSender.isNullOrBlank()) put("replyToSender", replyToSender) else put("replyToSender", JSONObject.NULL)
+                        if (!replyToMessageId.isNullOrBlank()) put("replyToMessageId", replyToMessageId) else put("replyToMessageId", JSONObject.NULL)
                     }
                 )
                 messagesObj.put(contactId, msgArr)
@@ -1020,7 +1397,10 @@ class LocalAuthStore(context: Context) {
                                 mediaData = cleanMedia,
                                 durationSec = cleanDuration,
                                 timeLabel = timeLabel,
-                                nowSec = nowSec
+                                nowSec = nowSec,
+                                replyToText = replyToText,
+                                replyToSender = replyToSender,
+                                replyToMessageId = replyToMessageId
                             )
                             root.put(peerKey, peerAccount)
                         }
@@ -1047,7 +1427,10 @@ class LocalAuthStore(context: Context) {
         mediaData: String?,
         durationSec: Long,
         timeLabel: String,
-        nowSec: Long
+        nowSec: Long,
+        replyToText: String? = null,
+        replyToSender: String? = null,
+        replyToMessageId: String? = null
     ) {
         val peerContacts = peerAccount.optJSONArray("contacts") ?: JSONArray()
         var peerContactObj: JSONObject? = null
@@ -1164,6 +1547,9 @@ class LocalAuthStore(context: Context) {
                 put("timeLabel", timeLabel)
                 put("aiGenerated", false)
                 put("createdAtSec", nowSec)
+                if (!replyToText.isNullOrBlank()) put("replyToText", replyToText) else put("replyToText", JSONObject.NULL)
+                if (!replyToSender.isNullOrBlank()) put("replyToSender", replyToSender) else put("replyToSender", JSONObject.NULL)
+                if (!replyToMessageId.isNullOrBlank()) put("replyToMessageId", replyToMessageId) else put("replyToMessageId", JSONObject.NULL)
             }
         )
         peerMessagesObj.put(peerContactId, peerMsgArr)
@@ -1552,6 +1938,7 @@ class LocalAuthStore(context: Context) {
             allowedViewerUids = allowedList,
             maxProfileViewers = obj.optLong("maxProfileViewers", 0L).coerceIn(0L, 500L),
             online = obj.optBoolean("online", false),
+            showOnlineStatus = obj.optBoolean("showOnlineStatus", true),
             verified = true,
             premiumUnlocked = true,
             accountStatus = obj.optString("accountStatus", "active"),
@@ -1608,6 +1995,22 @@ class LocalAuthStore(context: Context) {
     ): StoryItem {
         val rawAuthorPhoto = if (obj.isNull("authorPhotoData")) null else obj.optString("authorPhotoData").takeIf { it.isNotBlank() }
         val createdMs = obj.optLong("createdAtMs", 0L)
+        val viewedArr = obj.optJSONArray("viewedByUids")
+        val viewedList = if (viewedArr != null) {
+            buildList {
+                for (i in 0 until viewedArr.length()) {
+                    viewedArr.optString(i).takeIf { it.isNotBlank() }?.let { add(it) }
+                }
+            }
+        } else emptyList()
+        val likedArr = obj.optJSONArray("likedByUids")
+        val likedList = if (likedArr != null) {
+            buildList {
+                for (i in 0 until likedArr.length()) {
+                    likedArr.optString(i).takeIf { it.isNotBlank() }?.let { add(it) }
+                }
+            }
+        } else emptyList()
         return StoryItem(
             id = obj.optString("id", ""),
             userId = obj.optString("userId", ""),
@@ -1615,8 +2018,19 @@ class LocalAuthStore(context: Context) {
             authorUsername = obj.optString("authorUsername", fallbackUsername).ifBlank { fallbackUsername },
             authorPhotoData = fallbackPhoto ?: rawAuthorPhoto,
             mediaData = obj.optString("mediaData", ""),
+            mediaType = obj.optString("mediaType", "image").ifBlank { "image" },
             caption = obj.optString("caption", ""),
             storyFont = StoryFontStyle.fromKey(obj.optString("storyFont", StoryFontStyle.NOTO_NASTALIQ.key)).key,
+            musicTag = obj.optString("musicTag", ""),
+            overlayText = obj.optString("overlayText", ""),
+            overlayColorHex = obj.optLong("overlayColorHex", 0xFFFFFFFFL),
+            overlayYFraction = obj.optDouble("overlayYFraction", 0.5),
+            stickersJson = obj.optString("stickersJson", ""),
+            drawingJson = obj.optString("drawingJson", ""),
+            cropMode = obj.optString("cropMode", "crop"),
+            rotationDegrees = obj.optLong("rotationDegrees", 0L),
+            viewedByUids = viewedList,
+            likedByUids = likedList,
             createdAtMs = createdMs,
             expiresAtMs = obj.optLong("expiresAtMs", createdMs + STORY_DURATION_MS),
             createdAt = Timestamp(createdMs / 1000L, 0)
@@ -1625,6 +2039,9 @@ class LocalAuthStore(context: Context) {
 
     private fun jsonToChatMessage(obj: JSONObject): ChatMessage {
         val rawMedia = if (obj.isNull("mediaData")) null else obj.optString("mediaData").takeIf { it.isNotBlank() }
+        val rawReplyText = if (obj.isNull("replyToText")) null else obj.optString("replyToText").takeIf { it.isNotBlank() }
+        val rawReplySender = if (obj.isNull("replyToSender")) null else obj.optString("replyToSender").takeIf { it.isNotBlank() }
+        val rawReplyMsgId = if (obj.isNull("replyToMessageId")) null else obj.optString("replyToMessageId").takeIf { it.isNotBlank() }
         return ChatMessage(
             id = obj.optString("id", ""),
             userId = obj.optString("userId", ""),
@@ -1635,10 +2052,39 @@ class LocalAuthStore(context: Context) {
             mediaData = rawMedia,
             durationSec = obj.optLong("durationSec", 0L),
             expiresAtMs = obj.optLong("expiresAtMs", 0L),
+            replyToText = rawReplyText,
+            replyToSender = rawReplySender,
+            replyToMessageId = rawReplyMsgId,
             timeLabel = obj.optString("timeLabel", ""),
             aiGenerated = obj.optBoolean("aiGenerated", false),
             createdAt = Timestamp(obj.optLong("createdAtSec", 0L), 0)
         )
+    }
+
+    suspend fun deleteMessage(
+        usernameKey: String,
+        contactId: String,
+        messageId: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            mutex.withLock {
+                val root = readRootUnlocked()
+                val account = root.optJSONObject(usernameKey) ?: return@runCatching
+                val messagesObj = account.optJSONObject("messages") ?: return@runCatching
+                val msgArr = messagesObj.optJSONArray(contactId) ?: return@runCatching
+                val newArr = JSONArray()
+                for (i in 0 until msgArr.length()) {
+                    val m = msgArr.optJSONObject(i) ?: continue
+                    if (m.optString("id") != messageId) {
+                        newArr.put(m)
+                    }
+                }
+                messagesObj.put(contactId, newArr)
+                account.put("messages", messagesObj)
+                root.put(usernameKey, account)
+                writeRootUnlocked(root)
+            }
+        }
     }
 
     private fun currentFormattedTime(): String {
@@ -1671,12 +2117,54 @@ class LocalNomiRepository(private val store: LocalAuthStore) : NomiDataSource {
     override fun observeStories(userId: String): Flow<List<StoryItem>> =
         store.observeStories(userId)
 
+    override fun observeStoryViews(userId: String, storyId: String): Flow<List<StoryViewRecord>> =
+        store.observeStoryViews(userId, storyId)
+
     override suspend fun postStory(
         userId: String,
         mediaData: String,
         caption: String,
-        storyFont: String
-    ): Result<String> = store.postStory(userId, mediaData, caption, storyFont)
+        storyFont: String,
+        mediaType: String,
+        musicTag: String,
+        overlayText: String,
+        overlayColorHex: Long,
+        overlayYFraction: Double,
+        stickersJson: String,
+        drawingJson: String,
+        cropMode: String,
+        rotationDegrees: Long
+    ): Result<String> = store.postStory(
+        usernameKey = userId,
+        mediaData = mediaData,
+        caption = caption,
+        storyFont = storyFont,
+        mediaType = mediaType,
+        musicTag = musicTag,
+        overlayText = overlayText,
+        overlayColorHex = overlayColorHex,
+        overlayYFraction = overlayYFraction,
+        stickersJson = stickersJson,
+        drawingJson = drawingJson,
+        cropMode = cropMode,
+        rotationDegrees = rotationDegrees
+    )
+
+    override suspend fun recordStoryView(userId: String, storyId: String): Result<Unit> =
+        store.recordStoryView(userId, storyId)
+
+    override suspend fun reactToStory(
+        userId: String,
+        storyId: String,
+        liked: Boolean?,
+        reactionEmoji: String?
+    ): Result<Unit> = store.reactToStory(userId, storyId, liked, reactionEmoji)
+
+    override suspend fun replyToStory(
+        userId: String,
+        story: StoryItem,
+        replyText: String
+    ): Result<Unit> = store.replyToStory(userId, story, replyText)
 
     override suspend fun deleteStory(userId: String, storyId: String): Result<Unit> =
         store.deleteStory(userId, storyId)
@@ -1698,8 +2186,18 @@ class LocalNomiRepository(private val store: LocalAuthStore) : NomiDataSource {
         userId: String,
         profileVisibility: String,
         allowedViewerUids: List<String>,
-        maxProfileViewers: Long
-    ): Result<Unit> = store.updatePrivacySettings(userId, profileVisibility, allowedViewerUids, maxProfileViewers)
+        maxProfileViewers: Long,
+        showOnlineStatus: Boolean
+    ): Result<Unit> = store.updatePrivacySettings(userId, profileVisibility, allowedViewerUids, maxProfileViewers, showOnlineStatus)
+
+    override suspend fun changePassword(
+        userId: String,
+        currentPassword: String,
+        newPassword: String
+    ): Result<Unit> = store.changePassword(userId, currentPassword, newPassword)
+
+    override suspend fun refreshUserData(userId: String): Result<Unit> =
+        store.refreshUserData(userId)
 
     override suspend fun syncAccountSettings(
         userId: String,
@@ -1745,7 +2243,10 @@ class LocalNomiRepository(private val store: LocalAuthStore) : NomiDataSource {
         incrementUnreadIfThem: Boolean,
         messageType: String,
         mediaData: String?,
-        durationSec: Long
+        durationSec: Long,
+        replyToText: String?,
+        replyToSender: String?,
+        replyToMessageId: String?
     ): Result<Unit> = store.sendMessage(
         usernameKey = userId,
         contactId = contactId,
@@ -1755,8 +2256,17 @@ class LocalNomiRepository(private val store: LocalAuthStore) : NomiDataSource {
         incrementUnreadIfThem = incrementUnreadIfThem,
         messageType = messageType,
         mediaData = mediaData,
-        durationSec = durationSec
+        durationSec = durationSec,
+        replyToText = replyToText,
+        replyToSender = replyToSender,
+        replyToMessageId = replyToMessageId
     )
+
+    override suspend fun deleteMessage(
+        userId: String,
+        contactId: String,
+        messageId: String
+    ): Result<Unit> = store.deleteMessage(userId, contactId, messageId)
 
     override suspend fun markThreadRead(userId: String, contactId: String): Result<Unit> =
         store.markThreadRead(userId, contactId)

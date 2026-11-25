@@ -175,10 +175,17 @@ fun AvatarCircle(
 
     val ringBrush = remember(storyRingSeen) {
         if (storyRingSeen) {
-            Brush.linearGradient(listOf(Color(0xFF9EACA6), Color(0xFFB8C4BF)))
+            Brush.linearGradient(listOf(Color(0xFF9AA7A2), Color(0xFFB5C0BC)))
         } else {
             Brush.sweepGradient(
-                listOf(EmeraldVibrant, EmeraldBright, GoldCrown.copy(alpha = 0.85f), EmeraldMid, EmeraldVibrant)
+                listOf(
+                    Color(0xFF00E5FF),
+                    Color(0xFF00E676),
+                    Color(0xFFFFD600),
+                    Color(0xFFFF4081),
+                    Color(0xFF7C4DFF),
+                    Color(0xFF00E5FF)
+                )
             )
         }
     }

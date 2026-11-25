@@ -3,6 +3,11 @@ package com.example.ui.viewmodel
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaCodec
+import android.media.MediaExtractor
+import android.media.MediaFormat
+import android.media.MediaMetadataRetriever
+import android.media.MediaMuxer
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Base64
@@ -18,6 +23,7 @@ import com.example.data.model.IncomingMessageAlert
 import com.example.data.model.ProfileVisibilityMode
 import com.example.data.model.StoryFontStyle
 import com.example.data.model.StoryItem
+import com.example.data.model.StoryViewRecord
 import com.example.data.model.ThemeMode
 import com.example.data.model.UiState
 import com.example.data.model.UserProfile
@@ -54,13 +60,15 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.nio.ByteBuffer
 import kotlin.math.max
 
 sealed interface UsernameSearchState {
     data object Idle : UsernameSearchState
     data object Loading : UsernameSearchState
     data class Found(val result: DirectoryLookupResult) : UsernameSearchState
-    data class NotFound(val message: String = "User not found") : UsernameSearchState
+    data class NotFound(val message: String = "Account Not Found") : UsernameSearchState
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -69,7 +77,7 @@ class NomiChatViewModel(
     private val smartReplyRepository: SmartReplyRepository,
     private val preferencesRepository: UserPreferencesRepository,
     private val currentUserId: String,
-    networkObserver: NetworkConnectivityObserver? = null
+    private val networkObserver: NetworkConnectivityObserver? = null
 ) : ViewModel() {
 
     val isCloudSession: Boolean = repository.requiresInitialCloudSetup
@@ -106,6 +114,9 @@ class NomiChatViewModel(
     private val _isContactTyping = MutableStateFlow(false)
     val isContactTyping: StateFlow<Boolean> = _isContactTyping.asStateFlow()
 
+    private val _replyingToMessage = MutableStateFlow<ChatMessage?>(null)
+    val replyingToMessage: StateFlow<ChatMessage?> = _replyingToMessage.asStateFlow()
+
     private val _quickSuggestions = MutableStateFlow<List<String>>(emptyList())
     val quickSuggestions: StateFlow<List<String>> = _quickSuggestions.asStateFlow()
 
@@ -132,6 +143,26 @@ class NomiChatViewModel(
 
     private val _isPostingStory = MutableStateFlow(false)
     val isPostingStory: StateFlow<Boolean> = _isPostingStory.asStateFlow()
+
+    private val _isUploadingBanner = MutableStateFlow(false)
+    val isUploadingBanner: StateFlow<Boolean> = _isUploadingBanner.asStateFlow()
+
+    private val _isUploadingPhoto = MutableStateFlow(false)
+    val isUploadingPhoto: StateFlow<Boolean> = _isUploadingPhoto.asStateFlow()
+
+    private val _isSavingProfile = MutableStateFlow(false)
+    val isSavingProfile: StateFlow<Boolean> = _isSavingProfile.asStateFlow()
+
+    private val _profileSaveError = MutableStateFlow<String?>(null)
+    val profileSaveError: StateFlow<String?> = _profileSaveError.asStateFlow()
+
+    private val _isChangingPassword = MutableStateFlow(false)
+    val isChangingPassword: StateFlow<Boolean> = _isChangingPassword.asStateFlow()
+
+    private val _isRefreshing = MutableStateFlow(false)
+    val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
+
+    private val _localSeenStoryIds = MutableStateFlow<Set<String>>(emptySet())
 
     private val _inAppAlertBanner = MutableStateFlow<IncomingMessageAlert?>(null)
     val inAppAlertBanner: StateFlow<IncomingMessageAlert?> = _inAppAlertBanner.asStateFlow()
@@ -361,6 +392,21 @@ class NomiChatViewModel(
         initialValue = emptyList()
     )
 
+    val seenStoryIdsState: StateFlow<Set<String>> = combine(
+        _localSeenStoryIds,
+        activeStoriesState
+    ) { localSeen, stories ->
+        val remoteSeen = stories
+            .filter { currentUserId in it.viewedByUids }
+            .map { it.id }
+            .toSet()
+        localSeen + remoteSeen
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
+        initialValue = emptySet()
+    )
+
     init {
         ensureInitialSetup()
         observeAutoSmartSuggestions()
@@ -459,16 +505,41 @@ class NomiChatViewModel(
         }
     }
 
+    private fun showOfflinePopup() {
+        _popupMessage.value = NetworkConnectivityObserver.NO_INTERNET_POPUP_MESSAGE
+    }
+
+    private fun isTransportCurrentlyOffline(): Boolean {
+        val status = networkObserver?.currentStatus() ?: networkStatus.value
+        return !status.isConnected
+    }
+
+    private suspend fun requireVerifiedOnlineConnection(): Boolean {
+        if (isTransportCurrentlyOffline()) {
+            showOfflinePopup()
+            return false
+        }
+        if (networkObserver != null && !networkObserver.verifyInternetAccess()) {
+            showOfflinePopup()
+            return false
+        }
+        if (!repository.verifyActiveFirebaseConnection()) {
+            showOfflinePopup()
+            return false
+        }
+        return true
+    }
+
     fun reconnectCloudSync() {
         viewModelScope.launch {
-            if (!networkStatus.value.isConnected) {
-                _snackbarMessage.value = "No internet connection. Waiting for Wi-Fi or mobile data."
+            if (!requireVerifiedOnlineConnection()) {
                 return@launch
             }
             repository.onNetworkReconnected()
             ensureInitialSetup()
             startIncomingSyncLoop()
-            _snackbarMessage.value = "Cloud sync active (${networkStatus.value.transportLabel})"
+            val label = networkObserver?.currentStatus()?.transportLabel ?: networkStatus.value.transportLabel
+            _snackbarMessage.value = "Cloud sync active ($label)"
         }
     }
 
@@ -708,6 +779,41 @@ class NomiChatViewModel(
         }
     }
 
+    fun setReplyingToMessage(message: ChatMessage?) {
+        _replyingToMessage.value = message
+    }
+
+    fun cancelReply() {
+        _replyingToMessage.value = null
+    }
+
+    private var typingJob: Job? = null
+
+    fun updateTypingStatus(isTyping: Boolean) {
+        val contactId = _activeContactId.value ?: return
+        typingJob?.cancel()
+        typingJob = viewModelScope.launch {
+            repository.setContactTyping(currentUserId, contactId, isTyping)
+            if (isTyping) {
+                delay(3000L)
+                repository.setContactTyping(currentUserId, contactId, false)
+            }
+        }
+    }
+
+    fun deleteMessage(message: ChatMessage) {
+        val contact = activeContact.value ?: return
+        viewModelScope.launch {
+            repository.deleteMessage(currentUserId, contact.id, message.id)
+                .onSuccess {
+                    _popupMessage.value = "Message deleted permanently"
+                }
+                .onFailure { err ->
+                    _snackbarMessage.value = err.localizedMessage ?: "Failed to delete message."
+                }
+        }
+    }
+
     fun sendMessage(text: String) {
         val contact = activeContact.value ?: return
         if (contact.accountStatus == "banned") {
@@ -720,15 +826,28 @@ class NomiChatViewModel(
         }
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
+        if (isTransportCurrentlyOffline()) {
+            showOfflinePopup()
+            return
+        }
 
         viewModelScope.launch {
+            if (!requireVerifiedOnlineConnection()) {
+                return@launch
+            }
+            val replying = _replyingToMessage.value
+            _replyingToMessage.value = null
             _quickSuggestions.value = emptyList()
+            updateTypingStatus(false)
             val result = repository.sendMessage(
                 userId = currentUserId,
                 contactId = contact.id,
                 sender = "me",
                 text = trimmed,
-                aiGenerated = false
+                aiGenerated = false,
+                replyToText = replying?.text?.take(200),
+                replyToSender = replying?.sender?.let { if (it == "me") "You" else contact.name },
+                replyToMessageId = replying?.id
             )
             result.onFailure { err ->
                 _snackbarMessage.value = err.localizedMessage ?: "Failed to send message."
@@ -747,8 +866,13 @@ class NomiChatViewModel(
             return
         }
         if (mediaData.isBlank()) return
+        if (isTransportCurrentlyOffline()) {
+            showOfflinePopup()
+            return
+        }
         val safeDuration = durationSec.coerceIn(1L, 600L)
         viewModelScope.launch {
+            if (!requireVerifiedOnlineConnection()) return@launch
             _quickSuggestions.value = emptyList()
             repository.sendMessage(
                 userId = currentUserId,
@@ -775,7 +899,12 @@ class NomiChatViewModel(
             _popupMessage.value = "This user is blocked. Unblock to send photos."
             return
         }
+        if (isTransportCurrentlyOffline()) {
+            showOfflinePopup()
+            return
+        }
         viewModelScope.launch {
+            if (!requireVerifiedOnlineConnection()) return@launch
             val encoded = withContext(Dispatchers.IO) {
                 encodeStoryMediaDataUri(context, uri)
             }
@@ -808,7 +937,12 @@ class NomiChatViewModel(
             _popupMessage.value = "This user is blocked. Unblock to send photos."
             return
         }
+        if (isTransportCurrentlyOffline()) {
+            showOfflinePopup()
+            return
+        }
         viewModelScope.launch {
+            if (!requireVerifiedOnlineConnection()) return@launch
             val encoded = withContext(Dispatchers.IO) {
                 encodeBitmapToDataUri(bitmap)
             }
@@ -841,7 +975,12 @@ class NomiChatViewModel(
             _popupMessage.value = "This user is blocked. Unblock to send attachments."
             return
         }
+        if (isTransportCurrentlyOffline()) {
+            showOfflinePopup()
+            return
+        }
         viewModelScope.launch {
+            if (!requireVerifiedOnlineConnection()) return@launch
             val fileName = withContext(Dispatchers.IO) {
                 resolveDisplayFileName(context, uri)
             }
@@ -862,7 +1001,12 @@ class NomiChatViewModel(
     fun logVoiceCallAction() {
         val contact = activeContact.value ?: return
         if (contact.accountStatus == "banned" || contact.blocked) return
+        if (isTransportCurrentlyOffline()) {
+            showOfflinePopup()
+            return
+        }
         viewModelScope.launch {
+            if (!requireVerifiedOnlineConnection()) return@launch
             repository.sendMessage(
                 userId = currentUserId,
                 contactId = contact.id,
@@ -923,10 +1067,15 @@ class NomiChatViewModel(
     }
 
     fun reportContact(contact: ChatThread) {
+        if (isTransportCurrentlyOffline()) {
+            showOfflinePopup()
+            return
+        }
         val myHandle = (profileState.value as? UiState.Success)?.data?.username.orEmpty()
             .ifBlank { currentUserId }
 
         viewModelScope.launch {
+            if (!requireVerifiedOnlineConnection()) return@launch
             repository.reportUserAccount(
                 userId = currentUserId,
                 contact = contact,
@@ -940,19 +1089,28 @@ class NomiChatViewModel(
     }
 
     fun findUserByUsername(username: String) {
+        if (isTransportCurrentlyOffline()) {
+            _usernameSearchState.value = UsernameSearchState.Idle
+            showOfflinePopup()
+            return
+        }
         val clean = com.example.data.repository.NomiChatRepository.exactUsernameOrNull(username)
         if (clean == null) {
-            _usernameSearchState.value = UsernameSearchState.NotFound("User not found")
+            _usernameSearchState.value = UsernameSearchState.NotFound("Account Not Found")
             return
         }
         val myHandle = (profileState.value as? UiState.Success)?.data?.username.orEmpty()
         viewModelScope.launch {
             _usernameSearchState.value = UsernameSearchState.Loading
+            if (!requireVerifiedOnlineConnection()) {
+                _usernameSearchState.value = UsernameSearchState.Idle
+                return@launch
+            }
             repository.lookupUserByUsername(clean, viewerUserId = currentUserId)
                 .onSuccess { found ->
                     _usernameSearchState.value = when {
                         found == null || !found.username.equals(clean, ignoreCase = true) ->
-                            UsernameSearchState.NotFound("User not found")
+                            UsernameSearchState.NotFound("Account Not Found")
                         found.ownerUid == currentUserId ||
                             (myHandle.isNotBlank() && found.username.equals(myHandle, ignoreCase = true)) ->
                             UsernameSearchState.NotFound("You cannot add your own username.")
@@ -960,7 +1118,12 @@ class NomiChatViewModel(
                     }
                 }
                 .onFailure {
-                    _usernameSearchState.value = UsernameSearchState.NotFound("User not found")
+                    if (isTransportCurrentlyOffline() || !repository.verifyActiveFirebaseConnection()) {
+                        _usernameSearchState.value = UsernameSearchState.Idle
+                        showOfflinePopup()
+                    } else {
+                        _usernameSearchState.value = UsernameSearchState.NotFound("Account Not Found")
+                    }
                 }
         }
     }
@@ -973,18 +1136,36 @@ class NomiChatViewModel(
         username: String,
         onSuccess: () -> Unit
     ) {
+        if (isTransportCurrentlyOffline()) {
+            _usernameSearchState.value = UsernameSearchState.Idle
+            showOfflinePopup()
+            return
+        }
         val clean = com.example.data.repository.NomiChatRepository.exactUsernameOrNull(username)
         if (clean == null) {
-            _usernameSearchState.value = UsernameSearchState.NotFound("User not found")
+            _usernameSearchState.value = UsernameSearchState.NotFound("Account Not Found")
             return
         }
         val myHandle = (profileState.value as? UiState.Success)?.data?.username.orEmpty()
         viewModelScope.launch {
             _usernameSearchState.value = UsernameSearchState.Loading
+            if (!requireVerifiedOnlineConnection()) {
+                _usernameSearchState.value = UsernameSearchState.Idle
+                return@launch
+            }
             val lookupResult = repository.lookupUserByUsername(clean, viewerUserId = currentUserId)
             val found = lookupResult.getOrNull()
-            if (lookupResult.isFailure || found == null || !found.username.equals(clean, ignoreCase = true)) {
-                _usernameSearchState.value = UsernameSearchState.NotFound("User not found")
+            if (lookupResult.isFailure) {
+                if (isTransportCurrentlyOffline() || !repository.verifyActiveFirebaseConnection()) {
+                    _usernameSearchState.value = UsernameSearchState.Idle
+                    showOfflinePopup()
+                } else {
+                    _usernameSearchState.value = UsernameSearchState.NotFound("Account Not Found")
+                }
+                return@launch
+            }
+            if (found == null || !found.username.equals(clean, ignoreCase = true)) {
+                _usernameSearchState.value = UsernameSearchState.NotFound("Account Not Found")
                 return@launch
             }
             if (found.ownerUid == currentUserId ||
@@ -1008,9 +1189,14 @@ class NomiChatViewModel(
                 _popupMessage.value = "Chat added"
                 onSuccess()
             }.onFailure { err ->
-                _usernameSearchState.value = UsernameSearchState.NotFound(
-                    err.localizedMessage?.takeIf { it.isNotBlank() } ?: "User not found"
-                )
+                if (isTransportCurrentlyOffline() || !repository.verifyActiveFirebaseConnection()) {
+                    _usernameSearchState.value = UsernameSearchState.Idle
+                    showOfflinePopup()
+                } else {
+                    _usernameSearchState.value = UsernameSearchState.NotFound(
+                        err.localizedMessage?.takeIf { it.isNotBlank() } ?: "Account Not Found"
+                    )
+                }
             }
         }
     }
@@ -1025,7 +1211,12 @@ class NomiChatViewModel(
             _snackbarMessage.value = "Group name cannot be empty."
             return
         }
+        if (isTransportCurrentlyOffline()) {
+            showOfflinePopup()
+            return
+        }
         viewModelScope.launch {
+            if (!requireVerifiedOnlineConnection()) return@launch
             repository.addContact(
                 userId = currentUserId,
                 name = cleanName,
@@ -1049,62 +1240,105 @@ class NomiChatViewModel(
         displayName: String? = null,
         username: String? = null,
         bio: String? = null,
-        dob: String? = null
+        dob: String? = null,
+        onSuccess: () -> Unit = {}
     ) {
+        if (_isSavingProfile.value) return
+        _profileSaveError.value = null
+        if (isTransportCurrentlyOffline()) {
+            showOfflinePopup()
+            _profileSaveError.value = NetworkConnectivityObserver.NO_INTERNET_POPUP_MESSAGE
+            return
+        }
         viewModelScope.launch {
-            repository.updateProfile(
-                userId = currentUserId,
-                displayName = displayName,
-                username = username,
-                bio = bio,
-                dob = dob
-            ).onSuccess { movedToUsername ->
-                if (!movedToUsername.isNullOrBlank() && movedToUsername != currentUserId) {
-                    preferencesRepository.saveActiveUsername(movedToUsername)
+            _isSavingProfile.value = true
+            try {
+                if (!requireVerifiedOnlineConnection()) {
+                    _profileSaveError.value = NetworkConnectivityObserver.NO_INTERNET_POPUP_MESSAGE
+                    return@launch
                 }
-                _snackbarMessage.value = "Profile updated"
-            }.onFailure { err ->
-                _snackbarMessage.value = err.localizedMessage ?: "Failed to update profile."
+                repository.updateProfile(
+                    userId = currentUserId,
+                    displayName = displayName,
+                    username = username,
+                    bio = bio,
+                    dob = dob
+                ).onSuccess { movedToUsername ->
+                    if (!movedToUsername.isNullOrBlank() && movedToUsername != currentUserId) {
+                        preferencesRepository.saveActiveUsername(movedToUsername)
+                    }
+                    _profileSaveError.value = null
+                    _snackbarMessage.value = "Profile updated"
+                    onSuccess()
+                }.onFailure { err ->
+                    val errMsg = err.localizedMessage ?: "Failed to update profile."
+                    _profileSaveError.value = errMsg
+                    _snackbarMessage.value = errMsg
+                }
+            } finally {
+                _isSavingProfile.value = false
             }
         }
     }
 
     fun updateProfilePhotoFromUri(context: Context, uri: Uri) {
+        if (_isUploadingPhoto.value) return
+        if (isTransportCurrentlyOffline()) {
+            showOfflinePopup()
+            return
+        }
         viewModelScope.launch {
-            val encoded = withContext(Dispatchers.IO) {
-                encodeAvatarDataUri(context, uri)
-            }
-            if (encoded == null) {
-                _snackbarMessage.value = "Unable to process selected image."
-                return@launch
-            }
-            repository.updateProfile(
-                userId = currentUserId,
-                photoData = encoded
-            ).onSuccess {
-                _snackbarMessage.value = "Profile photo updated"
-            }.onFailure { err ->
-                _snackbarMessage.value = err.localizedMessage ?: "Failed to upload photo."
+            _isUploadingPhoto.value = true
+            try {
+                if (!requireVerifiedOnlineConnection()) return@launch
+                val encoded = withContext(Dispatchers.IO) {
+                    encodeAvatarDataUri(context, uri)
+                }
+                if (encoded == null) {
+                    _snackbarMessage.value = "Unable to process selected image."
+                    return@launch
+                }
+                repository.updateProfile(
+                    userId = currentUserId,
+                    photoData = encoded
+                ).onSuccess {
+                    _snackbarMessage.value = "Profile photo updated"
+                }.onFailure { err ->
+                    _snackbarMessage.value = err.localizedMessage ?: "Failed to upload photo."
+                }
+            } finally {
+                _isUploadingPhoto.value = false
             }
         }
     }
 
     fun updateProfileBannerFromUri(context: Context, uri: Uri) {
+        if (_isUploadingBanner.value) return
+        if (isTransportCurrentlyOffline()) {
+            showOfflinePopup()
+            return
+        }
         viewModelScope.launch {
-            val encoded = withContext(Dispatchers.IO) {
-                encodeBannerDataUri(context, uri)
-            }
-            if (encoded == null) {
-                _snackbarMessage.value = "Unable to process selected banner image."
-                return@launch
-            }
-            repository.updateProfile(
-                userId = currentUserId,
-                bannerData = encoded
-            ).onSuccess {
-                _popupMessage.value = "Profile banner updated"
-            }.onFailure { err ->
-                _snackbarMessage.value = err.localizedMessage ?: "Failed to upload banner."
+            _isUploadingBanner.value = true
+            try {
+                if (!requireVerifiedOnlineConnection()) return@launch
+                val encoded = withContext(Dispatchers.IO) {
+                    encodeBannerDataUri(context, uri)
+                }
+                if (encoded == null) {
+                    _snackbarMessage.value = "Unable to process selected banner image."
+                    return@launch
+                }
+                repository.updateProfile(
+                    userId = currentUserId,
+                    bannerData = encoded
+                ).onSuccess {
+                    _popupMessage.value = "Profile banner updated"
+                }.onFailure { err ->
+                    _snackbarMessage.value = err.localizedMessage ?: "Failed to upload banner."
+                }
+            } finally {
+                _isUploadingBanner.value = false
             }
         }
     }
@@ -1112,18 +1346,78 @@ class NomiChatViewModel(
     fun updatePrivacySettings(
         visibility: ProfileVisibilityMode,
         allowedViewerIds: List<String>,
-        maxViewers: Long
+        maxViewers: Long,
+        showOnlineStatus: Boolean = true
     ) {
+        if (isTransportCurrentlyOffline()) {
+            showOfflinePopup()
+            return
+        }
         viewModelScope.launch {
+            if (!requireVerifiedOnlineConnection()) return@launch
             repository.updatePrivacySettings(
                 userId = currentUserId,
                 profileVisibility = visibility.key,
                 allowedViewerUids = allowedViewerIds,
-                maxProfileViewers = maxViewers
+                maxProfileViewers = maxViewers,
+                showOnlineStatus = showOnlineStatus
             ).onSuccess {
                 _popupMessage.value = "Privacy settings updated"
             }.onFailure { err ->
                 _snackbarMessage.value = err.localizedMessage ?: "Unable to update privacy settings."
+            }
+        }
+    }
+
+    fun changePassword(
+        currentPassword: String,
+        newPassword: String,
+        onSuccess: () -> Unit = {}
+    ) {
+        if (_isChangingPassword.value) return
+        if (isTransportCurrentlyOffline()) {
+            showOfflinePopup()
+            return
+        }
+        viewModelScope.launch {
+            _isChangingPassword.value = true
+            try {
+                if (!requireVerifiedOnlineConnection()) return@launch
+                repository.changePassword(
+                    userId = currentUserId,
+                    currentPassword = currentPassword,
+                    newPassword = newPassword
+                ).onSuccess {
+                    _popupMessage.value = "Password updated successfully"
+                    onSuccess()
+                }.onFailure { err ->
+                    _snackbarMessage.value = err.localizedMessage ?: "Unable to update password."
+                }
+            } finally {
+                _isChangingPassword.value = false
+            }
+        }
+    }
+
+    fun refreshAllData() {
+        if (_isRefreshing.value) return
+        if (isTransportCurrentlyOffline()) {
+            showOfflinePopup()
+            return
+        }
+        viewModelScope.launch {
+            _isRefreshing.value = true
+            try {
+                if (!requireVerifiedOnlineConnection()) return@launch
+                val uid = currentUserId
+                if (uid.isNotBlank()) {
+                    repository.purgeExpiredStories(uid)
+                    repository.refreshUserData(uid).onFailure { err ->
+                        _snackbarMessage.value = err.localizedMessage ?: "Refresh failed."
+                    }
+                }
+            } finally {
+                _isRefreshing.value = false
             }
         }
     }
@@ -1171,31 +1465,75 @@ class NomiChatViewModel(
         storyFont: String = StoryFontStyle.NOTO_NASTALIQ.key,
         onSuccess: () -> Unit
     ) {
+        postRichStory(
+            context = context,
+            uri = uri,
+            caption = caption,
+            storyFont = storyFont,
+            onSuccess = onSuccess
+        )
+    }
+
+    fun postRichStory(
+        context: Context,
+        uri: Uri?,
+        caption: String,
+        storyFont: String = StoryFontStyle.NOTO_NASTALIQ.key,
+        musicTag: String = "",
+        overlayText: String = "",
+        overlayColorHex: Long = 0xFFFFFFFFL,
+        overlayYFraction: Float = 0.5f,
+        stickersJson: String = "",
+        drawingJson: String = "",
+        cropMode: String = "crop",
+        rotationDegrees: Int = 0,
+        onSuccess: () -> Unit
+    ) {
         if (_isPostingStory.value) return
         val cleanCaption = caption.trim()
-        if (uri == null && cleanCaption.isEmpty()) {
-            _snackbarMessage.value = "Choose a photo or enter story text."
+        val cleanOverlayText = overlayText.trim()
+        if (uri == null && cleanCaption.isEmpty() && cleanOverlayText.isEmpty() && drawingJson.isBlank() && stickersJson.isBlank()) {
+            _snackbarMessage.value = "Choose a photo/video or add text, stickers, or drawing."
+            return
+        }
+        if (isTransportCurrentlyOffline()) {
+            showOfflinePopup()
             return
         }
         viewModelScope.launch {
             _isPostingStory.value = true
             try {
-                val encoded = if (uri != null) {
+                if (!requireVerifiedOnlineConnection()) return@launch
+                val (encodedMedia, resolvedMediaType) = if (uri != null) {
                     withContext(Dispatchers.IO) {
-                        encodeStoryMediaDataUri(context, uri)
+                        val mime = context.contentResolver.getType(uri).orEmpty().lowercase()
+                        if (mime.startsWith("video/")) {
+                            encodeVideoStoryDataUri(context, uri)
+                        } else {
+                            encodeStoryMediaDataUri(context, uri) to "image"
+                        }
                     }
                 } else {
-                    "text_card:emerald"
+                    "text_card:emerald" to "text"
                 }
-                if (encoded == null) {
-                    _snackbarMessage.value = "Unable to process selected image."
+                if (encodedMedia == null) {
+                    _snackbarMessage.value = "Unable to process selected media."
                     return@launch
                 }
                 repository.postStory(
                     userId = currentUserId,
-                    mediaData = encoded,
+                    mediaData = encodedMedia,
                     caption = cleanCaption,
-                    storyFont = StoryFontStyle.fromKey(storyFont).key
+                    storyFont = StoryFontStyle.fromKey(storyFont).key,
+                    mediaType = resolvedMediaType,
+                    musicTag = musicTag.trim().take(80),
+                    overlayText = cleanOverlayText.take(180),
+                    overlayColorHex = overlayColorHex,
+                    overlayYFraction = overlayYFraction.toDouble().coerceIn(0.12, 0.88),
+                    stickersJson = stickersJson,
+                    drawingJson = drawingJson,
+                    cropMode = if (cropMode == "fit") "fit" else "crop",
+                    rotationDegrees = ((rotationDegrees % 360 + 360) % 360).toLong()
                 ).onSuccess {
                     storyNowTickMs.value = System.currentTimeMillis()
                     _popupMessage.value = "Story posted for 24 hours"
@@ -1206,6 +1544,79 @@ class NomiChatViewModel(
             } finally {
                 _isPostingStory.value = false
             }
+        }
+    }
+
+    fun observeStoryViews(storyId: String): Flow<List<StoryViewRecord>> {
+        return repository.observeStoryViews(currentUserId, storyId)
+            .catch { error ->
+                if (error is CancellationException) throw error
+                Log.w(TAG, "Error observing story views", error)
+                emit(emptyList())
+            }
+    }
+
+    fun recordStoryView(story: StoryItem) {
+        if (story.id.isBlank()) return
+        _localSeenStoryIds.value = _localSeenStoryIds.value + story.id
+        if (story.userId != currentUserId && currentUserId !in story.viewedByUids) {
+            viewModelScope.launch {
+                repository.recordStoryView(currentUserId, story.id)
+            }
+        }
+    }
+
+    fun toggleStoryLike(story: StoryItem) {
+        if (story.id.isBlank()) return
+        val currentlyLiked = currentUserId in story.likedByUids
+        viewModelScope.launch {
+            repository.reactToStory(
+                userId = currentUserId,
+                storyId = story.id,
+                liked = !currentlyLiked
+            ).onFailure { err ->
+                _snackbarMessage.value = err.localizedMessage ?: "Unable to update story like."
+            }
+        }
+    }
+
+    fun sendStoryReaction(story: StoryItem, emoji: String) {
+        val cleanEmoji = emoji.trim()
+        if (story.id.isBlank() || cleanEmoji.isEmpty()) return
+        if (isTransportCurrentlyOffline()) {
+            showOfflinePopup()
+            return
+        }
+        viewModelScope.launch {
+            if (!requireVerifiedOnlineConnection()) return@launch
+            repository.reactToStory(
+                userId = currentUserId,
+                storyId = story.id,
+                reactionEmoji = cleanEmoji
+            )
+            if (story.userId != currentUserId) {
+                repository.replyToStory(currentUserId, story, cleanEmoji)
+            }
+            _popupMessage.value = "Reacted $cleanEmoji to ${story.authorName}'s story"
+        }
+    }
+
+    fun replyToStory(story: StoryItem, replyText: String) {
+        val clean = replyText.trim()
+        if (story.id.isBlank() || clean.isEmpty()) return
+        if (isTransportCurrentlyOffline()) {
+            showOfflinePopup()
+            return
+        }
+        viewModelScope.launch {
+            if (!requireVerifiedOnlineConnection()) return@launch
+            repository.replyToStory(currentUserId, story, clean)
+                .onSuccess {
+                    _popupMessage.value = "Reply sent to ${story.authorName}"
+                }
+                .onFailure { err ->
+                    _snackbarMessage.value = err.localizedMessage ?: "Failed to send story reply."
+                }
         }
     }
 
@@ -1228,6 +1639,10 @@ class NomiChatViewModel(
 
     fun clearPopup() {
         _popupMessage.value = null
+    }
+
+    fun clearProfileSaveError() {
+        _profileSaveError.value = null
     }
 
     fun clearAuthRejection() {
@@ -1273,6 +1688,112 @@ class NomiChatViewModel(
         } catch (e: Exception) {
             Log.e(TAG, "Failed to encode story media", e)
             null
+        }
+    }
+
+    private fun encodeVideoStoryDataUri(context: Context, uri: Uri): Pair<String?, String> {
+        // 1. If the raw MP4 fits comfortably within Firestore's 1 MiB document budget, encode directly
+        val directBytes = runCatching {
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                val buffer = ByteArrayOutputStream()
+                val chunk = ByteArray(16_384)
+                var total = 0
+                while (true) {
+                    val read = stream.read(chunk)
+                    if (read <= 0) break
+                    total += read
+                    if (total > MAX_STORY_VIDEO_RAW_BYTES) return@use null
+                    buffer.write(chunk, 0, read)
+                }
+                buffer.toByteArray()
+            }
+        }.getOrNull()
+        if (directBytes != null && directBytes.isNotEmpty()) {
+            val encoded = "data:video/mp4;base64," + Base64.encodeToString(directBytes, Base64.NO_WRAP)
+            if (encoded.length <= MAX_STORY_MEDIA_DATA_CHARS) {
+                return encoded to "video"
+            }
+        }
+
+        // 2. Trim/remux tracks cleanly to fit compact cloud sync budget using MediaExtractor + MediaMuxer
+        val trimmedFile = File(context.cacheDir, "story_trim_${System.currentTimeMillis()}.mp4")
+        val extractor = MediaExtractor()
+        var muxer: MediaMuxer? = null
+        var muxerStarted = false
+        try {
+            extractor.setDataSource(context, uri, null)
+            muxer = MediaMuxer(trimmedFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            val trackMap = mutableMapOf<Int, Int>()
+            var hasVideoTrack = false
+            for (i in 0 until extractor.trackCount) {
+                val format = extractor.getTrackFormat(i)
+                val mime = format.getString(MediaFormat.KEY_MIME).orEmpty()
+                if (mime.startsWith("video/") || mime.startsWith("audio/")) {
+                    val dstIdx = muxer.addTrack(format)
+                    trackMap[i] = dstIdx
+                    extractor.selectTrack(i)
+                    if (mime.startsWith("video/")) hasVideoTrack = true
+                }
+            }
+            if (hasVideoTrack && trackMap.isNotEmpty()) {
+                muxer.start()
+                muxerStarted = true
+                val byteBuffer = ByteBuffer.allocate(256 * 1024)
+                val bufferInfo = MediaCodec.BufferInfo()
+                var accumulatedBytes = 0L
+                while (true) {
+                    val sampleTrack = extractor.sampleTrackIndex
+                    if (sampleTrack < 0) break
+                    val sampleSize = extractor.readSampleData(byteBuffer, 0)
+                    if (sampleSize < 0) break
+                    if (accumulatedBytes + sampleSize > MAX_STORY_VIDEO_TRIM_BYTES) break
+                    val dstIdx = trackMap[sampleTrack]
+                    if (dstIdx != null) {
+                        bufferInfo.offset = 0
+                        bufferInfo.size = sampleSize
+                        bufferInfo.presentationTimeUs = extractor.sampleTime.coerceAtLeast(0L)
+                        bufferInfo.flags = extractor.sampleFlags
+                        muxer.writeSampleData(dstIdx, byteBuffer, bufferInfo)
+                        accumulatedBytes += sampleSize
+                    }
+                    extractor.advance()
+                }
+                if (muxerStarted) {
+                    runCatching { muxer.stop() }
+                    muxerStarted = false
+                }
+                val bytes = trimmedFile.takeIf { it.exists() && it.length() in 1..MAX_STORY_VIDEO_RAW_BYTES }
+                    ?.readBytes()
+                if (bytes != null && bytes.isNotEmpty()) {
+                    val encoded = "data:video/mp4;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
+                    if (encoded.length <= MAX_STORY_MEDIA_DATA_CHARS) {
+                        return encoded to "video"
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Video remux trim fallback to frame", e)
+        } finally {
+            if (muxerStarted) runCatching { muxer?.stop() }
+            runCatching { muxer?.release() }
+            runCatching { extractor.release() }
+            runCatching { trimmedFile.delete() }
+        }
+
+        // 3. Poster-frame JPEG fallback so large unsupported videos still share cleanly
+        val posterBitmap = runCatching {
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(context, uri)
+                retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            } finally {
+                runCatching { retriever.release() }
+            }
+        }.getOrNull()
+        return if (posterBitmap != null) {
+            encodeBitmapToDataUri(posterBitmap) to "image"
+        } else {
+            null to "image"
         }
     }
 
@@ -1358,5 +1879,8 @@ class NomiChatViewModel(
         const val STOP_TIMEOUT_MILLIS = 5000L
         const val PRESENCE_HEARTBEAT_MS = 60_000L
         const val STORY_EXPIRY_CHECK_MS = 30_000L
+        const val MAX_STORY_VIDEO_RAW_BYTES = 650_000
+        const val MAX_STORY_VIDEO_TRIM_BYTES = 600_000L
+        const val MAX_STORY_MEDIA_DATA_CHARS = 900_000
     }
 }

@@ -3,12 +3,14 @@ package com.example
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -99,16 +101,18 @@ import com.example.ui.screens.AppLockSetupDialog
 import com.example.ui.screens.AppearanceDialog
 import com.example.ui.screens.ArchivedChatsScreen
 import com.example.ui.screens.AvatarPreviewDialog
+import com.example.ui.screens.ChangePasswordDialog
 import com.example.ui.screens.ChatsScreen
 import com.example.ui.screens.ContactProfileDialog
 import com.example.ui.screens.ConversationScreen
+import com.example.ui.screens.EditProfileDialog
 import com.example.ui.screens.EditSingleFieldDialog
 import com.example.ui.screens.PremiumFeaturesDialog
 import com.example.ui.screens.PrivacySettingsScreen
 import com.example.ui.screens.ProfileScreen
 import com.example.ui.screens.ReportAccountDialog
-import com.example.ui.screens.StoryPickerDialog
-import com.example.ui.screens.StoryViewerDialog
+import com.example.ui.screens.StoryEditorScreen
+import com.example.ui.screens.StoryViewerScreen
 import com.example.ui.theme.EmeraldDark
 import com.example.ui.theme.EmeraldDeep
 import com.example.ui.theme.EmeraldMid
@@ -166,12 +170,13 @@ class MainActivity : ComponentActivity() {
 
 private enum class ActiveModal {
     NONE,
+    EDIT_PROFILE,
     EDIT_NAME,
     EDIT_BIO,
     EDIT_USERNAME,
     EDIT_DOB,
+    CHANGE_PASSWORD,
     ADD_CONTACT,
-    POST_STORY,
     APPEARANCE,
     PASSCODE,
     PREMIUM
@@ -197,6 +202,7 @@ fun AppNavigation(
     }.collectAsStateWithLifecycle(initialValue = null)
 
     var globalPopupMessage by remember { mutableStateOf<String?>(null) }
+    var suppressRootPopup by remember { mutableStateOf(false) }
     var globalAuthError by remember { mutableStateOf<String?>(null) }
     var bottomTab by remember { mutableStateOf(MainBottomTab.CHATS) }
     var validatedLocalUser by remember { mutableStateOf<String?>(null) }
@@ -303,7 +309,9 @@ fun AppNavigation(
                         onSelectBottomTab = { bottomTab = it },
                         onResetToAuth = { bottomTab = MainBottomTab.CHATS },
                         onShowGlobalPopup = { message -> globalPopupMessage = message },
-                        onAuthRejected = { reason -> globalAuthError = reason }
+                        onAuthRejected = { reason -> globalAuthError = reason },
+                        activeGlobalPopupMessage = globalPopupMessage,
+                        onDialogShowsPopup = { suppressRootPopup = it }
                     )
                 }
             }
@@ -335,7 +343,9 @@ fun AppNavigation(
                         onSelectBottomTab = { bottomTab = it },
                         onResetToAuth = { bottomTab = MainBottomTab.CHATS },
                         onShowGlobalPopup = { message -> globalPopupMessage = message },
-                        onAuthRejected = { reason -> globalAuthError = reason }
+                        onAuthRejected = { reason -> globalAuthError = reason },
+                        activeGlobalPopupMessage = globalPopupMessage,
+                        onDialogShowsPopup = { suppressRootPopup = it }
                     )
                 }
             }
@@ -380,7 +390,7 @@ fun AppNavigation(
         }
 
         SmallFloatingPopup(
-            message = globalPopupMessage,
+            message = if (suppressRootPopup) null else globalPopupMessage,
             modifier = Modifier.align(Alignment.BottomCenter)
         )
     }
@@ -397,7 +407,9 @@ private fun NomiChatMainShell(
     onSelectBottomTab: (MainBottomTab) -> Unit,
     onResetToAuth: () -> Unit,
     onShowGlobalPopup: (String) -> Unit,
-    onAuthRejected: (String) -> Unit
+    onAuthRejected: (String) -> Unit,
+    activeGlobalPopupMessage: String? = null,
+    onDialogShowsPopup: (Boolean) -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -478,7 +490,14 @@ private fun NomiChatMainShell(
     val usernameSearchState by viewModel.usernameSearchState.collectAsStateWithLifecycle()
     val networkStatus by viewModel.networkStatus.collectAsStateWithLifecycle()
     val activeStories by viewModel.activeStoriesState.collectAsStateWithLifecycle()
+    val seenStoryIds by viewModel.seenStoryIdsState.collectAsStateWithLifecycle()
     val isPostingStory by viewModel.isPostingStory.collectAsStateWithLifecycle()
+    val isUploadingBanner by viewModel.isUploadingBanner.collectAsStateWithLifecycle()
+    val isUploadingPhoto by viewModel.isUploadingPhoto.collectAsStateWithLifecycle()
+    val isSavingProfile by viewModel.isSavingProfile.collectAsStateWithLifecycle()
+    val profileSaveError by viewModel.profileSaveError.collectAsStateWithLifecycle()
+    val isChangingPassword by viewModel.isChangingPassword.collectAsStateWithLifecycle()
+    val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
     val inAppAlertBanner by viewModel.inAppAlertBanner.collectAsStateWithLifecycle()
 
     val rawAllThreads by viewModel.allThreadsState.collectAsStateWithLifecycle()
@@ -487,12 +506,42 @@ private fun NomiChatMainShell(
     var activeModal by remember { mutableStateOf(ActiveModal.NONE) }
     var isPrivacySettingsOpen by remember { mutableStateOf(false) }
     var isArchivedFolderOpen by remember { mutableStateOf(false) }
+    var isStoryEditorOpen by remember { mutableStateOf(false) }
+    var pendingStoryMediaUri by remember { mutableStateOf<Uri?>(null) }
     var activeStoryAuthorKey by remember { mutableStateOf<String?>(null) }
     var avatarPreviewThreadId by remember { mutableStateOf<String?>(null) }
     var viewContactThreadId by remember { mutableStateOf<String?>(null) }
     var renameThreadId by remember { mutableStateOf<String?>(null) }
     var reportThreadId by remember { mutableStateOf<String?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
+
+    val modalOfflinePopup = if (
+        activeModal == ActiveModal.ADD_CONTACT &&
+        activeGlobalPopupMessage == NetworkConnectivityObserver.NO_INTERNET_POPUP_MESSAGE
+    ) {
+        activeGlobalPopupMessage
+    } else null
+
+    LaunchedEffect(modalOfflinePopup) {
+        onDialogShowsPopup(modalOfflinePopup != null)
+    }
+    DisposableEffect(Unit) {
+        onDispose { onDialogShowsPopup(false) }
+    }
+
+    val storyMediaPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            pendingStoryMediaUri = uri
+            isStoryEditorOpen = true
+        }
+    }
+    val launchStoryMediaPicker = {
+        storyMediaPickerLauncher.launch(
+            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+        )
+    }
 
     val allThreads = (contactsState as? UiState.Success)?.data.orEmpty()
     val lookupThreads = rawAllThreads.ifEmpty { allThreads }
@@ -596,9 +645,7 @@ private fun NomiChatMainShell(
                                 MainBottomTab.SETTINGS -> Unit
                             }
                         },
-                        onPlusClick = {
-                            activeModal = ActiveModal.POST_STORY
-                        }
+                        onPlusClick = launchStoryMediaPicker
                     )
                 }
             }
@@ -616,6 +663,7 @@ private fun NomiChatMainShell(
             ) {
                 val currentThread = activeContact
                 if (currentThread != null) {
+                    val replyingToMessage by viewModel.replyingToMessage.collectAsStateWithLifecycle()
                     ConversationScreen(
                         contact = currentThread,
                         messagesState = activeMessagesState,
@@ -623,6 +671,10 @@ private fun NomiChatMainShell(
                         smartAiEnabled = prefs.smartAiEnabled,
                         quickSuggestions = quickSuggestions,
                         isGeneratingSuggestions = isGeneratingSuggestions,
+                        replyingToMessage = replyingToMessage,
+                        onReplyMessage = viewModel::setReplyingToMessage,
+                        onDeleteMessage = viewModel::deleteMessage,
+                        onUpdateTyping = viewModel::updateTypingStatus,
                         onToggleSmartAi = viewModel::setSmartAiEnabled,
                         onRequestSuggestions = viewModel::requestQuickSuggestions,
                         onDismissSuggestions = viewModel::dismissQuickSuggestions,
@@ -642,7 +694,8 @@ private fun NomiChatMainShell(
                         onClearMessages = { viewModel.clearChatMessages(currentThread) },
                         onDeleteChat = { viewModel.deleteChatPermanently(currentThread) },
                         onShowNotice = onShowGlobalPopup,
-                        onBack = viewModel::closeConversation
+                        onBack = viewModel::closeConversation,
+                        networkStatus = networkStatus
                     )
                 } else if (isPrivacySettingsOpen) {
                     PrivacySettingsScreen(
@@ -658,14 +711,27 @@ private fun NomiChatMainShell(
                     ArchivedChatsScreen(
                         archivedChats = archivedChats,
                         activeStories = activeStories,
+                        seenStoryIds = seenStoryIds,
                         onOpenChat = viewModel::openConversation,
-                        onAvatarClick = { thread -> avatarPreviewThreadId = thread.id },
+                        onAvatarClick = { thread ->
+                            val threadStories = activeStories.filter { story ->
+                                (thread.peerUid.isNotBlank() && story.userId == thread.peerUid) ||
+                                    (thread.username.isNotBlank() && story.authorUsername.equals(thread.username, ignoreCase = true))
+                            }
+                            if (threadStories.isNotEmpty() && !thread.blocked) {
+                                activeStoryAuthorKey = threadStories.first().let { it.userId.ifBlank { it.authorUsername } }
+                            } else {
+                                avatarPreviewThreadId = thread.id
+                            }
+                        },
                         onRenameChat = { thread -> renameThreadId = thread.id },
                         onViewContact = { thread -> viewContactThreadId = thread.id },
                         onUnarchiveChat = viewModel::toggleArchiveChat,
                         onToggleBlockChat = viewModel::toggleBlockChat,
                         onDeleteChat = viewModel::deleteChatPermanently,
-                        onBack = { isArchivedFolderOpen = false }
+                        onBack = { isArchivedFolderOpen = false },
+                        isRefreshing = isRefreshing,
+                        onRefresh = viewModel::refreshAllData
                     )
                 } else if (bottomTab == MainBottomTab.SETTINGS) {
                     ProfileScreen(
@@ -677,13 +743,31 @@ private fun NomiChatMainShell(
                             onSelectBottomTab(MainBottomTab.CHATS)
                             viewModel.selectPillFilter(ChatPillFilter.CHATS)
                         },
-                        onEditNameClick = { activeModal = ActiveModal.EDIT_NAME },
-                        onEditBioClick = { activeModal = ActiveModal.EDIT_BIO },
-                        onEditUsernameClick = { activeModal = ActiveModal.EDIT_USERNAME },
-                        onEditDobClick = { activeModal = ActiveModal.EDIT_DOB },
+                        onEditProfileClick = {
+                            viewModel.clearProfileSaveError()
+                            activeModal = ActiveModal.EDIT_PROFILE
+                        },
+                        onEditNameClick = {
+                            viewModel.clearProfileSaveError()
+                            activeModal = ActiveModal.EDIT_NAME
+                        },
+                        onEditBioClick = {
+                            viewModel.clearProfileSaveError()
+                            activeModal = ActiveModal.EDIT_BIO
+                        },
+                        onEditUsernameClick = {
+                            viewModel.clearProfileSaveError()
+                            activeModal = ActiveModal.EDIT_USERNAME
+                        },
+                        onEditDobClick = {
+                            viewModel.clearProfileSaveError()
+                            activeModal = ActiveModal.EDIT_DOB
+                        },
                         onPhotoPicked = { uri -> viewModel.updateProfilePhotoFromUri(context, uri) },
                         onBannerPicked = { uri -> viewModel.updateProfileBannerFromUri(context, uri) },
+                        onOpenPrivacySettings = { isPrivacySettingsOpen = true },
                         onOpenPasscodeSetup = { activeModal = ActiveModal.PASSCODE },
+                        onOpenChangePassword = { activeModal = ActiveModal.CHANGE_PASSWORD },
                         onToggleNotifications = viewModel::setNotificationsEnabled,
                         onOpenAppearancePicker = { activeModal = ActiveModal.APPEARANCE },
                         onOpenAddContact = {
@@ -707,6 +791,12 @@ private fun NomiChatMainShell(
                         networkStatus = networkStatus,
                         isCloudSession = viewModel.isCloudSession,
                         onReconnectSyncClick = viewModel::reconnectCloudSync,
+                        isUploadingBanner = isUploadingBanner,
+                        isUploadingPhoto = isUploadingPhoto,
+                        isSavingProfile = isSavingProfile,
+                        isChangingPassword = isChangingPassword,
+                        isRefreshing = isRefreshing,
+                        onRefresh = viewModel::refreshAllData,
                         onConnectGoogleSyncClick = {
                             if (!networkStatus.isConnected) {
                                 onShowGlobalPopup("Connect to Wi-Fi or mobile data to enable Cloud Sync.")
@@ -740,6 +830,7 @@ private fun NomiChatMainShell(
                         archivedChats = archivedChats,
                         profile = profile,
                         activeStories = activeStories,
+                        seenStoryIds = seenStoryIds,
                         selectedFilter = selectedFilter,
                         isSearchVisible = isSearchVisible,
                         searchQuery = searchQuery,
@@ -760,7 +851,17 @@ private fun NomiChatMainShell(
                         onOpenArchivedFolder = { isArchivedFolderOpen = true },
                         onOpenPremium = { activeModal = ActiveModal.PREMIUM },
                         onOpenChat = viewModel::openConversation,
-                        onAvatarClick = { thread -> avatarPreviewThreadId = thread.id },
+                        onAvatarClick = { thread ->
+                            val threadStories = activeStories.filter { story ->
+                                (thread.peerUid.isNotBlank() && story.userId == thread.peerUid) ||
+                                    (thread.username.isNotBlank() && story.authorUsername.equals(thread.username, ignoreCase = true))
+                            }
+                            if (threadStories.isNotEmpty() && !thread.blocked) {
+                                activeStoryAuthorKey = threadStories.first().let { it.userId.ifBlank { it.authorUsername } }
+                            } else {
+                                avatarPreviewThreadId = thread.id
+                            }
+                        },
                         onRenameChat = { thread -> renameThreadId = thread.id },
                         onViewContact = { thread -> viewContactThreadId = thread.id },
                         onToggleLockChat = viewModel::toggleLockChat,
@@ -771,14 +872,61 @@ private fun NomiChatMainShell(
                             viewModel.resetUsernameSearch()
                             activeModal = ActiveModal.ADD_CONTACT
                         },
-                        onPostStoryClick = { activeModal = ActiveModal.POST_STORY },
+                        onPostStoryClick = launchStoryMediaPicker,
                         onOpenStoryGroup = { group ->
                             activeStoryAuthorKey = group.firstOrNull()?.let { it.userId.ifBlank { it.authorUsername } }
                         },
-                        networkStatus = networkStatus
+                        networkStatus = networkStatus,
+                        isRefreshing = isRefreshing,
+                        onRefresh = viewModel::refreshAllData
                     )
                 }
             }
+        }
+
+        if (isStoryEditorOpen) {
+            StoryEditorScreen(
+                mediaUri = pendingStoryMediaUri,
+                contacts = lookupThreads,
+                isPosting = isPostingStory,
+                onPickMediaClick = launchStoryMediaPicker,
+                onClose = {
+                    isStoryEditorOpen = false
+                    pendingStoryMediaUri = null
+                },
+                onPostStory = { uri, caption, storyFont, musicTag, overlayText, overlayColorHex, overlayYFraction, stickersJson, drawingJson, cropMode, rotationDegrees ->
+                    viewModel.postRichStory(
+                        context = context,
+                        uri = uri,
+                        caption = caption,
+                        storyFont = storyFont,
+                        musicTag = musicTag,
+                        overlayText = overlayText,
+                        overlayColorHex = overlayColorHex,
+                        overlayYFraction = overlayYFraction,
+                        stickersJson = stickersJson,
+                        drawingJson = drawingJson,
+                        cropMode = cropMode,
+                        rotationDegrees = rotationDegrees,
+                        onSuccess = {
+                            isStoryEditorOpen = false
+                            pendingStoryMediaUri = null
+                        }
+                    )
+                }
+            )
+        } else if (activeStoryAuthorKey != null && activeStoryGroup.isNotEmpty()) {
+            StoryViewerScreen(
+                stories = activeStoryGroup,
+                currentUserId = profile?.userId.orEmpty(),
+                observeStoryViews = viewModel::observeStoryViews,
+                onStoryViewed = viewModel::recordStoryView,
+                onToggleLike = viewModel::toggleStoryLike,
+                onSendReaction = viewModel::sendStoryReaction,
+                onSendReply = viewModel::replyToStory,
+                onDeleteStory = viewModel::deleteStory,
+                onDismiss = { activeStoryAuthorKey = null }
+            )
         }
 
         AnimatedVisibility(
@@ -806,15 +954,45 @@ private fun NomiChatMainShell(
 
     when (activeModal) {
         ActiveModal.NONE -> Unit
+        ActiveModal.EDIT_PROFILE -> EditProfileDialog(
+            initialDisplayName = profile?.displayName.orEmpty(),
+            initialBio = profile?.bio.orEmpty(),
+            initialUsername = profile?.username.orEmpty(),
+            initialDob = profile?.dob.orEmpty().ifBlank { "2000-01-01" },
+            isSaving = isSavingProfile,
+            errorText = profileSaveError,
+            onClearError = viewModel::clearProfileSaveError,
+            onDismiss = {
+                viewModel.clearProfileSaveError()
+                activeModal = ActiveModal.NONE
+            },
+            onSave = { name, bio, username, dob ->
+                viewModel.updateProfileField(
+                    displayName = name,
+                    username = username,
+                    bio = bio,
+                    dob = dob,
+                    onSuccess = { activeModal = ActiveModal.NONE }
+                )
+            }
+        )
         ActiveModal.EDIT_NAME -> EditSingleFieldDialog(
             title = "Edit Profile Name",
             label = "Display Name",
             initialValue = profile?.displayName.orEmpty(),
             maxLength = 60,
-            onDismiss = { activeModal = ActiveModal.NONE },
-            onSave = { newName ->
-                viewModel.updateProfileField(displayName = newName)
+            isSaving = isSavingProfile,
+            errorText = profileSaveError,
+            onClearError = viewModel::clearProfileSaveError,
+            onDismiss = {
+                viewModel.clearProfileSaveError()
                 activeModal = ActiveModal.NONE
+            },
+            onSave = { newName ->
+                viewModel.updateProfileField(
+                    displayName = newName,
+                    onSuccess = { activeModal = ActiveModal.NONE }
+                )
             }
         )
         ActiveModal.EDIT_BIO -> EditSingleFieldDialog(
@@ -822,10 +1000,18 @@ private fun NomiChatMainShell(
             label = "Bio",
             initialValue = profile?.bio.orEmpty(),
             maxLength = 200,
-            onDismiss = { activeModal = ActiveModal.NONE },
-            onSave = { newBio ->
-                viewModel.updateProfileField(bio = newBio)
+            isSaving = isSavingProfile,
+            errorText = profileSaveError,
+            onClearError = viewModel::clearProfileSaveError,
+            onDismiss = {
+                viewModel.clearProfileSaveError()
                 activeModal = ActiveModal.NONE
+            },
+            onSave = { newBio ->
+                viewModel.updateProfileField(
+                    bio = newBio,
+                    onSuccess = { activeModal = ActiveModal.NONE }
+                )
             }
         )
         ActiveModal.EDIT_USERNAME -> EditSingleFieldDialog(
@@ -834,10 +1020,18 @@ private fun NomiChatMainShell(
             initialValue = profile?.username.orEmpty(),
             maxLength = 40,
             sanitizeUsername = true,
-            onDismiss = { activeModal = ActiveModal.NONE },
-            onSave = { newUsername ->
-                viewModel.updateProfileField(username = newUsername)
+            isSaving = isSavingProfile,
+            errorText = profileSaveError,
+            onClearError = viewModel::clearProfileSaveError,
+            onDismiss = {
+                viewModel.clearProfileSaveError()
                 activeModal = ActiveModal.NONE
+            },
+            onSave = { newUsername ->
+                viewModel.updateProfileField(
+                    username = newUsername,
+                    onSuccess = { activeModal = ActiveModal.NONE }
+                )
             }
         )
         ActiveModal.EDIT_DOB -> EditSingleFieldDialog(
@@ -845,14 +1039,35 @@ private fun NomiChatMainShell(
             label = "Date of Birth (YYYY-MM-DD)",
             initialValue = profile?.dob.orEmpty().ifBlank { "2000-01-01" },
             maxLength = 20,
-            onDismiss = { activeModal = ActiveModal.NONE },
-            onSave = { newDob ->
-                viewModel.updateProfileField(dob = newDob)
+            isSaving = isSavingProfile,
+            errorText = profileSaveError,
+            onClearError = viewModel::clearProfileSaveError,
+            onDismiss = {
+                viewModel.clearProfileSaveError()
                 activeModal = ActiveModal.NONE
+            },
+            onSave = { newDob ->
+                viewModel.updateProfileField(
+                    dob = newDob,
+                    onSuccess = { activeModal = ActiveModal.NONE }
+                )
+            }
+        )
+        ActiveModal.CHANGE_PASSWORD -> ChangePasswordDialog(
+            requireCurrentPassword = profile?.provider == "username" || !viewModel.isCloudSession,
+            isChanging = isChangingPassword,
+            onDismiss = { activeModal = ActiveModal.NONE },
+            onSubmit = { currentPw, newPw ->
+                viewModel.changePassword(
+                    currentPassword = currentPw,
+                    newPassword = newPw,
+                    onSuccess = { activeModal = ActiveModal.NONE }
+                )
             }
         )
         ActiveModal.ADD_CONTACT -> AddContactDialog(
             usernameSearchState = usernameSearchState,
+            offlinePopupMessage = modalOfflinePopup,
             onSearchUsername = viewModel::findUserByUsername,
             onResetSearch = viewModel::resetUsernameSearch,
             onDismiss = { activeModal = ActiveModal.NONE },
@@ -866,19 +1081,6 @@ private fun NomiChatMainShell(
                 viewModel.addGroupChat(
                     name = name,
                     username = username,
-                    onSuccess = { activeModal = ActiveModal.NONE }
-                )
-            }
-        )
-        ActiveModal.POST_STORY -> StoryPickerDialog(
-            isPosting = isPostingStory,
-            onDismiss = { activeModal = ActiveModal.NONE },
-            onPostStory = { uri, caption, storyFont ->
-                viewModel.postStoryFromUri(
-                    context = context,
-                    uri = uri,
-                    caption = caption,
-                    storyFont = storyFont,
                     onSuccess = { activeModal = ActiveModal.NONE }
                 )
             }
@@ -900,15 +1102,6 @@ private fun NomiChatMainShell(
         )
     }
 
-    if (activeStoryAuthorKey != null && activeStoryGroup.isNotEmpty()) {
-        StoryViewerDialog(
-            stories = activeStoryGroup,
-            currentUserId = profile?.userId.orEmpty(),
-            onDismiss = { activeStoryAuthorKey = null },
-            onDeleteStory = viewModel::deleteStory
-        )
-    }
-
     avatarPreviewThread?.let { thread ->
         val threadStories = remember(activeStories, thread.peerUid, thread.username) {
             activeStories.filter { story ->
@@ -916,9 +1109,11 @@ private fun NomiChatMainShell(
                     (thread.username.isNotBlank() && story.authorUsername.equals(thread.username, ignoreCase = true))
             }
         }
+        val threadStorySeen = threadStories.isNotEmpty() && threadStories.all { it.id in seenStoryIds }
         AvatarPreviewDialog(
             thread = thread,
             hasActiveStory = threadStories.isNotEmpty(),
+            storyRingSeen = threadStorySeen,
             onDismiss = { avatarPreviewThreadId = null },
             onOpenChat = {
                 avatarPreviewThreadId = null

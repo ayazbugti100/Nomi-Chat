@@ -747,3 +747,350 @@ test("Chat archiving allows owner boolean archived updates and rejects invalid t
     })
   );
 });
+
+test("Messages support reply quotes and owner-only permanent deletion; Directory supports owner-only handle release", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const created = new Date(Date.now() - 3000);
+
+  // Set up contact and message with quoted reply
+  const contactRef = aliceDb.collection("users").doc(ALICE_UID).collection("contacts").doc("c_reply_test");
+  const msgRef = contactRef.collection("messages").doc("m_reply_1");
+
+  await assertSucceeds(
+    contactRef.set({
+      userId: ALICE_UID,
+      name: "Sara",
+      username: "sara",
+      phone: "@sara",
+      threadType: "chat",
+      online: true,
+      typing: false,
+      unreadCount: 0,
+      lastMessageText: "Sure thing!",
+      lastMessageFromMe: true,
+      lastMessageTimeLabel: "8:00 PM",
+      pinned: false,
+      accountStatus: "active",
+      reportCount: 0,
+      reportedBy: [],
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  // Message with reply fields
+  await assertSucceeds(
+    msgRef.set({
+      userId: ALICE_UID,
+      contactId: "c_reply_test",
+      sender: "me",
+      text: "Sure thing!",
+      replyToText: "Are you coming today?",
+      replyToSender: "Sara",
+      replyToMessageId: "m_prev_123",
+      timeLabel: "8:00 PM",
+      aiGenerated: false,
+      createdAt: created,
+    })
+  );
+
+  // Non-owner cannot delete Alice's message
+  await assertFails(bobDb.collection("users").doc(ALICE_UID).collection("contacts").doc("c_reply_test").collection("messages").doc("m_reply_1").delete());
+
+  // Owner can permanently delete own message
+  await assertSucceeds(msgRef.delete());
+
+  // Directory entry creation by owner
+  const dirRef = aliceDb.collection("directory").doc("alice_handle_old");
+  await assertSucceeds(
+    dirRef.set({
+      ownerUid: ALICE_UID,
+      username: "alice_handle_old",
+      displayName: "Alice Old",
+      provider: "google",
+      accountStatus: "active",
+      reportCount: 0,
+      reportedByUids: [],
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  // Non-owner cannot delete Alice's handle from directory
+  await assertFails(bobDb.collection("directory").doc("alice_handle_old").delete());
+
+  // Owner can delete / release old username handle
+  await assertSucceeds(dirRef.delete());
+
+  // Direct message relay with reply fields
+  const dmRef = aliceDb.collection("direct_messages").doc("dm_reply_1");
+  await assertSucceeds(
+    dmRef.set({
+      fromUid: ALICE_UID,
+      toUid: BOB_UID,
+      fromUsername: "alice",
+      fromDisplayName: "Alice",
+      toUsername: "bob",
+      text: "I agree with your message",
+      messageType: "text",
+      replyToText: "What do you think?",
+      replyToSender: "Bob",
+      replyToMessageId: "dm_orig_99",
+      timeLabel: "8:01 PM",
+      createdAt: created,
+    })
+  );
+
+  // Bob (toUid) can delete the relayed direct message after receipt
+  await assertSucceeds(bobDb.collection("direct_messages").doc("dm_reply_1").delete());
+});
+
+test("Stories support rich editor metadata, real-time views/likes/reactions, and owner-only views listing", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const charlieDb = testEnv.authenticatedContext("charlie_uid").firestore();
+  const created = new Date(Date.now() - 4000);
+  const nowMs = Date.now();
+
+  const storyRef = aliceDb.collection("stories").doc("story_rich_1");
+  await assertSucceeds(
+    storyRef.set({
+      userId: ALICE_UID,
+      authorName: "Alice",
+      authorUsername: "alice",
+      mediaData: "data:video/mp4;base64,AAAAIGZ0eXBpc29t",
+      mediaType: "video",
+      caption: "Sunset @bob!",
+      storyFont: "noto_nastaliq",
+      musicTag: "Chill Lo-Fi • Nomi Beats",
+      overlayText: "Hello World",
+      overlayColorHex: 0xFFFFFFFF,
+      overlayYFraction: 0.42,
+      stickersJson: "[{\"id\":\"s1\",\"text\":\"✨\",\"x\":0.5,\"y\":0.3}]",
+      drawingJson: "[{\"c\":4294967295,\"w\":8.0,\"p\":[[0.1,0.2],[0.3,0.4]]}]",
+      cropMode: "crop",
+      rotationDegrees: 0,
+      viewedByUids: [],
+      likedByUids: [],
+      createdAtMs: nowMs,
+      expiresAtMs: nowMs + 86400000,
+      createdAt: created,
+    })
+  );
+
+  // Bob opens the story -> records view in viewedByUids and /views/bob
+  await assertSucceeds(
+    bobDb.collection("stories").doc("story_rich_1").update({
+      viewedByUids: [BOB_UID],
+    })
+  );
+
+  await assertSucceeds(
+    bobDb.collection("stories").doc("story_rich_1").collection("views").doc(BOB_UID).set({
+      viewerUid: BOB_UID,
+      viewerName: "Bob",
+      viewerUsername: "bob",
+      liked: true,
+      reactionEmoji: "🔥",
+      viewedAtMs: nowMs + 1000,
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+
+  // Bob toggles like on the story doc
+  await assertSucceeds(
+    bobDb.collection("stories").doc("story_rich_1").update({
+      likedByUids: [BOB_UID],
+    })
+  );
+
+  // Charlie cannot forge Bob's view or alter story caption
+  await assertFails(
+    charlieDb.collection("stories").doc("story_rich_1").update({
+      caption: "Hacked caption",
+    })
+  );
+  await assertFails(
+    charlieDb.collection("stories").doc("story_rich_1").collection("views").doc(BOB_UID).set({
+      viewerUid: BOB_UID,
+      viewerName: "Bob",
+      viewerUsername: "bob",
+      liked: false,
+      reactionEmoji: "",
+      viewedAtMs: nowMs + 1500,
+      updatedAt: new Date(Date.now() - 300),
+    })
+  );
+
+  // Non-owner cannot list everyone who viewed Alice's story
+  await assertFails(bobDb.collection("stories").doc("story_rich_1").collection("views").get());
+
+  // Owner Alice can list all viewers of her story
+  await assertSucceeds(aliceDb.collection("stories").doc("story_rich_1").collection("views").get());
+});
+
+test("User profile and directory enforce showOnlineStatus boolean privacy rules", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const created = new Date(Date.now() - 4000);
+
+  const userRef = aliceDb.collection("users").doc(ALICE_UID);
+  await assertSucceeds(
+    userRef.set({
+      userId: ALICE_UID,
+      displayName: "Alice",
+      username: "alice_privacy",
+      bio: "Hello",
+      dob: "2000-01-01",
+      provider: "google",
+      online: true,
+      showOnlineStatus: true,
+      verified: true,
+      premiumUnlocked: true,
+      accountStatus: "active",
+      reportCount: 0,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  const dirRef = aliceDb.collection("directory").doc("alice_privacy");
+  await assertSucceeds(
+    dirRef.set({
+      ownerUid: ALICE_UID,
+      username: "alice_privacy",
+      displayName: "Alice",
+      provider: "google",
+      online: true,
+      showOnlineStatus: true,
+      accountStatus: "active",
+      reportCount: 0,
+      reportedByUids: [],
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  // Owner can toggle showOnlineStatus off on both user profile and directory
+  await assertSucceeds(
+    userRef.update({
+      showOnlineStatus: false,
+      online: false,
+      updatedAt: new Date(Date.now() - 1000),
+    })
+  );
+  await assertSucceeds(
+    dirRef.update({
+      showOnlineStatus: false,
+      online: false,
+      updatedAt: new Date(Date.now() - 1000),
+    })
+  );
+
+  // Reject non-boolean showOnlineStatus
+  await assertFails(
+    userRef.update({
+      showOnlineStatus: "hidden",
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+  await assertFails(
+    dirRef.update({
+      showOnlineStatus: "hidden",
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+
+  // Non-owner cannot alter Alice's showOnlineStatus
+  await assertFails(
+    bobDb.collection("users").doc(ALICE_UID).update({
+      showOnlineStatus: true,
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+  await assertFails(
+    bobDb.collection("directory").doc("alice_privacy").update({
+      showOnlineStatus: true,
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+});
+
+test("Username reservations enforce uniqueness, permanent retirement lock, and deny reuse/deletion", async () => {
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const created = new Date(Date.now() - 5000);
+
+  // Unauthenticated cannot read or write /usernames
+  await assertFails(unauthDb.collection("usernames").doc("alice_old").get());
+  await assertFails(aliceDb.collection("usernames").get()); // list scraping blocked
+
+  // Alice claims alice_old
+  await assertSucceeds(
+    aliceDb.collection("usernames").doc("alice_old").set({
+      username: "alice_old",
+      ownerUid: ALICE_UID,
+      status: "active",
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  // Bob cannot steal or overwrite alice_old
+  await assertFails(
+    bobDb.collection("usernames").doc("alice_old").set({
+      username: "alice_old",
+      ownerUid: BOB_UID,
+      status: "active",
+      createdAt: new Date(Date.now() - 1000),
+      updatedAt: new Date(Date.now() - 1000),
+    })
+  );
+  await assertFails(
+    bobDb.collection("usernames").doc("alice_old").update({
+      status: "retired",
+      ownerUid: "",
+      updatedAt: new Date(Date.now() - 1000),
+    })
+  );
+
+  // Alice changes username to alice_new and retires alice_old
+  await assertSucceeds(
+    aliceDb.collection("usernames").doc("alice_new").set({
+      username: "alice_new",
+      ownerUid: ALICE_UID,
+      status: "active",
+      createdAt: new Date(Date.now() - 1000),
+      updatedAt: new Date(Date.now() - 1000),
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("usernames").doc("alice_old").update({
+      status: "retired",
+      ownerUid: "",
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+
+  // Neither Bob nor Alice can reuse or re-activate retired alice_old, nor delete it
+  await assertFails(
+    bobDb.collection("usernames").doc("alice_old").set({
+      username: "alice_old",
+      ownerUid: BOB_UID,
+      status: "active",
+      createdAt: new Date(Date.now() - 200),
+      updatedAt: new Date(Date.now() - 200),
+    })
+  );
+  await assertFails(
+    aliceDb.collection("usernames").doc("alice_old").update({
+      status: "active",
+      ownerUid: ALICE_UID,
+      updatedAt: new Date(Date.now() - 200),
+    })
+  );
+  await assertFails(aliceDb.collection("usernames").doc("alice_old").delete());
+});
+

@@ -52,6 +52,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
@@ -113,6 +114,8 @@ import com.example.data.model.ChatMessage
 import com.example.data.model.ChatThemeStyle
 import com.example.data.model.ChatThread
 import com.example.data.model.UiState
+import com.example.data.network.NetworkConnectivityObserver
+import com.example.data.network.NetworkStatus
 import com.example.ui.components.AvatarCircle
 import com.example.ui.components.EmeraldWaveHeader
 import com.example.ui.theme.DangerRed
@@ -135,6 +138,10 @@ fun ConversationScreen(
     smartAiEnabled: Boolean,
     quickSuggestions: List<String>,
     isGeneratingSuggestions: Boolean,
+    replyingToMessage: ChatMessage? = null,
+    onReplyMessage: (ChatMessage?) -> Unit = {},
+    onDeleteMessage: (ChatMessage) -> Unit = {},
+    onUpdateTyping: (Boolean) -> Unit = {},
     onToggleSmartAi: (Boolean) -> Unit,
     onRequestSuggestions: () -> Unit,
     onDismissSuggestions: () -> Unit,
@@ -155,6 +162,7 @@ fun ConversationScreen(
     onDeleteChat: () -> Unit = {},
     onShowNotice: (String) -> Unit = {},
     onBack: () -> Unit,
+    networkStatus: NetworkStatus = NetworkStatus(),
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -407,11 +415,13 @@ fun ConversationScreen(
                 // Voice Call Icon Button
                 IconButton(
                     onClick = {
-                        if (isMessagingDisabled) {
-                            onShowNotice("Cannot call a blocked or banned user.")
-                        } else {
-                            onVoiceCallInitiated()
-                            showInAppCallDialog = true
+                        when {
+                            isMessagingDisabled -> onShowNotice("Cannot call a blocked or banned user.")
+                            !networkStatus.isConnected -> onShowNotice(NetworkConnectivityObserver.NO_INTERNET_POPUP_MESSAGE)
+                            else -> {
+                                onVoiceCallInitiated()
+                                showInAppCallDialog = true
+                            }
                         }
                     },
                     modifier = Modifier.testTag("header_call_button")
@@ -624,7 +634,9 @@ fun ConversationScreen(
                                         onError = onShowNotice
                                     )
                                 },
-                                onPreviewImage = { data -> previewImageData = data }
+                                onPreviewImage = { data -> previewImageData = data },
+                                onDeleteMessage = onDeleteMessage,
+                                onReplyMessage = onReplyMessage
                             )
                         }
 
@@ -708,6 +720,53 @@ fun ConversationScreen(
             )
         }
 
+        AnimatedVisibility(visible = replyingToMessage != null && !isMessagingDisabled) {
+            if (replyingToMessage != null) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    tonalElevation = 2.dp
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Replying to ${replyingToMessage.sender.let { if (it == "me") "You" else contact.name }}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = EmeraldMid,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = replyingToMessage.text,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        IconButton(
+                            onClick = { onReplyMessage(null) },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Cancel reply",
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // WhatsApp-style Bottom Composer Bar (Emoji + Message + Pin + Camera + Mic/Send)
         Box(
             modifier = Modifier
@@ -781,7 +840,12 @@ fun ConversationScreen(
                                 }
                                 BasicTextField(
                                     value = messageText,
-                                    onValueChange = { if (!isMessagingDisabled) messageText = it },
+                                    onValueChange = { 
+                                        if (!isMessagingDisabled) {
+                                            messageText = it
+                                            onUpdateTyping(it.isNotBlank())
+                                        }
+                                    },
                                     enabled = !isMessagingDisabled,
                                     textStyle = MaterialTheme.typography.bodyLarge.copy(
                                         color = MaterialTheme.colorScheme.onSurface
@@ -843,8 +907,10 @@ fun ConversationScreen(
                                 .background(if (!isMessagingDisabled) EmeraldVibrant else EmeraldMid.copy(alpha = 0.45f))
                                 .clickable(enabled = !isMessagingDisabled) {
                                     val toSend = messageText
-                                    messageText = ""
-                                    showEmojiPicker = false
+                                    if (networkStatus.isConnected) {
+                                        messageText = ""
+                                        showEmojiPicker = false
+                                    }
                                     onSendMessage(toSend)
                                 }
                                 .testTag("send_message_button"),
@@ -863,10 +929,14 @@ fun ConversationScreen(
                                 .size(48.dp)
                                 .clip(CircleShape)
                                 .background(if (!isMessagingDisabled) EmeraldVibrant else EmeraldMid.copy(alpha = 0.45f))
-                                .pointerInput(isMessagingDisabled) {
+                                .pointerInput(isMessagingDisabled, networkStatus.isConnected) {
                                     if (isMessagingDisabled) return@pointerInput
                                     detectTapGestures(
                                         onPress = {
+                                            if (!networkStatus.isConnected) {
+                                                onShowNotice(NetworkConnectivityObserver.NO_INTERNET_POPUP_MESSAGE)
+                                                return@detectTapGestures
+                                            }
                                             val hasMicPerm = ContextCompat.checkSelfPermission(
                                                 context,
                                                 Manifest.permission.RECORD_AUDIO
