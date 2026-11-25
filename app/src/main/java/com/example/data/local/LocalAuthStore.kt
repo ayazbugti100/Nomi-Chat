@@ -1070,7 +1070,9 @@ class LocalAuthStore(context: Context) {
                 val root = readRootUnlocked()
                 val key = findAccountKeyByUsernameUnlocked(root, cleanHandle) ?: return@runCatching null
                 val obj = root.optJSONObject(key) ?: return@runCatching null
-                if (obj.optString("accountStatus", "active") == "banned") return@runCatching null
+                if (obj.optString("accountStatus", "active") == "banned") {
+                    throw IllegalStateException("This account is banned, so it cannot be added here.")
+                }
                 val storedUsername = obj.optString("username", key)
                 if (!storedUsername.equals(cleanHandle, ignoreCase = true)) return@runCatching null
                 val viewerAccount = if (viewerUserId.isNotBlank()) {
@@ -1139,10 +1141,12 @@ class LocalAuthStore(context: Context) {
                     }
                     val candidateObj = root.optJSONObject(foundKey)
                     if (candidateObj == null ||
-                        candidateObj.optString("accountStatus", "active") == "banned" ||
                         !candidateObj.optString("username", foundKey).equals(cleanHandle, ignoreCase = true)
                     ) {
                         throw IllegalStateException("Account Not Found")
+                    }
+                    if (candidateObj.optString("accountStatus", "active") == "banned") {
+                        throw IllegalStateException("This account is banned, so it cannot be added here.")
                     }
                     resolvedPeerUid = foundKey
                     resolvedIsPeer = true

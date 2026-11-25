@@ -417,9 +417,39 @@ class NetworkAndUsernameRobolectricTest {
         vm.addDirectChatByUsername("@target_active", onSuccess = { addSucceeded = true })
         advanceUntilIdle()
         assertTrue(addSucceeded)
+        assertEquals("Username added successfully.", vm.popupMessage.value)
         val contacts = store.observeContacts("searcher_net").first()
         assertEquals(1, contacts.size)
         assertEquals("target_active", contacts.first().username)
+
+        // 6. Attempting to add the same username again -> "This username is already added. You cannot add it again."
+        var addAgainSucceeded = false
+        vm.addDirectChatByUsername("@target_active", onSuccess = { addAgainSucceeded = true })
+        advanceUntilIdle()
+        assertFalse(addAgainSucceeded)
+        assertTrue(vm.usernameSearchState.value is UsernameSearchState.NotFound)
+        assertEquals(
+            "This username is already added. You cannot add it again.",
+            (vm.usernameSearchState.value as UsernameSearchState.NotFound).message
+        )
+
+        // 7. Empty username input -> "Please enter a username."
+        vm.findUserByUsername("")
+        assertEquals("Please enter a username.", (vm.usernameSearchState.value as UsernameSearchState.NotFound).message)
+        vm.addDirectChatByUsername("", onSuccess = {})
+        assertEquals("Please enter a username.", (vm.usernameSearchState.value as UsernameSearchState.NotFound).message)
+
+        // 8. Banned account -> "This account is banned, so it cannot be added here."
+        store.signUpUser("Banned User", "banned_user", "2000-01-01", "pass123", "pass123")
+        val usersFile = File(context.filesDir, "nomi_auth_users.json")
+        usersFile.writeText(usersFile.readText().replace("\"username\":\"banned_user\",\"accountStatus\":\"active\"", "\"username\":\"banned_user\",\"accountStatus\":\"banned\""))
+        vm.findUserByUsername("@banned_user")
+        advanceUntilIdle()
+        assertTrue(vm.usernameSearchState.value is UsernameSearchState.NotFound)
+        assertEquals(
+            "This account is banned, so it cannot be added here.",
+            (vm.usernameSearchState.value as UsernameSearchState.NotFound).message
+        )
     }
 
     @Test
@@ -440,5 +470,22 @@ class NetworkAndUsernameRobolectricTest {
         composeTestRule.onNodeWithText("Account Not Found").assertIsDisplayed()
         composeTestRule.onNodeWithTag("add_contact_offline_popup").assertIsDisplayed()
         composeTestRule.onNodeWithText(NetworkConnectivityObserver.NO_INTERNET_POPUP_MESSAGE).assertIsDisplayed()
+    }
+
+    @Test
+    fun addContactDialog_displaysCheckingUsernameWhenLoading() {
+        composeTestRule.setContent {
+            MaterialTheme {
+                AddContactDialog(
+                    usernameSearchState = UsernameSearchState.Loading,
+                    onDismiss = {},
+                    onAddDirectChat = {},
+                    onAddGroup = { _, _ -> }
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithTag("username_checking_card").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Checking username...").assertIsDisplayed()
     }
 }

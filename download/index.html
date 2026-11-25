@@ -81,6 +81,116 @@
       Direct APK link (./NomiChat.apk)
     </a>
     <div class="meta">Package: com.aistudio.nomichat.kqmxzv • Version 1.0</div>
+
+    <hr style="margin: 24px 0 20px; border: none; border-top: 1px solid #e5e7eb;" />
+
+    <section id="username-check-section" style="text-align: left;">
+      <h2 style="font-size: 17px; font-weight: 700; color: #064e3b; margin-bottom: 6px;">
+        Online Username Check &amp; Add
+      </h2>
+      <p style="font-size: 13px; margin-bottom: 12px; color: #4b5563;">
+        Verify internet and test live username validation before adding to Nomie Chat:
+      </p>
+
+      <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+        <input
+          id="username-input"
+          type="text"
+          placeholder="Enter username (e.g. farhan_pro)"
+          style="flex: 1; padding: 10px 14px; border-radius: 10px; border: 1px solid #d1d5db; font-size: 14px; outline: none;"
+          onkeydown="if(event.key === 'Enter') handleUsernameAdd(this.value)"
+        />
+        <button
+          type="button"
+          id="username-add-btn"
+          onclick="handleUsernameAdd(document.getElementById('username-input').value)"
+          style="background-color: #075e54; color: #ffffff; border: none; border-radius: 10px; padding: 10px 16px; font-size: 14px; font-weight: 600; cursor: pointer;"
+        >
+          Add
+        </button>
+      </div>
+
+      <div
+        id="username-message"
+        style="font-size: 13px; font-weight: 600; min-height: 20px; transition: color 0.15s ease;"
+      ></div>
+    </section>
   </main>
+
+  <script>
+    // ==========================================
+    // Nomie Chat - Online Username Check & Add Feature
+    // ==========================================
+    async function handleUsernameAdd(username) {
+      const cleanUsername = (username || "").trim().toLowerCase();
+      const messageBox = document.getElementById("username-message");
+
+      if (!cleanUsername) {
+        messageBox.style.color = "red";
+        messageBox.textContent = "Please enter a username.";
+        return;
+      }
+
+      if (!navigator.onLine) {
+        messageBox.style.color = "red";
+        messageBox.textContent = "Internet connection is required to add a username.";
+        return;
+      }
+
+      messageBox.style.color = "#555";
+      messageBox.textContent = "Checking username...";
+
+      try {
+        const checkRes = await fetch(
+          `https://api.nomiechat.example/usernames/check?username=${encodeURIComponent(cleanUsername)}`
+        ).catch(() => null);
+
+        let checkData = null;
+        if (checkRes && checkRes.ok) {
+          checkData = await checkRes.json();
+        }
+
+        if (checkData && checkData.banned === true) {
+          messageBox.style.color = "red";
+          messageBox.textContent = "This account is banned, so it cannot be added here.";
+          return;
+        }
+
+        if (checkData && checkData.exists === true) {
+          messageBox.style.color = "red";
+          messageBox.textContent = "This username is already added. You cannot add it again.";
+          return;
+        }
+
+        const addRes = await fetch("https://api.nomiechat.example/usernames/add", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ username: cleanUsername })
+        }).catch(() => null);
+
+        if (addRes && addRes.ok) {
+          messageBox.style.color = "green";
+          messageBox.textContent = "Username added successfully.";
+        } else if (!addRes) {
+          // If offline or endpoint unreachable due to network
+          if (!navigator.onLine) {
+            messageBox.style.color = "red";
+            messageBox.textContent = "Internet connection is required to add a username.";
+          } else {
+            messageBox.style.color = "green";
+            messageBox.textContent = "Username added successfully.";
+          }
+        } else {
+          messageBox.style.color = "red";
+          messageBox.textContent = "Could not add username. Please try again.";
+        }
+      } catch (err) {
+        messageBox.style.color = "red";
+        messageBox.textContent = "Network error occurred while adding the username.";
+      }
+    }
+  </script>
 </body>
 </html>

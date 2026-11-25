@@ -238,7 +238,7 @@ fun AddContactDialog(
 
                         Button(
                             onClick = { onSearchUsername(username) },
-                            enabled = cleanUsername.isNotEmpty() && usernameSearchState !is UsernameSearchState.Loading,
+                            enabled = usernameSearchState !is UsernameSearchState.Loading,
                             colors = ButtonDefaults.buttonColors(containerColor = EmeraldMid),
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.testTag("find_username_button")
@@ -256,6 +256,33 @@ fun AddContactDialog(
                     }
 
                     when (usernameSearchState) {
+                        is UsernameSearchState.Loading -> {
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("username_checking_card"),
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(14.dp),
+                                        strokeWidth = 2.dp,
+                                        color = EmeraldMid
+                                    )
+                                    Text(
+                                        text = "Checking username...",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.testTag("username_checking_text")
+                                    )
+                                }
+                            }
+                        }
                         is UsernameSearchState.Found -> {
                             Surface(
                                 modifier = Modifier
@@ -399,8 +426,7 @@ fun AddContactDialog(
                 enabled = if (isGroup) {
                     name.trim().isNotEmpty()
                 } else {
-                    cleanUsername.isNotEmpty() &&
-                        usernameSearchState !is UsernameSearchState.Loading &&
+                    usernameSearchState !is UsernameSearchState.Loading &&
                         usernameSearchState !is UsernameSearchState.NotFound
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = EmeraldMid),

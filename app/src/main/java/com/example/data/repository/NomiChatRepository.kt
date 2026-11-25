@@ -1688,7 +1688,9 @@ class NomiChatRepository(
             }
             val snap = db.collection("directory").document(cleanHandle).get(Source.SERVER).await()
             if (!snap.exists()) return Result.success(null)
-            if (snap.getString("accountStatus") == "banned") return Result.success(null)
+            if (snap.getString("accountStatus") == "banned") {
+                return Result.failure(IllegalStateException("This account is banned, so it cannot be added here."))
+            }
             val ownerUid = snap.getString("ownerUid").orEmpty()
             if (ownerUid.isBlank()) return Result.success(null)
             if (usernameSnap.exists() &&
@@ -1768,8 +1770,11 @@ class NomiChatRepository(
                     return Result.failure(IllegalStateException("Account Not Found"))
                 }
                 val dirSnap = db.collection("directory").document(cleanHandle).get(Source.SERVER).await()
-                if (!dirSnap.exists() || dirSnap.getString("accountStatus") == "banned") {
+                if (!dirSnap.exists()) {
                     return Result.failure(IllegalStateException("Account Not Found"))
+                }
+                if (dirSnap.getString("accountStatus") == "banned") {
+                    return Result.failure(IllegalStateException("This account is banned, so it cannot be added here."))
                 }
                 val owner = dirSnap.getString("ownerUid").orEmpty()
                 val storedHandle = dirSnap.getString("username").orEmpty()

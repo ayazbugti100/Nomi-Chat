@@ -1089,8 +1089,13 @@ class NomiChatViewModel(
     }
 
     fun findUserByUsername(username: String) {
+        val rawClean = username.trim().removePrefix("@").lowercase()
+        if (rawClean.isEmpty()) {
+            _usernameSearchState.value = UsernameSearchState.NotFound("Please enter a username.")
+            return
+        }
         if (isTransportCurrentlyOffline()) {
-            _usernameSearchState.value = UsernameSearchState.Idle
+            _usernameSearchState.value = UsernameSearchState.NotFound("Internet connection is required to add a username.")
             showOfflinePopup()
             return
         }
@@ -1103,7 +1108,12 @@ class NomiChatViewModel(
         viewModelScope.launch {
             _usernameSearchState.value = UsernameSearchState.Loading
             if (!requireVerifiedOnlineConnection()) {
-                _usernameSearchState.value = UsernameSearchState.Idle
+                _usernameSearchState.value = UsernameSearchState.NotFound("Internet connection is required to add a username.")
+                return@launch
+            }
+            val existingContacts = (allContactsState.value as? UiState.Success)?.data.orEmpty()
+            if (existingContacts.any { c -> c.threadType == "chat" && c.username.equals(clean, ignoreCase = true) }) {
+                _usernameSearchState.value = UsernameSearchState.NotFound("This username is already added. You cannot add it again.")
                 return@launch
             }
             repository.lookupUserByUsername(clean, viewerUserId = currentUserId)
@@ -1117,12 +1127,17 @@ class NomiChatViewModel(
                         else -> UsernameSearchState.Found(found)
                     }
                 }
-                .onFailure {
+                .onFailure { err ->
                     if (isTransportCurrentlyOffline() || !repository.verifyActiveFirebaseConnection()) {
-                        _usernameSearchState.value = UsernameSearchState.Idle
+                        _usernameSearchState.value = UsernameSearchState.NotFound("Internet connection is required to add a username.")
                         showOfflinePopup()
                     } else {
-                        _usernameSearchState.value = UsernameSearchState.NotFound("Account Not Found")
+                        val msg = err.localizedMessage?.trim().orEmpty()
+                        if (msg.contains("banned", ignoreCase = true)) {
+                            _usernameSearchState.value = UsernameSearchState.NotFound("This account is banned, so it cannot be added here.")
+                        } else {
+                            _usernameSearchState.value = UsernameSearchState.NotFound("Account Not Found")
+                        }
                     }
                 }
         }
@@ -1136,8 +1151,13 @@ class NomiChatViewModel(
         username: String,
         onSuccess: () -> Unit
     ) {
+        val rawClean = username.trim().removePrefix("@").lowercase()
+        if (rawClean.isEmpty()) {
+            _usernameSearchState.value = UsernameSearchState.NotFound("Please enter a username.")
+            return
+        }
         if (isTransportCurrentlyOffline()) {
-            _usernameSearchState.value = UsernameSearchState.Idle
+            _usernameSearchState.value = UsernameSearchState.NotFound("Internet connection is required to add a username.")
             showOfflinePopup()
             return
         }
@@ -1150,17 +1170,27 @@ class NomiChatViewModel(
         viewModelScope.launch {
             _usernameSearchState.value = UsernameSearchState.Loading
             if (!requireVerifiedOnlineConnection()) {
-                _usernameSearchState.value = UsernameSearchState.Idle
+                _usernameSearchState.value = UsernameSearchState.NotFound("Internet connection is required to add a username.")
+                return@launch
+            }
+            val existingContacts = (allContactsState.value as? UiState.Success)?.data.orEmpty()
+            if (existingContacts.any { c -> c.threadType == "chat" && c.username.equals(clean, ignoreCase = true) }) {
+                _usernameSearchState.value = UsernameSearchState.NotFound("This username is already added. You cannot add it again.")
                 return@launch
             }
             val lookupResult = repository.lookupUserByUsername(clean, viewerUserId = currentUserId)
             val found = lookupResult.getOrNull()
             if (lookupResult.isFailure) {
                 if (isTransportCurrentlyOffline() || !repository.verifyActiveFirebaseConnection()) {
-                    _usernameSearchState.value = UsernameSearchState.Idle
+                    _usernameSearchState.value = UsernameSearchState.NotFound("Internet connection is required to add a username.")
                     showOfflinePopup()
                 } else {
-                    _usernameSearchState.value = UsernameSearchState.NotFound("Account Not Found")
+                    val msg = lookupResult.exceptionOrNull()?.localizedMessage?.trim().orEmpty()
+                    if (msg.contains("banned", ignoreCase = true)) {
+                        _usernameSearchState.value = UsernameSearchState.NotFound("This account is banned, so it cannot be added here.")
+                    } else {
+                        _usernameSearchState.value = UsernameSearchState.NotFound("Account Not Found")
+                    }
                 }
                 return@launch
             }
@@ -1186,16 +1216,27 @@ class NomiChatViewModel(
             ).onSuccess {
                 _usernameSearchState.value = UsernameSearchState.Idle
                 _selectedFilter.value = ChatPillFilter.CHATS
-                _popupMessage.value = "Chat added"
+                _popupMessage.value = "Username added successfully."
                 onSuccess()
             }.onFailure { err ->
                 if (isTransportCurrentlyOffline() || !repository.verifyActiveFirebaseConnection()) {
-                    _usernameSearchState.value = UsernameSearchState.Idle
+                    _usernameSearchState.value = UsernameSearchState.NotFound("Internet connection is required to add a username.")
                     showOfflinePopup()
                 } else {
-                    _usernameSearchState.value = UsernameSearchState.NotFound(
-                        err.localizedMessage?.takeIf { it.isNotBlank() } ?: "Account Not Found"
-                    )
+                    val msg = err.localizedMessage?.trim().orEmpty()
+                    val errorText = when {
+                        msg.contains("banned", ignoreCase = true) ->
+                            "This account is banned, so it cannot be added here."
+                        msg.contains("already added", ignoreCase = true) || msg.contains("already taken", ignoreCase = true) ->
+                            "This username is already added. You cannot add it again."
+                        msg == "Account Not Found" ->
+                            "Account Not Found"
+                        msg.isNotBlank() ->
+                            msg
+                        else ->
+                            "Could not add username. Please try again."
+                    }
+                    _usernameSearchState.value = UsernameSearchState.NotFound(errorText)
                 }
             }
         }
