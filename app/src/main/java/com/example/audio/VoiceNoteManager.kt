@@ -189,7 +189,66 @@ class VoiceNoteManager(
             }
             return
         }
+        startPlaybackAtFraction(
+            messageId = messageId,
+            mediaData = mediaData,
+            fallbackDurationSec = fallbackDurationSec,
+            initialFraction = 0f,
+            onError = onError
+        )
+    }
 
+    fun seekToFraction(
+        messageId: String,
+        mediaData: String?,
+        fallbackDurationSec: Long = 0L,
+        fraction: Float,
+        onError: (String) -> Unit = {}
+    ) {
+        val clamped = fraction.coerceIn(0f, 1f)
+        val current = _playbackState.value
+        val activePlayer = mediaPlayer
+        if (current.playingMessageId == messageId && activePlayer != null) {
+            val durMs = runCatching { activePlayer.duration }.getOrDefault(0)
+                .coerceAtLeast((fallbackDurationSec.coerceAtLeast(1L) * 1000L).toInt())
+            val targetMs = (durMs * clamped).toInt().coerceIn(0, durMs)
+            runCatching {
+                activePlayer.seekTo(targetMs)
+                if (!current.isPlaying) {
+                    activePlayer.start()
+                }
+            }.onSuccess {
+                _playbackState.value = current.copy(
+                    isPlaying = true,
+                    progress = clamped,
+                    positionSec = (targetMs / 1000L).toLong(),
+                    durationSec = (durMs / 1000L).toLong().coerceAtLeast(current.durationSec.coerceAtLeast(1L))
+                )
+            }.onFailure {
+                onError("Unable to seek voice message.")
+            }
+            return
+        }
+        if (mediaData.isNullOrBlank()) {
+            onError("Audio clip unavailable.")
+            return
+        }
+        startPlaybackAtFraction(
+            messageId = messageId,
+            mediaData = mediaData,
+            fallbackDurationSec = fallbackDurationSec,
+            initialFraction = clamped,
+            onError = onError
+        )
+    }
+
+    private fun startPlaybackAtFraction(
+        messageId: String,
+        mediaData: String,
+        fallbackDurationSec: Long,
+        initialFraction: Float,
+        onError: (String) -> Unit
+    ) {
         stopPlayback()
         try {
             val base64Part = mediaData.substringAfter("base64,", "")
@@ -203,6 +262,10 @@ class VoiceNoteManager(
             val player = MediaPlayer().apply {
                 setDataSource(tempFile.absolutePath)
                 prepare()
+                val durMs = duration.takeIf { it > 0 } ?: 0
+                if (initialFraction > 0f && durMs > 0) {
+                    seekTo((durMs * initialFraction.coerceIn(0f, 1f)).toInt().coerceIn(0, durMs))
+                }
                 setOnCompletionListener {
                     stopPlayback()
                 }
@@ -212,11 +275,12 @@ class VoiceNoteManager(
             playbackFile = tempFile
             val totalSec = ((player.duration.takeIf { it > 0 } ?: 0) / 1000L)
                 .coerceAtLeast(fallbackDurationSec.coerceAtLeast(1L))
+            val initPosSec = (totalSec * initialFraction.coerceIn(0f, 1f)).toLong()
             _playbackState.value = VoicePlaybackUiState(
                 playingMessageId = messageId,
                 isPlaying = true,
-                progress = 0f,
-                positionSec = 0L,
+                progress = initialFraction.coerceIn(0f, 1f),
+                positionSec = initPosSec,
                 durationSec = totalSec
             )
             playbackTickJob?.cancel()

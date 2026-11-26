@@ -15,11 +15,13 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.ai.SmartReplyRepository
+import com.example.data.model.ADMIN_GMAIL
 import com.example.data.model.ChatMessage
 import com.example.data.model.ChatPillFilter
 import com.example.data.model.ChatThread
 import com.example.data.model.DirectoryLookupResult
 import com.example.data.model.IncomingMessageAlert
+import com.example.data.model.ModerationAlert
 import com.example.data.model.ProfileVisibilityMode
 import com.example.data.model.StoryFontStyle
 import com.example.data.model.StoryItem
@@ -34,6 +36,7 @@ import com.example.data.preferences.UserAppPreferences
 import com.example.data.preferences.UserPreferencesRepository
 import com.example.data.repository.NomiDataSource
 import com.example.data.security.PendingAuthCredentials
+import com.example.ui.auth.authStateFlow
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestoreException
@@ -98,6 +101,60 @@ class NomiChatViewModel(
 
     private val _incomingNotificationEvents = MutableSharedFlow<IncomingMessageAlert>(extraBufferCapacity = 24)
     val incomingNotificationEvents: Flow<IncomingMessageAlert> = _incomingNotificationEvents.asSharedFlow()
+
+    val isAdminSession: StateFlow<Boolean> = Firebase.auth.authStateFlow()
+        .map { user ->
+            repository.requiresInitialCloudSetup &&
+                user != null &&
+                user.isEmailVerified &&
+                user.email.equals(ADMIN_GMAIL, ignoreCase = true)
+        }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = run {
+                val user = Firebase.auth.currentUser
+                repository.requiresInitialCloudSetup &&
+                    user != null &&
+                    user.isEmailVerified &&
+                    user.email.equals(ADMIN_GMAIL, ignoreCase = true)
+            }
+        )
+
+    private val _adminNotificationEvents = MutableSharedFlow<ModerationAlert>(extraBufferCapacity = 16)
+    val adminNotificationEvents: Flow<ModerationAlert> = _adminNotificationEvents.asSharedFlow()
+
+    private val _inAppAdminBanner = MutableStateFlow<ModerationAlert?>(null)
+    val inAppAdminBanner: StateFlow<ModerationAlert?> = _inAppAdminBanner.asStateFlow()
+
+    val moderationAlertsState: StateFlow<List<ModerationAlert>> = isAdminSession
+        .flatMapLatest { isAdmin ->
+            if (isAdmin) {
+                repository.observeModerationAlerts()
+                    .catch { err ->
+                        if (err is CancellationException) throw err
+                        Log.w(TAG, "Error observing moderation alerts", err)
+                        emit(emptyList())
+                    }
+            } else {
+                flowOf(emptyList())
+            }
+        }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
+            initialValue = emptyList()
+        )
+
+    val pendingModerationCount: StateFlow<Int> = moderationAlertsState
+        .map { list -> list.count { it.status == "pending" } }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
+            initialValue = 0
+        )
+
+    private val seenAdminAlertIds = mutableSetOf<String>()
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
@@ -180,7 +237,7 @@ class NomiChatViewModel(
 
     val profileState: StateFlow<UiState<UserProfile?>> = repository.observeUserProfile(currentUserId)
         .map<UserProfile?, UiState<UserProfile?>> { profile ->
-            if (profile?.accountStatus == "banned") {
+            if (profile?.accountStatus == "banned" || profile?.bannedByAdmin == true) {
                 _isBannedAccount.value = true
                 _popupMessage.value = "Your account is banned."
             }
@@ -412,8 +469,44 @@ class NomiChatViewModel(
         observeAutoSmartSuggestions()
         startIncomingSyncLoop()
         observeIncomingMessageAlerts()
+        observeAdminLockAndAlerts()
         observeNetworkRecovery()
         startStoryExpiryLoop()
+    }
+
+    private fun observeAdminLockAndAlerts() {
+        viewModelScope.launch {
+            isAdminSession.collect { isAdmin ->
+                if (isAdmin) {
+                    val user = Firebase.auth.currentUser
+                    if (user != null && user.isEmailVerified && user.email.equals(ADMIN_GMAIL, ignoreCase = true)) {
+                        repository.ensureAdminConfigLocked(user.uid, user.email.orEmpty())
+                    }
+                } else {
+                    seenAdminAlertIds.clear()
+                    _inAppAdminBanner.value = null
+                }
+            }
+        }
+        viewModelScope.launch {
+            combine(isAdminSession, moderationAlertsState) { isAdmin, alerts ->
+                isAdmin to alerts
+            }.collect { (isAdmin, alerts) ->
+                if (!isAdmin) return@collect
+                val unseenPending = alerts.filter { it.status == "pending" && it.id.isNotBlank() && seenAdminAlertIds.add(it.id) }
+                if (unseenPending.isNotEmpty()) {
+                    val latest = unseenPending.first()
+                    _adminNotificationEvents.tryEmit(latest)
+                    if (isAppInForeground) {
+                        _inAppAdminBanner.value = latest
+                    }
+                }
+            }
+        }
+    }
+
+    fun dismissInAppAdminBanner() {
+        _inAppAdminBanner.value = null
     }
 
     private fun startIncomingSyncLoop() {
@@ -831,13 +924,11 @@ class NomiChatViewModel(
             return
         }
 
+        val replying = _replyingToMessage.value
+        _replyingToMessage.value = null
+        _quickSuggestions.value = emptyList()
         viewModelScope.launch {
-            if (!requireVerifiedOnlineConnection()) {
-                return@launch
-            }
-            val replying = _replyingToMessage.value
-            _replyingToMessage.value = null
-            _quickSuggestions.value = emptyList()
+            repository.onNetworkReconnected()
             updateTypingStatus(false)
             val result = repository.sendMessage(
                 userId = currentUserId,
@@ -871,9 +962,9 @@ class NomiChatViewModel(
             return
         }
         val safeDuration = durationSec.coerceIn(1L, 600L)
+        _quickSuggestions.value = emptyList()
         viewModelScope.launch {
-            if (!requireVerifiedOnlineConnection()) return@launch
-            _quickSuggestions.value = emptyList()
+            repository.onNetworkReconnected()
             repository.sendMessage(
                 userId = currentUserId,
                 contactId = contact.id,
@@ -904,7 +995,7 @@ class NomiChatViewModel(
             return
         }
         viewModelScope.launch {
-            if (!requireVerifiedOnlineConnection()) return@launch
+            repository.onNetworkReconnected()
             val encoded = withContext(Dispatchers.IO) {
                 encodeStoryMediaDataUri(context, uri)
             }
@@ -942,7 +1033,7 @@ class NomiChatViewModel(
             return
         }
         viewModelScope.launch {
-            if (!requireVerifiedOnlineConnection()) return@launch
+            repository.onNetworkReconnected()
             val encoded = withContext(Dispatchers.IO) {
                 encodeBitmapToDataUri(bitmap)
             }
@@ -980,7 +1071,7 @@ class NomiChatViewModel(
             return
         }
         viewModelScope.launch {
-            if (!requireVerifiedOnlineConnection()) return@launch
+            repository.onNetworkReconnected()
             val fileName = withContext(Dispatchers.IO) {
                 resolveDisplayFileName(context, uri)
             }
@@ -1006,7 +1097,7 @@ class NomiChatViewModel(
             return
         }
         viewModelScope.launch {
-            if (!requireVerifiedOnlineConnection()) return@launch
+            repository.onNetworkReconnected()
             repository.sendMessage(
                 userId = currentUserId,
                 contactId = contact.id,
@@ -1061,12 +1152,12 @@ class NomiChatViewModel(
         }
     }
 
-    fun reportActiveContact() {
+    fun reportActiveContact(reason: String = "Other") {
         val contact = activeContact.value ?: return
-        reportContact(contact)
+        reportContact(contact, reason)
     }
 
-    fun reportContact(contact: ChatThread) {
+    fun reportContact(contact: ChatThread, reason: String = "Other") {
         if (isTransportCurrentlyOffline()) {
             showOfflinePopup()
             return
@@ -1075,16 +1166,59 @@ class NomiChatViewModel(
             .ifBlank { currentUserId }
 
         viewModelScope.launch {
-            if (!requireVerifiedOnlineConnection()) return@launch
+            repository.onNetworkReconnected()
             repository.reportUserAccount(
                 userId = currentUserId,
                 contact = contact,
-                reporterUsername = myHandle
+                reporterUsername = myHandle,
+                reason = reason.ifBlank { "Other" }
             ).onSuccess { outcome ->
                 _popupMessage.value = outcome.message
             }.onFailure { err ->
                 _popupMessage.value = err.localizedMessage ?: "Unable to submit report."
             }
+        }
+    }
+
+    fun ignoreModerationAlert(alertId: String) {
+        if (!isAdminSession.value) return
+        _inAppAdminBanner.value = null
+        viewModelScope.launch {
+            repository.ignoreModerationAlert(alertId)
+                .onSuccess {
+                    _popupMessage.value = "Alert ignored."
+                }
+                .onFailure { err ->
+                    _popupMessage.value = err.localizedMessage ?: "Unable to ignore alert."
+                }
+        }
+    }
+
+    fun banUserFromAlert(alert: ModerationAlert) {
+        if (!isAdminSession.value) return
+        _inAppAdminBanner.value = null
+        viewModelScope.launch {
+            repository.banUserFromAlert(alert)
+                .onSuccess {
+                    _popupMessage.value = "@${alert.reportedUsername} banned permanently."
+                }
+                .onFailure { err ->
+                    _popupMessage.value = err.localizedMessage ?: "Unable to ban user."
+                }
+        }
+    }
+
+    fun recoverUserFromAlert(alert: ModerationAlert) {
+        if (!isAdminSession.value) return
+        _inAppAdminBanner.value = null
+        viewModelScope.launch {
+            repository.recoverUserFromAlert(alert)
+                .onSuccess {
+                    _popupMessage.value = "@${alert.reportedUsername} recovered."
+                }
+                .onFailure { err ->
+                    _popupMessage.value = err.localizedMessage ?: "Unable to recover user."
+                }
         }
     }
 

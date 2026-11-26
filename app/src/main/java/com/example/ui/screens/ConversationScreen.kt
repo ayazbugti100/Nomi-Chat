@@ -114,6 +114,7 @@ import com.example.data.model.ChatMessage
 import com.example.data.model.ChatThemeStyle
 import com.example.data.model.ChatThread
 import com.example.data.model.UiState
+import com.example.data.model.UserProfile
 import com.example.data.network.NetworkConnectivityObserver
 import com.example.data.network.NetworkStatus
 import com.example.ui.components.AvatarCircle
@@ -151,7 +152,7 @@ fun ConversationScreen(
     onSendCameraBitmap: (Bitmap) -> Unit = {},
     onSendFileUri: (Uri) -> Unit = {},
     onVoiceCallInitiated: () -> Unit = {},
-    onReportContact: () -> Unit,
+    onReportContact: (String) -> Unit,
     onToggleBlockContact: () -> Unit = {},
     onToggleArchiveContact: () -> Unit = {},
     onToggleMuteContact: () -> Unit = {},
@@ -162,6 +163,7 @@ fun ConversationScreen(
     onDeleteChat: () -> Unit = {},
     onShowNotice: (String) -> Unit = {},
     onBack: () -> Unit,
+    currentUserProfile: UserProfile? = null,
     networkStatus: NetworkStatus = NetworkStatus(),
     modifier: Modifier = Modifier
 ) {
@@ -449,7 +451,7 @@ fun ConversationScreen(
                     DropdownMenu(
                         expanded = showOverflowMenu,
                         onDismissRequest = { showOverflowMenu = false },
-                        containerColor = Color.White,
+                        containerColor = MaterialTheme.colorScheme.surface,
                         shape = RoundedCornerShape(16.dp),
                         modifier = Modifier
                             .widthIn(min = 216.dp)
@@ -626,11 +628,30 @@ fun ConversationScreen(
                                 playbackState = playbackState,
                                 searchQuery = if (showInChatSearch) inChatSearchQuery else "",
                                 isCurrentSearchMatch = showInChatSearch && activeMatchMsgIndex == idx,
+                                senderName = if (msg.sender == "me") {
+                                    currentUserProfile?.displayName?.takeIf { it.isNotBlank() } ?: "You"
+                                } else {
+                                    contact.name
+                                },
+                                senderPhotoData = if (msg.sender == "me") {
+                                    currentUserProfile?.photoData
+                                } else {
+                                    contact.photoData
+                                },
                                 onToggleVoicePlayback = { target ->
                                     voiceNoteManager.togglePlayback(
                                         messageId = target.id,
                                         mediaData = target.mediaData,
                                         fallbackDurationSec = target.durationSec,
+                                        onError = onShowNotice
+                                    )
+                                },
+                                onSeekVoicePlayback = { target, fraction ->
+                                    voiceNoteManager.seekToFraction(
+                                        messageId = target.id,
+                                        mediaData = target.mediaData,
+                                        fallbackDurationSec = target.durationSec,
+                                        fraction = fraction,
                                         onError = onShowNotice
                                     )
                                 },
@@ -1002,9 +1023,9 @@ fun ConversationScreen(
         ReportAccountDialog(
             contact = contact,
             onDismiss = { showReportDialog = false },
-            onConfirmReport = {
+            onConfirmReport = { reason ->
                 showReportDialog = false
-                onReportContact()
+                onReportContact(reason)
             }
         )
     }
@@ -1090,7 +1111,7 @@ fun ConversationScreen(
 private fun ChatMenuItem(
     label: String,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
-    tint: Color = Color(0xFF111B21),
+    tint: Color = MaterialTheme.colorScheme.onSurface,
     testTag: String,
     onClick: () -> Unit
 ) {

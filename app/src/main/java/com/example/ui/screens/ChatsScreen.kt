@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.WifiOff
@@ -135,6 +136,9 @@ fun ChatsScreen(
     networkStatus: NetworkStatus = NetworkStatus(),
     isRefreshing: Boolean = false,
     onRefresh: () -> Unit = {},
+    isAdminSession: Boolean = false,
+    pendingModerationCount: Int = 0,
+    onOpenAdminModeration: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val myUserId = profile?.userId.orEmpty()
@@ -198,6 +202,38 @@ fun ChatsScreen(
                         }
 
                         Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (isAdminSession) {
+                                IconButton(
+                                    onClick = onOpenAdminModeration,
+                                    modifier = Modifier.testTag("admin_alerts_header_button")
+                                ) {
+                                    Box {
+                                        Icon(
+                                            imageVector = Icons.Default.Shield,
+                                            contentDescription = "Admin moderation alerts",
+                                            tint = Color.White
+                                        )
+                                        if (pendingModerationCount > 0) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .align(Alignment.TopEnd)
+                                                    .offset(x = 4.dp, y = (-3).dp)
+                                                    .size(16.dp)
+                                                    .clip(CircleShape)
+                                                    .background(ErrorRed),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Text(
+                                                    text = if (pendingModerationCount > 9) "9+" else pendingModerationCount.toString(),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = Color.White,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             IconButton(
                                 onClick = onToggleSearch,
                                 modifier = Modifier.testTag("search_toggle_button")

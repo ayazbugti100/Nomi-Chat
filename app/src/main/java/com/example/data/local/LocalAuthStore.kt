@@ -2330,6 +2330,7 @@ class LocalNomiRepository(private val store: LocalAuthStore) : NomiDataSource {
     override suspend fun reportUserAccount(
         userId: String,
         contact: ChatThread,
-        reporterUsername: String
+        reporterUsername: String,
+        reason: String
     ): Result<ReportOutcome> = store.reportUserAccount(userId, contact, reporterUsername)
 }

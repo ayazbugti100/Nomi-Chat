@@ -10,6 +10,14 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function isAdmin() {
+      return isSignedIn() &&
+             ('email' in request.auth.token) &&
+             ('email_verified' in request.auth.token) &&
+             request.auth.token.email == 'ayazbugti100@gmail.com' &&
+             request.auth.token.email_verified == true;
+    }
+
     function isValidId(id) {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
@@ -41,6 +49,7 @@ service cloud.firestore {
              data.premiumUnlocked is bool &&
              data.accountStatus in ['active', 'banned'] &&
              data.reportCount is int && data.reportCount >= 0 && data.reportCount <= 1000 &&
+             (!('bannedByAdmin' in data) || data.bannedByAdmin is bool) &&
              (!('deletedContactIds' in data) || (data.deletedContactIds is list && data.deletedContactIds.size() <= 500));
     }
 
@@ -57,13 +66,35 @@ service cloud.firestore {
              (!('maxProfileViewers' in data) || (data.maxProfileViewers is int && data.maxProfileViewers >= 0 && data.maxProfileViewers <= 500)) &&
              (!('online' in data) || data.online is bool) &&
              (!('showOnlineStatus' in data) || data.showOnlineStatus is bool) &&
+             (!('bannedByAdmin' in data) || data.bannedByAdmin is bool) &&
              data.accountStatus in ['active', 'banned'] &&
              data.reportCount is int && data.reportCount >= 0 && data.reportCount <= 50 &&
              data.reportedByUids is list && data.reportedByUids.size() <= 50 &&
              (data.reportedByUids.size() == 0 || data.reportedByUids[0] is string) &&
              data.reportCount == data.reportedByUids.size() &&
-             ((data.reportCount >= 10 && data.accountStatus == 'banned') ||
-              (data.reportCount < 10 && data.accountStatus == 'active'));
+             (
+               (data.get('bannedByAdmin', false) == true && data.accountStatus == 'banned') ||
+               (data.get('bannedByAdmin', false) == false &&
+                ((data.reportCount >= 10 && data.accountStatus == 'banned') ||
+                 (data.reportCount < 10 && data.accountStatus == 'active')))
+             );
+    }
+
+    function isValidPublicProfile(data) {
+      return data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128 &&
+             data.username is string && data.username.size() >= 1 && data.username.size() <= 40 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60 &&
+             (!('provider' in data) || data.provider in ['google', 'username']) &&
+             (!('bio' in data) || (data.bio is string && data.bio.size() <= 200)) &&
+             (!('photoData' in data) || (data.photoData is string && data.photoData.size() <= 150000)) &&
+             (!('bannerData' in data) || (data.bannerData is string && data.bannerData.size() <= 150000)) &&
+             (!('profileVisibility' in data) || data.profileVisibility in ['everyone', 'selected', 'nobody']) &&
+             (!('allowedViewerUids' in data) || (data.allowedViewerUids is list && data.allowedViewerUids.size() <= 500 && (data.allowedViewerUids.size() == 0 || data.allowedViewerUids[0] is string))) &&
+             (!('maxProfileViewers' in data) || (data.maxProfileViewers is int && data.maxProfileViewers >= 0 && data.maxProfileViewers <= 500)) &&
+             (!('online' in data) || data.online is bool) &&
+             (!('showOnlineStatus' in data) || data.showOnlineStatus is bool) &&
+             (!('bannedByAdmin' in data) || data.bannedByAdmin is bool) &&
+             data.accountStatus in ['active', 'banned'];
     }
 
     function isValidContact(data) {
@@ -161,8 +192,8 @@ service cloud.firestore {
     }
 
     match /users/{userId} {
-      allow get: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
-      allow list: if false;
+      allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
 
       allow create: if isSignedIn() &&
                        isValidId(userId) &&
@@ -185,21 +216,28 @@ service cloud.firestore {
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                        isValidUserProfile(incoming());
 
-      allow update: if isSignedIn() &&
-                       isValidId(userId) &&
-                       request.auth.uid == userId &&
+      allow update: if isValidId(userId) &&
                        isValidUserProfile(incoming()) &&
                        incoming().userId == existing().userId &&
                        incoming().provider == existing().provider &&
                        incoming().createdAt == existing().createdAt &&
-                       incoming().accountStatus == existing().accountStatus &&
-                       incoming().reportCount == existing().reportCount &&
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-                       incoming().diff(existing()).affectedKeys().hasOnly([
-                         'displayName', 'username', 'email', 'bio', 'dob', 'photoData', 'bannerData',
-                         'profileVisibility', 'allowedViewerUids', 'maxProfileViewers',
-                         'online', 'showOnlineStatus', 'verified', 'premiumUnlocked', 'deletedContactIds', 'updatedAt'
-                       ]);
+                       (
+                         (isSignedIn() &&
+                          request.auth.uid == userId &&
+                          incoming().accountStatus == existing().accountStatus &&
+                          incoming().reportCount == existing().reportCount &&
+                          incoming().get('bannedByAdmin', false) == existing().get('bannedByAdmin', false) &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'displayName', 'username', 'email', 'bio', 'dob', 'photoData', 'bannerData',
+                            'profileVisibility', 'allowedViewerUids', 'maxProfileViewers',
+                            'online', 'showOnlineStatus', 'verified', 'premiumUnlocked', 'deletedContactIds', 'updatedAt'
+                          ])) ||
+                         (isAdmin() &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'accountStatus', 'reportCount', 'bannedByAdmin', 'updatedAt'
+                          ]))
+                       );
 
       allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
 
@@ -371,7 +409,7 @@ service cloud.firestore {
 
     match /directory/{username} {
       allow get: if isSignedIn() && isValidId(username);
-      allow list: if false;
+      allow list: if isAdmin();
 
       allow create: if isSignedIn() &&
                        isValidId(username) &&
@@ -383,8 +421,9 @@ service cloud.firestore {
                        incoming().keys().hasOnly([
                          'ownerUid', 'username', 'displayName', 'provider', 'bio', 'photoData', 'bannerData',
                          'profileVisibility', 'allowedViewerUids', 'maxProfileViewers', 'online', 'showOnlineStatus',
-                         'accountStatus', 'reportCount', 'reportedByUids', 'createdAt', 'updatedAt'
+                         'accountStatus', 'reportCount', 'reportedByUids', 'bannedByAdmin', 'createdAt', 'updatedAt'
                        ]) &&
+                       (!('bannedByAdmin' in incoming()) || incoming().bannedByAdmin == false) &&
                        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                        isValidDirectoryEntry(incoming()) &&
@@ -415,6 +454,11 @@ service cloud.firestore {
                           incoming().reportedByUids.size() == existing().reportedByUids.size() + 1 &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'reportedByUids', 'reportCount', 'accountStatus', 'updatedAt'
+                          ])) ||
+                         // Verified admin directly banning or recovering accounts
+                         (isAdmin() &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'accountStatus', 'reportCount', 'reportedByUids', 'bannedByAdmin', 'updatedAt'
                           ]))
                        );
 
@@ -422,6 +466,116 @@ service cloud.firestore {
                        isValidId(username) &&
                        ('ownerUid' in existing()) &&
                        existing().ownerUid == request.auth.uid;
+    }
+
+    match /public_profiles/{userId} {
+      allow get: if isSignedIn() && isValidId(userId);
+      allow list: if false;
+
+      allow create: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       incoming().ownerUid == request.auth.uid &&
+                       incoming().accountStatus == 'active' &&
+                       (!('bannedByAdmin' in incoming()) || incoming().bannedByAdmin == false) &&
+                       incoming().keys().hasAll([
+                         'ownerUid', 'username', 'displayName', 'accountStatus', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'ownerUid', 'username', 'displayName', 'provider', 'bio', 'photoData', 'bannerData',
+                         'profileVisibility', 'allowedViewerUids', 'maxProfileViewers',
+                         'online', 'showOnlineStatus', 'accountStatus', 'bannedByAdmin', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       isValidPublicProfile(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(userId) &&
+                       isValidPublicProfile(incoming()) &&
+                       incoming().ownerUid == existing().ownerUid &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       (
+                         (request.auth.uid == userId &&
+                          incoming().accountStatus == existing().accountStatus &&
+                          incoming().get('bannedByAdmin', false) == existing().get('bannedByAdmin', false) &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'username', 'displayName', 'provider', 'bio', 'photoData', 'bannerData',
+                            'profileVisibility', 'allowedViewerUids', 'maxProfileViewers',
+                            'online', 'showOnlineStatus', 'updatedAt'
+                          ])) ||
+                         (isAdmin() &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'accountStatus', 'bannedByAdmin', 'updatedAt'
+                          ]))
+                       );
+
+      allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+    }
+
+    match /admin_config/{configId} {
+      allow get, list: if isAdmin();
+
+      allow create, update: if isAdmin() &&
+                               isValidId(configId) &&
+                               incoming().lockedGmail == 'ayazbugti100@gmail.com' &&
+                               incoming().adminUid == request.auth.uid &&
+                               incoming().enabled is bool &&
+                               incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                               incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                               incoming().keys().hasAll([
+                                 'lockedGmail', 'adminUid', 'enabled', 'createdAt', 'updatedAt'
+                               ]) &&
+                               incoming().keys().hasOnly([
+                                 'lockedGmail', 'adminUid', 'enabled', 'createdAt', 'updatedAt'
+                               ]);
+
+      allow delete: if false;
+    }
+
+    match /moderation_alerts/{alertId} {
+      allow get, list: if isAdmin();
+
+      allow create: if isSignedIn() &&
+                       isValidId(alertId) &&
+                       incoming().reporterUid == request.auth.uid &&
+                       incoming().status == 'pending' &&
+                       incoming().reportedUid is string && incoming().reportedUid.size() <= 128 &&
+                       incoming().reportedUsername is string && incoming().reportedUsername.size() >= 1 && incoming().reportedUsername.size() <= 40 &&
+                       incoming().reportedDisplayName is string && incoming().reportedDisplayName.size() >= 1 && incoming().reportedDisplayName.size() <= 60 &&
+                       incoming().reporterUsername is string && incoming().reporterUsername.size() >= 1 && incoming().reporterUsername.size() <= 40 &&
+                       (!('reporterEmail' in incoming()) || (incoming().reporterEmail is string && incoming().reporterEmail.size() <= 128)) &&
+                       incoming().reason is string && incoming().reason.size() >= 1 && incoming().reason.size() <= 100 &&
+                       incoming().createdAtMs is int && incoming().createdAtMs > 0 &&
+                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       incoming().keys().hasAll([
+                         'reportedUid', 'reportedUsername', 'reportedDisplayName',
+                         'reporterUid', 'reporterUsername', 'reason', 'status',
+                         'createdAtMs', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'reportedUid', 'reportedUsername', 'reportedDisplayName',
+                         'reporterUid', 'reporterUsername', 'reporterEmail',
+                         'reason', 'status', 'adminEmail', 'createdAtMs', 'resolvedAtMs',
+                         'createdAt', 'updatedAt'
+                       ]);
+
+      allow update: if isAdmin() &&
+                       isValidId(alertId) &&
+                       incoming().status in ['pending', 'ignored', 'banned', 'recovered'] &&
+                       incoming().reporterUid == existing().reporterUid &&
+                       incoming().reportedUsername == existing().reportedUsername &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       (!('resolvedAtMs' in incoming()) || (incoming().resolvedAtMs is int && incoming().resolvedAtMs >= 0)) &&
+                       (!('adminEmail' in incoming()) || incoming().adminEmail == 'ayazbugti100@gmail.com') &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'status', 'adminEmail', 'resolvedAtMs', 'updatedAt'
+                       ]);
+
+      allow delete: if isAdmin() && isValidId(alertId);
     }
 
     match /stories/{storyId} {

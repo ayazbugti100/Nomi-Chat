@@ -1014,8 +1014,11 @@ fun ContactProfileDialog(
 fun ReportAccountDialog(
     contact: ChatThread,
     onDismiss: () -> Unit,
-    onConfirmReport: () -> Unit
+    onConfirmReport: (String) -> Unit
 ) {
+    val reasons = remember { listOf("Spam", "Abuse", "Fake Account", "Harassment", "Other") }
+    var selectedReason by remember { mutableStateOf("Spam") }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = {
@@ -1032,16 +1035,47 @@ fun ReportAccountDialog(
             )
         },
         text = {
-            Text(
-                text = "Submit a safety report for @${contact.username.ifBlank { contact.id }}. Our moderation team will review this account for policy violations.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.testTag("report_dialog_message")
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "Submit a safety report for @${contact.username.ifBlank { contact.id }}. Our moderation team will review this account for policy violations. Select a reason:",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag("report_dialog_message")
+                )
+                reasons.forEach { reason ->
+                    val isSelected = selectedReason == reason
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(
+                                if (isSelected) ErrorRed.copy(alpha = 0.10f)
+                                else Color.Transparent
+                            )
+                            .clickable { selectedReason = reason }
+                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                            .testTag("report_reason_${reason.lowercase().replace(" ", "_")}"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        RadioButton(
+                            selected = isSelected,
+                            onClick = { selectedReason = reason },
+                            colors = RadioButtonDefaults.colors(selectedColor = ErrorRed)
+                        )
+                        Text(
+                            text = reason,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+            }
         },
         confirmButton = {
             Button(
-                onClick = onConfirmReport,
+                onClick = { onConfirmReport(selectedReason) },
                 colors = ButtonDefaults.buttonColors(containerColor = ErrorRed),
                 modifier = Modifier.testTag("confirm_report_button")
             ) {

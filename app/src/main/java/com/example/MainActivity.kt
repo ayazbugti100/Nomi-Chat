@@ -96,6 +96,7 @@ import com.example.ui.auth.signOutUser
 import com.example.ui.components.NomiBottomBar
 import com.example.ui.components.SmallFloatingPopup
 import com.example.ui.screens.AddContactDialog
+import com.example.ui.screens.AdminModerationDialog
 import com.example.ui.screens.AppLockOverlay
 import com.example.ui.screens.AppLockSetupDialog
 import com.example.ui.screens.AppearanceDialog
@@ -107,6 +108,7 @@ import com.example.ui.screens.ContactProfileDialog
 import com.example.ui.screens.ConversationScreen
 import com.example.ui.screens.EditProfileDialog
 import com.example.ui.screens.EditSingleFieldDialog
+import com.example.ui.screens.InAppAdminAlertBanner
 import com.example.ui.screens.PremiumFeaturesDialog
 import com.example.ui.screens.PrivacySettingsScreen
 import com.example.ui.screens.ProfileScreen
@@ -129,6 +131,7 @@ import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private var notificationContactIdState by mutableStateOf<String?>(null)
+    private var notificationOpenAdminState by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -137,6 +140,7 @@ class MainActivity : ComponentActivity() {
         configureAppCheck(this, intent)
         MessageNotificationHelper.ensureChannel(applicationContext)
         notificationContactIdState = intent?.getStringExtra(MessageNotificationHelper.EXTRA_CONTACT_ID)
+        notificationOpenAdminState = intent?.getBooleanExtra(MessageNotificationHelper.EXTRA_OPEN_ADMIN_ALERTS, false) == true
 
         // STEP 2: Enable Edge-to-Edge and launch Compose UI
         enableEdgeToEdge()
@@ -152,7 +156,9 @@ class MainActivity : ComponentActivity() {
                     preferencesRepository = prefsRepo,
                     themeMode = prefs.themeMode,
                     pendingNotificationContactId = notificationContactIdState,
-                    onConsumedNotificationContactId = { notificationContactIdState = null }
+                    onConsumedNotificationContactId = { notificationContactIdState = null },
+                    pendingOpenAdminAlerts = notificationOpenAdminState,
+                    onConsumedOpenAdminAlerts = { notificationOpenAdminState = false }
                 )
             }
         }
@@ -164,6 +170,9 @@ class MainActivity : ComponentActivity() {
         val contactId = intent.getStringExtra(MessageNotificationHelper.EXTRA_CONTACT_ID)
         if (!contactId.isNullOrBlank()) {
             notificationContactIdState = contactId
+        }
+        if (intent.getBooleanExtra(MessageNotificationHelper.EXTRA_OPEN_ADMIN_ALERTS, false)) {
+            notificationOpenAdminState = true
         }
     }
 }
@@ -187,7 +196,9 @@ fun AppNavigation(
     preferencesRepository: UserPreferencesRepository,
     themeMode: ThemeMode,
     pendingNotificationContactId: String? = null,
-    onConsumedNotificationContactId: () -> Unit = {}
+    onConsumedNotificationContactId: () -> Unit = {},
+    pendingOpenAdminAlerts: Boolean = false,
+    onConsumedOpenAdminAlerts: () -> Unit = {}
 ) {
     val appContext = LocalContext.current.applicationContext
     val localAuthStore = remember(appContext) { LocalAuthStore(appContext) }
@@ -306,6 +317,8 @@ fun AppNavigation(
                         bottomTab = bottomTab,
                         pendingNotificationContactId = pendingNotificationContactId,
                         onConsumedNotificationContactId = onConsumedNotificationContactId,
+                        pendingOpenAdminAlerts = pendingOpenAdminAlerts,
+                        onConsumedOpenAdminAlerts = onConsumedOpenAdminAlerts,
                         onSelectBottomTab = { bottomTab = it },
                         onResetToAuth = { bottomTab = MainBottomTab.CHATS },
                         onShowGlobalPopup = { message -> globalPopupMessage = message },
@@ -340,6 +353,8 @@ fun AppNavigation(
                         bottomTab = bottomTab,
                         pendingNotificationContactId = pendingNotificationContactId,
                         onConsumedNotificationContactId = onConsumedNotificationContactId,
+                        pendingOpenAdminAlerts = pendingOpenAdminAlerts,
+                        onConsumedOpenAdminAlerts = onConsumedOpenAdminAlerts,
                         onSelectBottomTab = { bottomTab = it },
                         onResetToAuth = { bottomTab = MainBottomTab.CHATS },
                         onShowGlobalPopup = { message -> globalPopupMessage = message },
@@ -404,6 +419,8 @@ private fun NomiChatMainShell(
     bottomTab: MainBottomTab,
     pendingNotificationContactId: String? = null,
     onConsumedNotificationContactId: () -> Unit = {},
+    pendingOpenAdminAlerts: Boolean = false,
+    onConsumedOpenAdminAlerts: () -> Unit = {},
     onSelectBottomTab: (MainBottomTab) -> Unit,
     onResetToAuth: () -> Unit,
     onShowGlobalPopup: (String) -> Unit,
@@ -462,6 +479,20 @@ private fun NomiChatMainShell(
         }
     }
 
+    LaunchedEffect(viewModel) {
+        viewModel.adminNotificationEvents.collect { adminAlert ->
+            if (viewModel.isAdminSession.value) {
+                MessageNotificationHelper.showAdminModerationNotification(
+                    context = context.applicationContext,
+                    alertId = adminAlert.id,
+                    reportedHandle = adminAlert.reportedUsername,
+                    reporterHandle = adminAlert.reporterUsername,
+                    reason = adminAlert.reason
+                )
+            }
+        }
+    }
+
     LaunchedEffect(pendingNotificationContactId) {
         val targetId = pendingNotificationContactId
         if (!targetId.isNullOrBlank()) {
@@ -499,6 +530,10 @@ private fun NomiChatMainShell(
     val isChangingPassword by viewModel.isChangingPassword.collectAsStateWithLifecycle()
     val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
     val inAppAlertBanner by viewModel.inAppAlertBanner.collectAsStateWithLifecycle()
+    val isAdminSession by viewModel.isAdminSession.collectAsStateWithLifecycle()
+    val moderationAlerts by viewModel.moderationAlertsState.collectAsStateWithLifecycle()
+    val pendingModerationCount by viewModel.pendingModerationCount.collectAsStateWithLifecycle()
+    val inAppAdminBanner by viewModel.inAppAdminBanner.collectAsStateWithLifecycle()
 
     val rawAllThreads by viewModel.allThreadsState.collectAsStateWithLifecycle()
     val archivedChats by viewModel.archivedChatsState.collectAsStateWithLifecycle()
@@ -506,6 +541,7 @@ private fun NomiChatMainShell(
     var activeModal by remember { mutableStateOf(ActiveModal.NONE) }
     var isPrivacySettingsOpen by remember { mutableStateOf(false) }
     var isArchivedFolderOpen by remember { mutableStateOf(false) }
+    var isAdminPanelOpen by remember { mutableStateOf(false) }
     var isStoryEditorOpen by remember { mutableStateOf(false) }
     var pendingStoryMediaUri by remember { mutableStateOf<Uri?>(null) }
     var activeStoryAuthorKey by remember { mutableStateOf<String?>(null) }
@@ -514,6 +550,15 @@ private fun NomiChatMainShell(
     var renameThreadId by remember { mutableStateOf<String?>(null) }
     var reportThreadId by remember { mutableStateOf<String?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
+
+    LaunchedEffect(pendingOpenAdminAlerts, isAdminSession) {
+        if (pendingOpenAdminAlerts && isAdminSession) {
+            isAdminPanelOpen = true
+            onConsumedOpenAdminAlerts()
+        } else if (!isAdminSession) {
+            isAdminPanelOpen = false
+        }
+    }
 
     val modalOfflinePopup = if (
         activeModal == ActiveModal.ADD_CONTACT &&
@@ -667,6 +712,7 @@ private fun NomiChatMainShell(
                     ConversationScreen(
                         contact = currentThread,
                         messagesState = activeMessagesState,
+                        currentUserProfile = profile,
                         isContactTyping = isContactTyping,
                         smartAiEnabled = prefs.smartAiEnabled,
                         quickSuggestions = quickSuggestions,
@@ -769,6 +815,9 @@ private fun NomiChatMainShell(
                         onOpenPasscodeSetup = { activeModal = ActiveModal.PASSCODE },
                         onOpenChangePassword = { activeModal = ActiveModal.CHANGE_PASSWORD },
                         onToggleNotifications = viewModel::setNotificationsEnabled,
+                        onToggleBlackTheme = { enabled ->
+                            viewModel.setThemeMode(if (enabled) ThemeMode.DARK else ThemeMode.LIGHT)
+                        },
                         onOpenAppearancePicker = { activeModal = ActiveModal.APPEARANCE },
                         onOpenAddContact = {
                             viewModel.resetUsernameSearch()
@@ -797,6 +846,9 @@ private fun NomiChatMainShell(
                         isChangingPassword = isChangingPassword,
                         isRefreshing = isRefreshing,
                         onRefresh = viewModel::refreshAllData,
+                        isAdminSession = isAdminSession,
+                        pendingModerationCount = pendingModerationCount,
+                        onOpenAdminModeration = { if (isAdminSession) isAdminPanelOpen = true },
                         onConnectGoogleSyncClick = {
                             if (!networkStatus.isConnected) {
                                 onShowGlobalPopup("Connect to Wi-Fi or mobile data to enable Cloud Sync.")
@@ -878,7 +930,10 @@ private fun NomiChatMainShell(
                         },
                         networkStatus = networkStatus,
                         isRefreshing = isRefreshing,
-                        onRefresh = viewModel::refreshAllData
+                        onRefresh = viewModel::refreshAllData,
+                        isAdminSession = isAdminSession,
+                        pendingModerationCount = pendingModerationCount,
+                        onOpenAdminModeration = { if (isAdminSession) isAdminPanelOpen = true }
                     )
                 }
             }
@@ -930,7 +985,7 @@ private fun NomiChatMainShell(
         }
 
         AnimatedVisibility(
-            visible = inAppAlertBanner != null,
+            visible = (isAdminSession && inAppAdminBanner != null) || inAppAlertBanner != null,
             enter = fadeIn() + slideInVertically { -it },
             exit = fadeOut() + slideOutVertically { -it },
             modifier = Modifier
@@ -939,15 +994,30 @@ private fun NomiChatMainShell(
                 .padding(horizontal = 14.dp, vertical = 10.dp)
                 .widthIn(max = 560.dp)
         ) {
-            inAppAlertBanner?.let { alert ->
-                InAppMessageBanner(
-                    alert = alert,
-                    onClick = {
-                        viewModel.dismissInAppAlertBanner()
-                        viewModel.openConversation(alert.contactId)
+            val adminAlert = if (isAdminSession) inAppAdminBanner else null
+            if (adminAlert != null) {
+                InAppAdminAlertBanner(
+                    alert = adminAlert,
+                    onOpenAdminPanel = {
+                        viewModel.dismissInAppAdminBanner()
+                        isAdminPanelOpen = true
                     },
-                    onDismiss = viewModel::dismissInAppAlertBanner
+                    onIgnore = { viewModel.ignoreModerationAlert(adminAlert.id) },
+                    onBan = { viewModel.banUserFromAlert(adminAlert) },
+                    onRecovery = { viewModel.recoverUserFromAlert(adminAlert) },
+                    onDismiss = viewModel::dismissInAppAdminBanner
                 )
+            } else {
+                inAppAlertBanner?.let { alert ->
+                    InAppMessageBanner(
+                        alert = alert,
+                        onClick = {
+                            viewModel.dismissInAppAlertBanner()
+                            viewModel.openConversation(alert.contactId)
+                        },
+                        onDismiss = viewModel::dismissInAppAlertBanner
+                    )
+                }
             }
         }
     }
@@ -1153,10 +1223,20 @@ private fun NomiChatMainShell(
         ReportAccountDialog(
             contact = thread,
             onDismiss = { reportThreadId = null },
-            onConfirmReport = {
+            onConfirmReport = { reason ->
                 reportThreadId = null
-                viewModel.reportContact(thread)
+                viewModel.reportContact(thread, reason)
             }
+        )
+    }
+
+    if (isAdminSession && isAdminPanelOpen) {
+        AdminModerationDialog(
+            alerts = moderationAlerts,
+            onDismiss = { isAdminPanelOpen = false },
+            onIgnore = viewModel::ignoreModerationAlert,
+            onBan = viewModel::banUserFromAlert,
+            onRecovery = viewModel::recoverUserFromAlert
         )
     }
 

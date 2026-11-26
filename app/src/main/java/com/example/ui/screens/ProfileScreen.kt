@@ -11,6 +11,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,6 +47,7 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shield
@@ -79,6 +81,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
@@ -88,6 +91,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.example.R
+import com.example.data.model.ADMIN_GMAIL
 import com.example.data.model.ProfileVisibilityMode
 import com.example.data.model.ThemeMode
 import com.example.data.model.UserProfile
@@ -122,6 +126,7 @@ fun ProfileScreen(
     onOpenPasscodeSetup: () -> Unit,
     onOpenChangePassword: () -> Unit = {},
     onToggleNotifications: (Boolean) -> Unit,
+    onToggleBlackTheme: (Boolean) -> Unit = {},
     onOpenAppearancePicker: () -> Unit,
     onOpenAddContact: () -> Unit,
     onLogoutClick: () -> Unit,
@@ -135,6 +140,9 @@ fun ProfileScreen(
     isChangingPassword: Boolean = false,
     isRefreshing: Boolean = false,
     onRefresh: () -> Unit = {},
+    isAdminSession: Boolean = false,
+    pendingModerationCount: Int = 0,
+    onOpenAdminModeration: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var isSearchVisible by remember { mutableStateOf(false) }
@@ -193,10 +201,11 @@ fun ProfileScreen(
         return terms.any { it.lowercase().contains(query) }
     }
 
+    val isBlackThemeEnabled = themeMode == ThemeMode.DARK || (themeMode == ThemeMode.AUTO && isSystemInDarkTheme())
     val showProfileCard = matchesQuery("edit profile", "name", displayName, "bio", bio, "username", rawUsername, "date of birth", dob)
     val showSecurityCard = matchesQuery(
         "privacy", "online status", "app lock", "passcode", "pin",
-        "change password", "password", "notifications", "appearance", "theme",
+        "change password", "password", "notifications", "black theme", "dark", "white", "appearance", "theme",
         "add contact", "cloud sync"
     )
 
@@ -661,6 +670,50 @@ fun ProfileScreen(
                                     )
                                 }
                             }
+                            if (matchesQuery("black theme", "dark", "white", "theme")) {
+                                if (needsDivider) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                                needsDivider = true
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .minimumInteractiveComponentSize()
+                                        .clickable { onToggleBlackTheme(!isBlackThemeEnabled) }
+                                        .padding(horizontal = 4.dp, vertical = 10.dp)
+                                        .testTag("black_theme_switch_row"),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(
+                                        modifier = Modifier.weight(1f),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                    ) {
+                                        SettingIconBox(icon = Icons.Default.DarkMode)
+                                        Column {
+                                            Text(
+                                                text = stringResource(R.string.black_theme_title),
+                                                style = MaterialTheme.typography.labelLarge,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Text(
+                                                text = stringResource(R.string.black_theme_desc),
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                    Switch(
+                                        checked = isBlackThemeEnabled,
+                                        onCheckedChange = onToggleBlackTheme,
+                                        modifier = Modifier.testTag("black_theme_switch"),
+                                        colors = SwitchDefaults.colors(
+                                            checkedThumbColor = Color.White,
+                                            checkedTrackColor = EmeraldMid
+                                        )
+                                    )
+                                }
+                            }
                             if (matchesQuery("appearance", "theme", "dark", "light")) {
                                 if (needsDivider) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
                                 needsDivider = true
@@ -699,6 +752,24 @@ fun ProfileScreen(
                                     }
                                 )
                             }
+                        }
+                    }
+                }
+
+                if (isAdminSession && matchesQuery("admin", "moderation", "alerts", "ban", "recovery")) {
+                    item(key = "profile_admin_moderation_card") {
+                        SettingsGroupCard(modifier = Modifier.widthIn(max = 600.dp)) {
+                            SettingItemRow(
+                                icon = Icons.Default.Shield,
+                                title = if (pendingModerationCount > 0) {
+                                    "Admin Moderation Alerts ($pendingModerationCount pending)"
+                                } else {
+                                    "Admin Moderation Alerts"
+                                },
+                                subtitle = "Verified Gmail lock: $ADMIN_GMAIL",
+                                testTag = "admin_moderation_profile_row",
+                                onClick = onOpenAdminModeration
+                            )
                         }
                     }
                 }
@@ -895,17 +966,18 @@ private fun SettingsGroupCard(
 
 @Composable
 private fun SettingIconBox(icon: ImageVector) {
+    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     Box(
         modifier = Modifier
             .size(40.dp)
             .clip(RoundedCornerShape(12.dp))
-            .background(MintLight),
+            .background(if (isDark) EmeraldDark.copy(alpha = 0.35f) else MintLight),
         contentAlignment = Alignment.Center
     ) {
         Icon(
             imageVector = icon,
             contentDescription = null,
-            tint = EmeraldDark,
+            tint = if (isDark) EmeraldBright else EmeraldDark,
             modifier = Modifier.size(21.dp)
         )
     }

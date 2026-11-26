@@ -80,6 +80,10 @@
           "type": "integer",
           "description": "Number of unique reports against this account."
         },
+        "bannedByAdmin": {
+          "type": "boolean",
+          "description": "Whether the account is explicitly suspended by the verified admin."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
@@ -174,6 +178,10 @@
         "reportedByUids": {
           "type": "array",
           "description": "Bounded list of unique reporter UIDs."
+        },
+        "bannedByAdmin": {
+          "type": "boolean",
+          "description": "Whether the handle was explicitly suspended by the verified admin."
         },
         "createdAt": {
           "type": "string",
@@ -647,6 +655,75 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "PublicProfile": {
+      "title": "PublicProfile",
+      "description": "UID-keyed real-time public profile mirror for instant cross-device sync across username changes.",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string" },
+        "username": { "type": "string" },
+        "displayName": { "type": "string" },
+        "provider": { "type": "string", "enum": ["google", "username"] },
+        "bio": { "type": "string" },
+        "photoData": { "type": "string" },
+        "bannerData": { "type": "string" },
+        "profileVisibility": { "type": "string", "enum": ["everyone", "selected", "nobody"] },
+        "allowedViewerUids": { "type": "array" },
+        "maxProfileViewers": { "type": "integer" },
+        "online": { "type": "boolean" },
+        "showOnlineStatus": { "type": "boolean" },
+        "accountStatus": { "type": "string", "enum": ["active", "banned"] },
+        "bannedByAdmin": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "username", "displayName", "accountStatus", "createdAt", "updatedAt"]
+    },
+    "AdminLockConfig": {
+      "title": "AdminLockConfig",
+      "description": "Permanent admin Gmail verification lock configuration.",
+      "type": "object",
+      "properties": {
+        "lockedGmail": { "type": "string" },
+        "adminUid": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["lockedGmail", "adminUid", "enabled", "createdAt", "updatedAt"]
+    },
+    "ModerationAlert": {
+      "title": "ModerationAlert",
+      "description": "User report / moderation alert visible exclusively to the verified admin Gmail account.",
+      "type": "object",
+      "properties": {
+        "reportedUid": { "type": "string" },
+        "reportedUsername": { "type": "string" },
+        "reportedDisplayName": { "type": "string" },
+        "reporterUid": { "type": "string" },
+        "reporterUsername": { "type": "string" },
+        "reporterEmail": { "type": "string" },
+        "reason": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "ignored", "banned", "recovered"] },
+        "adminEmail": { "type": "string" },
+        "createdAtMs": { "type": "integer" },
+        "resolvedAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "reportedUid",
+        "reportedUsername",
+        "reportedDisplayName",
+        "reporterUid",
+        "reporterUsername",
+        "reason",
+        "status",
+        "createdAtMs",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -665,6 +742,18 @@
     "/directory/{username}": {
       "schema": { "$ref": "#/entities/UserDirectoryEntry" },
       "description": "Handle-based moderation directory for reporting and auto-ban enforcement."
+    },
+    "/public_profiles/{userId}": {
+      "schema": { "$ref": "#/entities/PublicProfile" },
+      "description": "UID-keyed real-time profile sync document."
+    },
+    "/admin_config/{configId}": {
+      "schema": { "$ref": "#/entities/AdminLockConfig" },
+      "description": "Verified Gmail admin verification lock configuration."
+    },
+    "/moderation_alerts/{alertId}": {
+      "schema": { "$ref": "#/entities/ModerationAlert" },
+      "description": "Moderation report queue accessible strictly to verified admin Gmail."
     },
     "/users/{userId}/contacts/{contactId}": {
       "schema": { "$ref": "#/entities/ChatThread" },

@@ -5,6 +5,7 @@ import com.example.data.model.ChatMessage
 import com.example.data.model.ChatThread
 import com.example.data.model.DirectoryLookupResult
 import com.example.data.model.IncomingMessageAlert
+import com.example.data.model.ModerationAlert
 import com.example.data.model.ReportOutcome
 import com.example.data.model.StoryFontStyle
 import com.example.data.model.StoryItem
@@ -195,7 +196,18 @@ interface NomiDataSource {
     suspend fun reportUserAccount(
         userId: String,
         contact: ChatThread,
-        reporterUsername: String
+        reporterUsername: String,
+        reason: String = "Other"
     ): Result<ReportOutcome>
+
+    fun observeModerationAlerts(): Flow<List<ModerationAlert>> = emptyFlow()
+
+    suspend fun ensureAdminConfigLocked(uid: String, email: String): Result<Unit> = Result.success(Unit)
+
+    suspend fun ignoreModerationAlert(alertId: String): Result<Unit> = Result.success(Unit)
+
+    suspend fun banUserFromAlert(alert: ModerationAlert): Result<Unit> = Result.success(Unit)
+
+    suspend fun recoverUserFromAlert(alert: ModerationAlert): Result<Unit> = Result.success(Unit)
 }
 

@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import android.content.Context
+import android.media.AudioManager
 import android.util.Base64
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -11,19 +13,25 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
@@ -53,6 +61,9 @@ import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -72,8 +83,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -84,23 +97,36 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
+import com.example.R
 import com.example.audio.VoicePlaybackUiState
 import com.example.audio.VoiceRecordingUiState
 import com.example.data.model.ChatMessage
 import com.example.data.model.ChatThemeStyle
 import com.example.data.model.ChatThread
 import com.example.ui.components.AvatarCircle
+import com.example.ui.theme.CallBgDark
+import com.example.ui.theme.CallBgLight
+import com.example.ui.theme.CallEndRed
+import com.example.ui.theme.CallPanelDark
+import com.example.ui.theme.CallPanelLight
+import com.example.ui.theme.CallSubtleText
 import com.example.ui.theme.DarkBubbleMe
 import com.example.ui.theme.DarkSurface
 import com.example.ui.theme.DangerRed
@@ -111,6 +137,16 @@ import com.example.ui.theme.EmeraldMid
 import com.example.ui.theme.EmeraldVibrant
 import com.example.ui.theme.MintBubbleMe
 import com.example.ui.theme.MintLight
+import com.example.ui.theme.MintOnlineGlow
+import com.example.ui.theme.VoiceAccentBlue
+import com.example.ui.theme.VoiceMeDark
+import com.example.ui.theme.VoiceMeLight
+import com.example.ui.theme.VoiceMutedDark
+import com.example.ui.theme.VoiceMutedLight
+import com.example.ui.theme.VoiceOtherDark
+import com.example.ui.theme.VoiceOtherLight
+import com.example.ui.theme.VoiceTextDark
+import com.example.ui.theme.VoiceTextLight
 import kotlinx.coroutines.delay
 import kotlin.math.abs
 
@@ -239,19 +275,41 @@ fun MessageBubble(
     playbackState: VoicePlaybackUiState,
     searchQuery: String = "",
     isCurrentSearchMatch: Boolean = false,
+    senderName: String = "User",
+    senderPhotoData: String? = null,
     onToggleVoicePlayback: (ChatMessage) -> Unit = {},
+    onSeekVoicePlayback: (ChatMessage, Float) -> Unit = { _, _ -> },
     onPreviewImage: (String) -> Unit = {},
     onDeleteMessage: (ChatMessage) -> Unit = {},
     onReplyMessage: (ChatMessage) -> Unit = {}
 ) {
     val isMe = msg.sender == "me"
-    val bubbleColor = if (isMe) palette.bubbleMe else palette.bubbleThem
-    val primaryTextColor = if (isMe) palette.textMe else palette.textThem
-    val secondaryTextColor = if (isMe) palette.mutedTextMe else palette.mutedTextThem
-    val bubbleShape = if (isMe) {
-        RoundedCornerShape(topStart = 14.dp, topEnd = 4.dp, bottomStart = 14.dp, bottomEnd = 14.dp)
+    val isDarkTheme = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val isVoiceMessage = msg.messageType == "voice"
+    val bubbleColor = if (isVoiceMessage) {
+        when {
+            isMe && isDarkTheme -> VoiceMeDark
+            isMe -> VoiceMeLight
+            isDarkTheme -> VoiceOtherDark
+            else -> VoiceOtherLight
+        }
     } else {
-        RoundedCornerShape(topStart = 4.dp, topEnd = 14.dp, bottomEnd = 14.dp, bottomStart = 14.dp)
+        if (isMe) palette.bubbleMe else palette.bubbleThem
+    }
+    val primaryTextColor = if (isVoiceMessage) {
+        if (isDarkTheme) VoiceTextDark else VoiceTextLight
+    } else {
+        if (isMe) palette.textMe else palette.textThem
+    }
+    val secondaryTextColor = if (isVoiceMessage) {
+        if (isDarkTheme) VoiceMutedDark else VoiceMutedLight
+    } else {
+        if (isMe) palette.mutedTextMe else palette.mutedTextThem
+    }
+    val bubbleShape = if (isMe) {
+        RoundedCornerShape(topStart = 16.dp, topEnd = 4.dp, bottomStart = 16.dp, bottomEnd = 16.dp)
+    } else {
+        RoundedCornerShape(topStart = 4.dp, topEnd = 16.dp, bottomEnd = 16.dp, bottomStart = 16.dp)
     }
 
     var showMessageMenu by remember { mutableStateOf(false) }
@@ -310,7 +368,7 @@ fun MessageBubble(
                     "voice" -> {
                         val isThisPlaying = playbackState.playingMessageId == msg.id
                         val activePlaying = isThisPlaying && playbackState.isPlaying
-                        val progress = if (isThisPlaying) playbackState.progress else 0f
+                        val progress = if (isThisPlaying) playbackState.progress.coerceIn(0f, 1f) else 0f
                         val displaySeconds = if (isThisPlaying && playbackState.durationSec > 0L) {
                             if (activePlaying || playbackState.positionSec > 0L) playbackState.positionSec
                             else playbackState.durationSec
@@ -324,6 +382,34 @@ fun MessageBubble(
                                 (0.28f + (v / 10f) * 0.72f).coerceIn(0.25f, 1f)
                             }
                         }
+                        var waveformWidthPx by remember { mutableIntStateOf(1) }
+
+                        val avatarWithMicBadge: @Composable () -> Unit = {
+                            Box(modifier = Modifier.size(44.dp)) {
+                                AvatarCircle(
+                                    name = senderName,
+                                    photoData = senderPhotoData,
+                                    size = 42.dp,
+                                    borderColor = bubbleColor
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .size(18.dp)
+                                        .align(Alignment.BottomEnd)
+                                        .clip(CircleShape)
+                                        .background(VoiceAccentBlue)
+                                        .border(1.5.dp, bubbleColor, CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Mic,
+                                        contentDescription = "Voice message badge",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(10.dp)
+                                    )
+                                }
+                            }
+                        }
 
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -333,64 +419,97 @@ fun MessageBubble(
                                 .padding(vertical = 2.dp)
                                 .testTag("voice_bubble_${msg.id}")
                         ) {
+                            if (!isMe) {
+                                avatarWithMicBadge()
+                            }
+
                             Box(
                                 modifier = Modifier
-                                    .size(44.dp)
+                                    .size(48.dp)
                                     .clip(CircleShape)
-                                    .background(palette.accent)
                                     .clickable { onToggleVoicePlayback(msg) }
                                     .testTag("voice_play_button_${msg.id}"),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Icon(
-                                    imageVector = if (activePlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                    contentDescription = if (activePlaying) "Pause voice message" else "Play voice message",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(24.dp)
-                                )
+                                Box(
+                                    modifier = Modifier
+                                        .size(38.dp)
+                                        .clip(CircleShape)
+                                        .background(VoiceAccentBlue),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = if (activePlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                        contentDescription = if (activePlaying) "Pause voice message" else "Play voice message",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
                             }
 
                             Column(modifier = Modifier.weight(1f)) {
-                                Row(
+                                BoxWithConstraints(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .height(26.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                        .height(28.dp)
+                                        .onSizeChanged { waveformWidthPx = it.width.coerceAtLeast(1) }
+                                        .pointerInput(msg.id, waveformWidthPx) {
+                                            detectTapGestures { offset ->
+                                                val frac = (offset.x / waveformWidthPx.toFloat()).coerceIn(0f, 1f)
+                                                onSeekVoicePlayback(msg, frac)
+                                            }
+                                        }
+                                        .pointerInput(msg.id, waveformWidthPx) {
+                                            detectHorizontalDragGestures { change, _ ->
+                                                change.consume()
+                                                val frac = (change.position.x / waveformWidthPx.toFloat()).coerceIn(0f, 1f)
+                                                onSeekVoicePlayback(msg, frac)
+                                            }
+                                        }
+                                        .testTag("voice_waveform_${msg.id}"),
+                                    contentAlignment = Alignment.CenterStart
                                 ) {
-                                    waveformSeed.forEachIndexed { index, barRatio ->
-                                        val threshold = index.toFloat() / waveformSeed.size.toFloat()
-                                        val isPlayed = isThisPlaying && progress > threshold
-                                        Box(
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .height((22f * barRatio).dp)
-                                                .clip(RoundedCornerShape(2.dp))
-                                                .background(
-                                                    if (isPlayed) palette.accent
-                                                    else secondaryTextColor.copy(alpha = 0.36f)
-                                                )
-                                        )
+                                    val dotOffsetX = ((maxWidth - 10.dp).coerceAtLeast(0.dp)) * progress
+                                    Row(
+                                        modifier = Modifier.fillMaxSize(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                    ) {
+                                        waveformSeed.forEachIndexed { index, barRatio ->
+                                            val threshold = index.toFloat() / waveformSeed.size.toFloat()
+                                            val isPlayed = isThisPlaying && progress >= threshold
+                                            Box(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .height((22f * barRatio).dp)
+                                                    .clip(RoundedCornerShape(2.dp))
+                                                    .background(
+                                                        if (isPlayed) VoiceAccentBlue
+                                                        else secondaryTextColor.copy(alpha = 0.36f)
+                                                    )
+                                            )
+                                        }
                                     }
-                                }
-                                Spacer(modifier = Modifier.height(3.dp))
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Mic,
-                                        contentDescription = null,
-                                        tint = palette.accent,
-                                        modifier = Modifier.size(13.dp)
-                                    )
-                                    Text(
-                                        text = formatDurationTimer(displaySeconds),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = secondaryTextColor,
-                                        fontWeight = FontWeight.Medium
+                                    Box(
+                                        modifier = Modifier
+                                            .offset(x = dotOffsetX)
+                                            .size(10.dp)
+                                            .clip(CircleShape)
+                                            .background(VoiceAccentBlue)
+                                            .border(1.5.dp, Color.White, CircleShape)
                                     )
                                 }
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = formatDurationTimer(displaySeconds),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = secondaryTextColor,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+
+                            if (isMe) {
+                                avatarWithMicBadge()
                             }
                         }
                     }
@@ -521,7 +640,7 @@ fun MessageBubble(
         DropdownMenu(
             expanded = showMessageMenu,
             onDismissRequest = { showMessageMenu = false },
-            containerColor = Color.White,
+            containerColor = MaterialTheme.colorScheme.surface,
             shape = RoundedCornerShape(14.dp)
         ) {
             DropdownMenuItem(
@@ -1249,9 +1368,30 @@ fun InAppVoiceCallDialog(
     contact: ChatThread,
     onEndCall: () -> Unit
 ) {
+    val context = LocalContext.current
+    val audioManager = remember(context) {
+        runCatching { context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager }.getOrNull()
+    }
     var elapsedSec by remember { mutableLongStateOf(0L) }
     var micMuted by remember { mutableStateOf(false) }
     var speakerOn by remember { mutableStateOf(false) }
+    var videoOn by remember { mutableStateOf(false) }
+    var moreActive by remember { mutableStateOf(false) }
+    var shareActive by remember { mutableStateOf(false) }
+    var callBannerNote by remember { mutableStateOf<String?>(null) }
+
+    val isDarkTheme = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val callBackground = if (isDarkTheme) CallBgDark else CallBgLight
+    val callPanelColor = if (isDarkTheme) CallPanelDark else CallPanelLight
+
+    DisposableEffect(audioManager) {
+        onDispose {
+            runCatching {
+                audioManager?.isSpeakerphoneOn = false
+                audioManager?.isMicrophoneMute = false
+            }
+        }
+    }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -1260,92 +1400,257 @@ fun InAppVoiceCallDialog(
         }
     }
 
-    Dialog(onDismissRequest = onEndCall) {
+    LaunchedEffect(callBannerNote) {
+        if (callBannerNote != null) {
+            delay(2500L)
+            callBannerNote = null
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onEndCall,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
+    ) {
         Surface(
             modifier = Modifier
-                .fillMaxWidth()
+                .fillMaxSize()
                 .testTag("in_app_voice_call_dialog"),
-            shape = RoundedCornerShape(24.dp),
-            color = Color(0xFF0B1F17),
-            tonalElevation = 8.dp
+            color = callBackground
         ) {
             Column(
-                modifier = Modifier.padding(24.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 20.dp, vertical = 22.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+                verticalArrangement = Arrangement.SpaceBetween
             ) {
-                Text(
-                    text = "Nomi Encrypted Voice Call",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = EmeraldBright
-                )
-                AvatarCircle(
-                    name = contact.name,
-                    photoData = contact.photoData,
-                    size = 92.dp
-                )
-                Text(
-                    text = contact.name,
-                    style = MaterialTheme.typography.titleLarge,
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    text = if (elapsedSec < 2L) "Calling…" else formatDurationTimer(elapsedSec - 1L),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Color.White.copy(alpha = 0.8f)
-                )
-
-                Spacer(modifier = Modifier.height(6.dp))
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(20.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                // Top: Caller display name, optional @username, End-to-end encrypted & live timer
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(top = 8.dp)
                 ) {
-                    IconButton(
-                        onClick = { micMuted = !micMuted },
-                        modifier = Modifier
-                            .size(52.dp)
-                            .clip(CircleShape)
-                            .background(if (micMuted) Color.White else Color.White.copy(alpha = 0.14f))
-                    ) {
-                        Icon(
-                            imageVector = if (micMuted) Icons.Default.MicOff else Icons.Default.Mic,
-                            contentDescription = "Mute microphone",
-                            tint = if (micMuted) EmeraldDeep else Color.White
+                    Text(
+                        text = contact.name,
+                        fontSize = 22.sp,
+                        lineHeight = 28.sp,
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (contact.username.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "@${contact.username}",
+                            fontSize = 13.sp,
+                            color = CallSubtleText
                         )
                     }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = stringResource(R.string.call_e2e_subtitle),
+                        fontSize = 14.sp,
+                        color = CallSubtleText
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = if (elapsedSec < 2L) "Connecting secure call…" else formatDurationTimer(elapsedSec - 1L),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MintOnlineGlow,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
 
-                    IconButton(
-                        onClick = onEndCall,
+                // Middle: Large 170dp circular profile picture of the other user centered
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Box(
                         modifier = Modifier
-                            .size(60.dp)
+                            .size(182.dp)
                             .clip(CircleShape)
-                            .background(DangerRed)
-                            .testTag("end_voice_call_button")
+                            .background(Color.White.copy(alpha = 0.05f)),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.CallEnd,
-                            contentDescription = "End call",
-                            tint = Color.White,
-                            modifier = Modifier.size(28.dp)
+                        AvatarCircle(
+                            name = contact.name,
+                            photoData = contact.photoData,
+                            size = 170.dp,
+                            borderColor = Color.White.copy(alpha = 0.15f)
                         )
                     }
+                    if (!callBannerNote.isNullOrBlank()) {
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = Color.White.copy(alpha = 0.12f)
+                        ) {
+                            Text(
+                                text = callBannerNote.orEmpty(),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                            )
+                        }
+                    }
+                }
 
-                    IconButton(
-                        onClick = { speakerOn = !speakerOn },
+                // Bottom: Rounded dark control panel with 3x2 grid (Speaker, Video, Mute / More, Share, End)
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = 520.dp),
+                    shape = RoundedCornerShape(22.dp),
+                    color = callPanelColor,
+                    tonalElevation = 6.dp
+                ) {
+                    Column(
                         modifier = Modifier
-                            .size(52.dp)
-                            .clip(CircleShape)
-                            .background(if (speakerOn) Color.White else Color.White.copy(alpha = 0.14f))
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.VolumeUp,
-                            contentDescription = "Speaker",
-                            tint = if (speakerOn) EmeraldDeep else Color.White
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp)
+                        ) {
+                            CallControlButton(
+                                icon = Icons.Default.VolumeUp,
+                                label = stringResource(R.string.call_speaker),
+                                isActive = speakerOn,
+                                testTag = "call_speaker_button",
+                                modifier = Modifier.weight(1f),
+                                onClick = {
+                                    speakerOn = !speakerOn
+                                    runCatching { audioManager?.isSpeakerphoneOn = speakerOn }
+                                    callBannerNote = if (speakerOn) "Speakerphone on" else "Speakerphone off"
+                                }
+                            )
+                            CallControlButton(
+                                icon = Icons.Default.Videocam,
+                                label = stringResource(R.string.call_video),
+                                isActive = videoOn,
+                                testTag = "call_video_button",
+                                modifier = Modifier.weight(1f),
+                                onClick = {
+                                    videoOn = !videoOn
+                                    callBannerNote = if (videoOn) "Video requested" else "Voice-only call"
+                                }
+                            )
+                            CallControlButton(
+                                icon = if (micMuted) Icons.Default.MicOff else Icons.Default.Mic,
+                                label = stringResource(R.string.call_mute),
+                                isActive = micMuted,
+                                testTag = "call_mute_button",
+                                modifier = Modifier.weight(1f),
+                                onClick = {
+                                    micMuted = !micMuted
+                                    runCatching { audioManager?.isMicrophoneMute = micMuted }
+                                    callBannerNote = if (micMuted) "Microphone muted" else "Microphone unmuted"
+                                }
+                            )
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp)
+                        ) {
+                            CallControlButton(
+                                icon = Icons.Default.MoreHoriz,
+                                label = stringResource(R.string.call_more),
+                                isActive = moreActive,
+                                testTag = "call_more_button",
+                                modifier = Modifier.weight(1f),
+                                onClick = {
+                                    moreActive = !moreActive
+                                    callBannerNote = "End-to-end encrypted audio"
+                                }
+                            )
+                            CallControlButton(
+                                icon = Icons.Default.Share,
+                                label = stringResource(R.string.call_share),
+                                isActive = shareActive,
+                                testTag = "call_share_button",
+                                modifier = Modifier.weight(1f),
+                                onClick = {
+                                    shareActive = !shareActive
+                                    callBannerNote = "Screen sharing ready"
+                                }
+                            )
+                            CallControlButton(
+                                icon = Icons.Default.CallEnd,
+                                label = stringResource(R.string.call_end),
+                                isActive = false,
+                                isDanger = true,
+                                testTag = "end_voice_call_button",
+                                modifier = Modifier.weight(1f),
+                                onClick = onEndCall
+                            )
+                        }
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun CallControlButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    isActive: Boolean,
+    testTag: String,
+    modifier: Modifier = Modifier,
+    isDanger: Boolean = false,
+    onClick: () -> Unit
+) {
+    val containerColor = when {
+        isDanger -> CallEndRed
+        isActive -> Color.White
+        else -> Color.White.copy(alpha = 0.08f)
+    }
+    val contentColor = when {
+        isDanger -> Color.White
+        isActive -> Color(0xFF111827)
+        else -> Color.White
+    }
+    Surface(
+        modifier = modifier
+            .minimumInteractiveComponentSize()
+            .heightIn(min = 68.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick)
+            .testTag(testTag),
+        shape = RoundedCornerShape(16.dp),
+        color = containerColor
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = contentColor,
+                modifier = Modifier.size(22.dp)
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = label,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                color = contentColor,
+                maxLines = 1,
+                overflow = TextOverflow.Clip
+            )
         }
     }
 }

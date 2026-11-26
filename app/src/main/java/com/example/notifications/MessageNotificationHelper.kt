@@ -18,29 +18,44 @@ import com.example.R
 
 object MessageNotificationHelper {
     const val CHANNEL_ID = "nomi_messages_alerts"
+    const val ADMIN_CHANNEL_ID = "nomi_admin_moderation_alerts"
     const val EXTRA_CONTACT_ID = "extra_contact_id"
+    const val EXTRA_OPEN_ADMIN_ALERTS = "extra_open_admin_alerts"
 
     fun ensureChannel(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
-        if (manager.getNotificationChannel(CHANNEL_ID) != null) return
-
         val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_NOTIFICATION)
             .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
             .build()
 
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "Incoming Messages",
-            NotificationManager.IMPORTANCE_HIGH
-        ).apply {
-            description = "Alerts with sound for new Nomi Chat messages"
-            enableVibration(true)
-            setSound(soundUri, audioAttributes)
+        if (manager.getNotificationChannel(CHANNEL_ID) == null) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Incoming Messages",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Alerts with sound for new Nomi Chat messages"
+                enableVibration(true)
+                setSound(soundUri, audioAttributes)
+            }
+            manager.createNotificationChannel(channel)
         }
-        manager.createNotificationChannel(channel)
+
+        if (manager.getNotificationChannel(ADMIN_CHANNEL_ID) == null) {
+            val adminChannel = NotificationChannel(
+                ADMIN_CHANNEL_ID,
+                "Admin Moderation Alerts",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "High-priority moderation reports exclusively for verified admin"
+                enableVibration(true)
+                setSound(soundUri, audioAttributes)
+            }
+            manager.createNotificationChannel(adminChannel)
+        }
     }
 
     fun showIncomingMessageNotification(
@@ -91,6 +106,60 @@ object MessageNotificationHelper {
 
         runCatching {
             managerCompat.notify(contactId.hashCode(), notification)
+        }
+    }
+
+    fun showAdminModerationNotification(
+        context: Context,
+        alertId: String,
+        reportedHandle: String,
+        reporterHandle: String,
+        reason: String
+    ) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) return
+        }
+
+        ensureChannel(context)
+        val managerCompat = NotificationManagerCompat.from(context)
+        if (!managerCompat.areNotificationsEnabled()) return
+
+        val launchIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra(EXTRA_OPEN_ADMIN_ALERTS, true)
+        }
+        val requestCode = ("admin_" + alertId).hashCode()
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            requestCode,
+            launchIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val cleanReported = reportedHandle.trim().removePrefix("@").ifBlank { "user" }
+        val cleanReporter = reporterHandle.trim().removePrefix("@").ifBlank { "member" }
+        val body = "Reason: $reason • Reported by @$cleanReporter. Tap to Ignore, Ban, or Recovery."
+        val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+
+        val notification = NotificationCompat.Builder(context, ADMIN_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_notification_chat)
+            .setContentTitle("Admin Moderation Alert: @$cleanReported")
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setSound(soundUri)
+            .setDefaults(NotificationCompat.DEFAULT_VIBRATE or NotificationCompat.DEFAULT_LIGHTS)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        runCatching {
+            managerCompat.notify(requestCode, notification)
         }
     }
 }

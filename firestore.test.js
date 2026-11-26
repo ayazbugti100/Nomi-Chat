@@ -1094,3 +1094,259 @@ test("Username reservations enforce uniqueness, permanent retirement lock, and d
   await assertFails(aliceDb.collection("usernames").doc("alice_old").delete());
 });
 
+test("Public profiles allow authenticated single-doc get, block list scraping, and restrict writes to owner or verified admin", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const created = new Date(Date.now() - 5000);
+
+  await assertSucceeds(
+    aliceDb.collection("public_profiles").doc(ALICE_UID).set({
+      ownerUid: ALICE_UID,
+      username: "ayaz_bugti",
+      displayName: "Ayaz Bugti",
+      bio: "Building Apps & Creating Digital ...",
+      photoData: "data:image/jpeg;base64,PHOTO",
+      bannerData: "data:image/jpeg;base64,BANNER",
+      online: true,
+      showOnlineStatus: true,
+      accountStatus: "active",
+      bannedByAdmin: false,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  // Unauthenticated reads fail; authenticated get succeeds; list scraping fails
+  await assertFails(unauthDb.collection("public_profiles").doc(ALICE_UID).get());
+  await assertSucceeds(bobDb.collection("public_profiles").doc(ALICE_UID).get());
+  await assertFails(bobDb.collection("public_profiles").get());
+
+  // Owner can update username and profile details without affecting admin status
+  await assertSucceeds(
+    aliceDb.collection("public_profiles").doc(ALICE_UID).update({
+      username: "ayaz_bugti_v2",
+      displayName: "Ayaz Updated",
+      updatedAt: new Date(Date.now() - 1000),
+    })
+  );
+
+  // Regular user cannot self-ban or tamper with another user's public profile
+  await assertFails(
+    aliceDb.collection("public_profiles").doc(ALICE_UID).update({
+      accountStatus: "banned",
+      bannedByAdmin: true,
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+  await assertFails(
+    bobDb.collection("public_profiles").doc(ALICE_UID).update({
+      displayName: "Hacked",
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+});
+
+test("Admin Gmail lock restricts admin_config and moderation_alerts exclusively to verified ayazbugti100@gmail.com and supports Ignore, Ban, and Recovery", async () => {
+  const ADMIN_UID = "admin_ayaz_uid";
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID, {
+    email: "ayazbugti100@gmail.com",
+    email_verified: true,
+  }).firestore();
+  const unverifiedAdminDb = testEnv.authenticatedContext(ADMIN_UID, {
+    email: "ayazbugti100@gmail.com",
+    email_verified: false,
+  }).firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, {
+    email: "alice@gmail.com",
+    email_verified: true,
+  }).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID, {
+    email: "bob@gmail.com",
+    email_verified: true,
+  }).firestore();
+  const created = new Date(Date.now() - 6000);
+
+  // Regular user and unverified email cannot create or read admin_config
+  await assertFails(
+    aliceDb.collection("admin_config").doc("primary").set({
+      lockedGmail: "ayazbugti100@gmail.com",
+      adminUid: ALICE_UID,
+      enabled: true,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+  await assertFails(
+    unverifiedAdminDb.collection("admin_config").doc("primary").set({
+      lockedGmail: "ayazbugti100@gmail.com",
+      adminUid: ADMIN_UID,
+      enabled: true,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  // Verified ayazbugti100@gmail.com can persist admin_config permanently and cannot delete it
+  await assertSucceeds(
+    adminDb.collection("admin_config").doc("primary").set({
+      lockedGmail: "ayazbugti100@gmail.com",
+      adminUid: ADMIN_UID,
+      enabled: true,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+  await assertSucceeds(
+    adminDb.collection("admin_config").doc("primary").update({
+      lockedGmail: "ayazbugti100@gmail.com",
+      adminUid: ADMIN_UID,
+      enabled: true,
+      updatedAt: new Date(Date.now() - 2000),
+    })
+  );
+  await assertFails(aliceDb.collection("admin_config").doc("primary").get());
+  await assertFails(adminDb.collection("admin_config").doc("primary").delete());
+
+  // Set up Bob's profile, public_profile, and directory entry (0 reports)
+  await assertSucceeds(
+    bobDb.collection("users").doc(BOB_UID).set({
+      userId: BOB_UID,
+      displayName: "Bob Target",
+      username: "bob_target",
+      bio: "Bio",
+      dob: "1998-02-02",
+      provider: "google",
+      online: true,
+      verified: false,
+      premiumUnlocked: false,
+      accountStatus: "active",
+      reportCount: 0,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("public_profiles").doc(BOB_UID).set({
+      ownerUid: BOB_UID,
+      username: "bob_target",
+      displayName: "Bob Target",
+      online: true,
+      accountStatus: "active",
+      bannedByAdmin: false,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("directory").doc("bob_target").set({
+      ownerUid: BOB_UID,
+      username: "bob_target",
+      displayName: "Bob Target",
+      provider: "google",
+      accountStatus: "active",
+      reportCount: 0,
+      reportedByUids: [],
+      bannedByAdmin: false,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  // Alice submits a moderation alert against Bob
+  const alertRef = aliceDb.collection("moderation_alerts").doc("alert_bob_1");
+  await assertSucceeds(
+    alertRef.set({
+      reportedUid: BOB_UID,
+      reportedUsername: "bob_target",
+      reportedDisplayName: "Bob Target",
+      reporterUid: ALICE_UID,
+      reporterUsername: "alice",
+      reason: "Abuse",
+      status: "pending",
+      createdAtMs: Date.now() - 1000,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  // Regular users cannot read, list, update, or delete moderation_alerts
+  await assertFails(aliceDb.collection("moderation_alerts").doc("alert_bob_1").get());
+  await assertFails(aliceDb.collection("moderation_alerts").get());
+  await assertFails(
+    aliceDb.collection("moderation_alerts").doc("alert_bob_1").update({
+      status: "banned",
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+
+  // Verified admin can list and read alerts, and Ignore/Ban/Recover Bob directly across DB collections
+  await assertSucceeds(adminDb.collection("moderation_alerts").get());
+
+  // 1) Ignore action
+  await assertSucceeds(
+    adminDb.collection("moderation_alerts").doc("alert_bob_1").update({
+      status: "ignored",
+      adminEmail: "ayazbugti100@gmail.com",
+      resolvedAtMs: Date.now(),
+      updatedAt: new Date(Date.now() - 400),
+    })
+  );
+
+  // 2) Ban action even with < 10 reports
+  const adminBatchBan = adminDb.batch();
+  const banTime = new Date(Date.now() - 300);
+  adminBatchBan.update(adminDb.collection("moderation_alerts").doc("alert_bob_1"), {
+    status: "banned",
+    adminEmail: "ayazbugti100@gmail.com",
+    resolvedAtMs: Date.now(),
+    updatedAt: banTime,
+  });
+  adminBatchBan.update(adminDb.collection("users").doc(BOB_UID), {
+    accountStatus: "banned",
+    bannedByAdmin: true,
+    updatedAt: banTime,
+  });
+  adminBatchBan.update(adminDb.collection("public_profiles").doc(BOB_UID), {
+    accountStatus: "banned",
+    bannedByAdmin: true,
+    updatedAt: banTime,
+  });
+  adminBatchBan.update(adminDb.collection("directory").doc("bob_target"), {
+    accountStatus: "banned",
+    bannedByAdmin: true,
+    updatedAt: banTime,
+  });
+  await assertSucceeds(adminBatchBan.commit());
+
+  // 3) Recovery / Unban action restoring Bob cleanly
+  const adminBatchRecover = adminDb.batch();
+  const recoverTime = new Date(Date.now() - 100);
+  adminBatchRecover.update(adminDb.collection("moderation_alerts").doc("alert_bob_1"), {
+    status: "recovered",
+    adminEmail: "ayazbugti100@gmail.com",
+    resolvedAtMs: Date.now(),
+    updatedAt: recoverTime,
+  });
+  adminBatchRecover.update(adminDb.collection("users").doc(BOB_UID), {
+    accountStatus: "active",
+    reportCount: 0,
+    bannedByAdmin: false,
+    updatedAt: recoverTime,
+  });
+  adminBatchRecover.update(adminDb.collection("public_profiles").doc(BOB_UID), {
+    accountStatus: "active",
+    bannedByAdmin: false,
+    updatedAt: recoverTime,
+  });
+  adminBatchRecover.update(adminDb.collection("directory").doc("bob_target"), {
+    accountStatus: "active",
+    reportCount: 0,
+    reportedByUids: [],
+    bannedByAdmin: false,
+    updatedAt: recoverTime,
+  });
+  await assertSucceeds(adminBatchRecover.commit());
+});
+
+

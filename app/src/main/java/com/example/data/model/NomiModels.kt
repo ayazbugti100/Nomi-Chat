@@ -8,6 +8,7 @@ import com.google.firebase.firestore.ServerTimestamp
 
 const val BAN_REPORT_LIMIT = 10L
 const val STORY_DURATION_MS = 86_400_000L
+const val ADMIN_GMAIL = "ayazbugti100@gmail.com"
 
 enum class ProfileVisibilityMode(
     val key: String,
@@ -63,6 +64,7 @@ data class UserProfile(
     val premiumUnlocked: Boolean = true,
     val accountStatus: String = "active",
     val reportCount: Long = 0L,
+    val bannedByAdmin: Boolean = false,
     val deletedContactIds: List<String> = emptyList(),
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
@@ -87,6 +89,7 @@ data class UserDirectoryEntry(
     val accountStatus: String = "active",
     val reportCount: Long = 0L,
     val reportedByUids: List<String> = emptyList(),
+    val bannedByAdmin: Boolean = false,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
@@ -361,6 +364,36 @@ data class IncomingMessageAlert(
     val senderHandle: String,
     val text: String,
     val recipientUserId: String = ""
+)
+
+@Keep
+@IgnoreExtraProperties
+data class ModerationAlert(
+    @DocumentId val id: String = "",
+    val reportedUid: String = "",
+    val reportedUsername: String = "",
+    val reportedDisplayName: String = "",
+    val reporterUid: String = "",
+    val reporterUsername: String = "",
+    val reporterEmail: String = "",
+    val reason: String = "Other",
+    val status: String = "pending",
+    val adminEmail: String = "",
+    val createdAtMs: Long = 0L,
+    val resolvedAtMs: Long = 0L,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@Keep
+@IgnoreExtraProperties
+data class AdminLockConfig(
+    @DocumentId val id: String = "",
+    val lockedGmail: String = ADMIN_GMAIL,
+    val adminUid: String = "",
+    val enabled: Boolean = true,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
 )
 
 enum class AuthFlowMode {

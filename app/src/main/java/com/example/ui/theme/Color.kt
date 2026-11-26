@@ -21,14 +21,32 @@ val LightOnSurface = Color(0xFF111B21)
 val LightOnSurfaceMuted = Color(0xFF667781)
 val LightOutline = Color(0xFFDCE3DF)
 
-// Dark Surface Tokens
-val DarkBackground = Color(0xFF0B1410)
-val DarkSurface = Color(0xFF121E19)
-val DarkSurfaceVariant = Color(0xFF1A2A23)
+// Dark Surface Tokens (Black Theme)
+val DarkBackground = Color(0xFF0B0F12)
+val DarkSurface = Color(0xFF161C20)
+val DarkSurfaceVariant = Color(0xFF1E262B)
 val DarkBubbleMe = Color(0xFF0B4D32)
-val DarkOnSurface = Color(0xFFEAF3EE)
-val DarkOnSurfaceMuted = Color(0xFF9AB0A5)
-val DarkOutline = Color(0xFF263B32)
+val DarkOnSurface = Color(0xFFF9FAFB)
+val DarkOnSurfaceMuted = Color(0xFF9CA3AF)
+val DarkOutline = Color(0xFF283238)
+
+// Voice Bubble & Call Screen Tokens
+val VoiceMeLight = Color(0xFFFFFFFF)
+val VoiceMeDark = Color(0xFF1E262B)
+val VoiceOtherLight = Color(0xFFDCFCE7)
+val VoiceOtherDark = Color(0xFF143624)
+val VoiceAccentBlue = Color(0xFF0EA5E9)
+val VoiceTextLight = Color(0xFF111827)
+val VoiceMutedLight = Color(0xFF6B7280)
+val VoiceTextDark = Color(0xFFF9FAFB)
+val VoiceMutedDark = Color(0xFF9CA3AF)
+
+val CallBgLight = Color(0xFF12171A)
+val CallBgDark = Color(0xFF090C0E)
+val CallPanelLight = Color(0xFF1F272C)
+val CallPanelDark = Color(0xFF182025)
+val CallEndRed = Color(0xFFE11D48)
+val CallSubtleText = Color(0xFF9CA3AF)
 
 // Semantic
 val ErrorRed = Color(0xFFD93025)
@@ -47,4 +65,5 @@ val BadgeLockedText = Color(0xFF856404)
 val BadgeBlockedBg = Color(0xFFFDE2E1)
 val BadgeBlockedText = Color(0xFFB42318)
 val DangerRed = Color(0xFFD92D20)
+
 
