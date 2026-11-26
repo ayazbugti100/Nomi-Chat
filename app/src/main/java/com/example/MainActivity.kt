@@ -203,7 +203,9 @@ fun AppNavigation(
     onConsumedOpenAdminAlerts: () -> Unit = {}
 ) {
     val appContext = LocalContext.current.applicationContext
-    val localAuthStore = remember(appContext) { LocalAuthStore(appContext) }
+    val localAuthStore = remember(appContext) {
+        runCatching { LocalAuthStore(appContext) }.getOrElse { LocalAuthStore(appContext) }
+    }
     val networkObserver = remember(appContext) { NetworkConnectivityObserver(appContext) }
     val networkStatus by remember(networkObserver) {
         networkObserver.observe()

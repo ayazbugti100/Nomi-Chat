@@ -21,6 +21,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.Cancel
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.DonutLarge
 import androidx.compose.material.icons.filled.Info
@@ -41,6 +43,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Surface
@@ -98,36 +101,119 @@ fun EditSingleFieldDialog(
 ) {
     var value by remember(initialValue) { mutableStateOf(initialValue) }
 
+    val cleanVal = if (sanitizeUsername) value.trim().removePrefix("@") else value.trim()
+    val isLengthValid = if (sanitizeUsername) cleanVal.length in 2..maxLength else cleanVal.isNotEmpty() && cleanVal.length <= maxLength
+    val isFormatValid = if (sanitizeUsername) cleanVal.matches(Regex("^[a-zA-Z0-9_.-]+$")) else true
+    val hasError = !errorText.isNullOrBlank()
+    val isValid = cleanVal.isNotEmpty() && isLengthValid && isFormatValid && !hasError
+    val isInvalid = hasError || (cleanVal.isNotEmpty() && (!isLengthValid || !isFormatValid))
+
+    val borderColor = when {
+        isInvalid -> ErrorRed
+        isValid -> Color(0xFF16A34A)
+        else -> MaterialTheme.colorScheme.outline
+    }
+
     AlertDialog(
         onDismissRequest = { if (!isSaving) onDismiss() },
         title = { Text(title, style = MaterialTheme.typography.titleMedium) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 OutlinedTextField(
                     value = value,
                     onValueChange = { raw ->
                         onClearError()
                         val cleaned = if (sanitizeUsername) {
-                            raw.lowercase().filter { it.isLetterOrDigit() || it == '_' || it == '.' }
+                            raw.lowercase().filter { it.isLetterOrDigit() || it == '_' || it == '.' || it == '-' }
                         } else raw
-                        if (cleaned.length <= maxLength) value = cleaned
+                        value = cleaned.take(maxLength)
                     },
                     label = { Text(label) },
                     singleLine = true,
                     enabled = !isSaving,
-                    isError = !errorText.isNullOrBlank(),
+                    isError = isInvalid,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = borderColor,
+                        unfocusedBorderColor = borderColor,
+                        errorBorderColor = ErrorRed,
+                        focusedLabelColor = if (isValid) Color(0xFF16A34A) else MaterialTheme.colorScheme.primary,
+                        cursorColor = EmeraldMid
+                    ),
+                    trailingIcon = {
+                        if (isValid) {
+                            Icon(
+                                imageVector = Icons.Default.CheckCircle,
+                                contentDescription = "Valid input",
+                                tint = Color(0xFF16A34A),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        } else if (isInvalid && (cleanVal.isNotEmpty() || hasError)) {
+                            Icon(
+                                imageVector = Icons.Default.Cancel,
+                                contentDescription = "Invalid input",
+                                tint = ErrorRed,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    },
                     shape = RoundedCornerShape(14.dp),
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("edit_field_input")
                 )
-                if (!errorText.isNullOrBlank()) {
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(modifier = Modifier.weight(1f, fill = false)) {
+                        if (hasError) {
+                            Text(
+                                text = errorText.orEmpty(),
+                                color = ErrorRed,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.testTag("edit_field_error")
+                            )
+                        } else if (cleanVal.isNotEmpty()) {
+                            if (!isLengthValid && sanitizeUsername) {
+                                Text(
+                                    text = "Minimum 2 characters",
+                                    color = ErrorRed,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            } else if (!isFormatValid && sanitizeUsername) {
+                                Text(
+                                    text = "Letters, numbers, _, ., - only",
+                                    color = ErrorRed,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            } else if (isValid && sanitizeUsername) {
+                                Text(
+                                    text = "Valid username",
+                                    color = Color(0xFF16A34A),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+                    }
+
                     Text(
-                        text = errorText,
-                        color = ErrorRed,
-                        style = MaterialTheme.typography.bodySmall,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.testTag("edit_field_error")
+                        text = "${cleanVal.length}/$maxLength",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = when {
+                            cleanVal.length >= maxLength -> ErrorRed
+                            isValid -> Color(0xFF16A34A)
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        fontWeight = if (cleanVal.length >= maxLength) FontWeight.Bold else FontWeight.Normal,
+                        modifier = Modifier
+                            .padding(start = 8.dp)
+                            .testTag("edit_field_char_count")
                     )
                 }
             }
@@ -135,7 +221,7 @@ fun EditSingleFieldDialog(
         confirmButton = {
             Button(
                 onClick = { onSave(value) },
-                enabled = !isSaving && value.trim().length >= if (sanitizeUsername) 2 else 1,
+                enabled = !isSaving && isValid,
                 colors = ButtonDefaults.buttonColors(containerColor = EmeraldDark),
                 modifier = Modifier.testTag("edit_field_save_button")
             ) {
@@ -213,6 +299,19 @@ fun AddContactDialog(
                 }
 
                 if (!isGroup) {
+                    val cleanInputUsername = username.trim().removePrefix("@")
+                    val isInputUsernameLengthValid = cleanInputUsername.length in 2..40
+                    val isInputUsernameFormatValid = cleanInputUsername.matches(Regex("^[a-zA-Z0-9_.-]+$"))
+                    val isSearchNotFound = usernameSearchState is UsernameSearchState.NotFound
+                    val isInputUsernameValid = cleanInputUsername.isNotEmpty() && isInputUsernameLengthValid && isInputUsernameFormatValid && !isSearchNotFound
+                    val isInputUsernameInvalid = isSearchNotFound || (cleanInputUsername.isNotEmpty() && (!isInputUsernameLengthValid || !isInputUsernameFormatValid))
+
+                    val usernameBorderColor = when {
+                        isInputUsernameInvalid -> ErrorRed
+                        isInputUsernameValid -> Color(0xFF16A34A)
+                        else -> MaterialTheme.colorScheme.outline
+                    }
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -221,17 +320,40 @@ fun AddContactDialog(
                         OutlinedTextField(
                             value = username,
                             onValueChange = { raw ->
-                                if (raw.length <= 42) {
-                                    username = raw.replace("\n", "")
-                                    if (usernameSearchState != UsernameSearchState.Idle) {
-                                        onResetSearch()
-                                    }
+                                val clean = raw.replace("\n", "").take(40)
+                                username = clean
+                                if (usernameSearchState != UsernameSearchState.Idle) {
+                                    onResetSearch()
                                 }
                             },
                             label = { Text("Username") },
                             placeholder = { Text("Enter exact @username") },
                             singleLine = true,
-                            isError = usernameSearchState is UsernameSearchState.NotFound,
+                            isError = isInputUsernameInvalid,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = usernameBorderColor,
+                                unfocusedBorderColor = usernameBorderColor,
+                                errorBorderColor = ErrorRed,
+                                focusedLabelColor = if (isInputUsernameValid) Color(0xFF16A34A) else MaterialTheme.colorScheme.primary,
+                                cursorColor = EmeraldMid
+                            ),
+                            trailingIcon = {
+                                if (isInputUsernameValid) {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckCircle,
+                                        contentDescription = "Valid username",
+                                        tint = Color(0xFF16A34A),
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                } else if (isInputUsernameInvalid && cleanInputUsername.isNotEmpty()) {
+                                    Icon(
+                                        imageVector = Icons.Default.Cancel,
+                                        contentDescription = "Invalid username",
+                                        tint = ErrorRed,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            },
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier
                                 .weight(1f)
@@ -240,7 +362,7 @@ fun AddContactDialog(
 
                         Button(
                             onClick = { onSearchUsername(username) },
-                            enabled = usernameSearchState !is UsernameSearchState.Loading,
+                            enabled = usernameSearchState !is UsernameSearchState.Loading && cleanInputUsername.length in 2..40,
                             colors = ButtonDefaults.buttonColors(containerColor = EmeraldMid),
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.testTag("find_username_button")
@@ -255,6 +377,49 @@ fun AddContactDialog(
                                 Text("Find", color = Color.White)
                             }
                         }
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (cleanInputUsername.isNotEmpty() && !isInputUsernameLengthValid) {
+                            Text(
+                                text = "Username must be 2–40 characters",
+                                color = ErrorRed,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        } else if (cleanInputUsername.isNotEmpty() && !isInputUsernameFormatValid) {
+                            Text(
+                                text = "Letters, numbers, _, ., - only",
+                                color = ErrorRed,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        } else if (isInputUsernameValid) {
+                            Text(
+                                text = "Valid format",
+                                color = Color(0xFF16A34A),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Medium
+                            )
+                        } else {
+                            Spacer(modifier = Modifier.weight(1f, fill = false))
+                        }
+
+                        Text(
+                            text = "${cleanInputUsername.length}/40",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = when {
+                                cleanInputUsername.length >= 40 -> ErrorRed
+                                isInputUsernameValid -> Color(0xFF16A34A)
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            fontWeight = if (cleanInputUsername.length >= 40) FontWeight.Bold else FontWeight.Normal,
+                            modifier = Modifier.testTag("add_contact_char_count")
+                        )
                     }
 
                     when (usernameSearchState) {
@@ -404,21 +569,85 @@ fun AddContactDialog(
                             .testTag("add_contact_name_input")
                     )
 
+                    val cleanGroupHandle = username.removePrefix("@").lowercase().filter { it.isLetterOrDigit() || it == '_' || it == '.' || it == '-' }
+                    val isGroupHandleTooShort = cleanGroupHandle.isNotEmpty() && cleanGroupHandle.length < 2
+                    val isGroupHandleValid = cleanGroupHandle.length in 2..32
+                    val groupHandleBorderColor = when {
+                        isGroupHandleTooShort -> ErrorRed
+                        isGroupHandleValid -> Color(0xFF16A34A)
+                        else -> MaterialTheme.colorScheme.outline
+                    }
+
                     OutlinedTextField(
                         value = username,
                         onValueChange = { raw ->
                             val cleaned = raw.removePrefix("@").lowercase()
                                 .filter { it.isLetterOrDigit() || it == '_' || it == '.' || it == '-' }
-                            if (cleaned.length <= 32) username = cleaned
+                            username = cleaned.take(32)
                         },
                         label = { Text("Group Handle (Optional)") },
                         placeholder = { Text("e.g., weekend_trip") },
                         singleLine = true,
+                        isError = isGroupHandleTooShort,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = groupHandleBorderColor,
+                            unfocusedBorderColor = groupHandleBorderColor,
+                            errorBorderColor = ErrorRed,
+                            focusedLabelColor = if (isGroupHandleValid) Color(0xFF16A34A) else MaterialTheme.colorScheme.primary,
+                            cursorColor = EmeraldMid
+                        ),
+                        trailingIcon = {
+                            if (isGroupHandleValid) {
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = "Valid handle",
+                                    tint = Color(0xFF16A34A),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            } else if (isGroupHandleTooShort) {
+                                Icon(
+                                    imageVector = Icons.Default.Cancel,
+                                    contentDescription = "Handle too short",
+                                    tint = ErrorRed,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        },
                         shape = RoundedCornerShape(12.dp),
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("add_contact_username_input")
                     )
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (isGroupHandleTooShort) {
+                            Text(
+                                text = "Handle must be at least 2 characters",
+                                color = ErrorRed,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        } else {
+                            Spacer(modifier = Modifier.weight(1f, fill = false))
+                        }
+
+                        Text(
+                            text = "${cleanGroupHandle.length}/32",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = when {
+                                cleanGroupHandle.length >= 32 -> ErrorRed
+                                isGroupHandleValid -> Color(0xFF16A34A)
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            fontWeight = if (cleanGroupHandle.length >= 32) FontWeight.Bold else FontWeight.Normal,
+                            modifier = Modifier.testTag("add_group_handle_char_count")
+                        )
+                    }
                 }
 
                 if (!offlinePopupMessage.isNullOrBlank()) {
@@ -1177,10 +1406,24 @@ fun EditProfileDialog(
                         .fillMaxWidth()
                         .testTag("edit_profile_name_input")
                 )
+                val cleanProfileUser = username.trim().removePrefix("@")
+                val isProfileUserLengthValid = cleanProfileUser.length in 2..40
+                val isProfileUserFormatValid = cleanProfileUser.matches(Regex("^[a-zA-Z0-9_.-]+$"))
+                val hasProfileUserError = !shownError.isNullOrBlank() && (shownError.contains("username", ignoreCase = true) || shownError.contains("taken", ignoreCase = true))
+                val isProfileUserValid = cleanProfileUser.isNotEmpty() && isProfileUserLengthValid && isProfileUserFormatValid && !hasProfileUserError
+                val isProfileUserInvalid = hasProfileUserError || (cleanProfileUser.isNotEmpty() && (!isProfileUserLengthValid || !isProfileUserFormatValid))
+
+                val profileUserBorderColor = when {
+                    isProfileUserInvalid -> ErrorRed
+                    isProfileUserValid -> Color(0xFF16A34A)
+                    else -> MaterialTheme.colorScheme.outline
+                }
+
                 OutlinedTextField(
                     value = username,
-                    onValueChange = {
-                        username = it.take(40)
+                    onValueChange = { raw ->
+                        val cleaned = raw.removePrefix("@").lowercase().filter { it.isLetterOrDigit() || it == '_' || it == '.' || it == '-' }
+                        username = cleaned.take(40)
                         validationError = null
                         onClearError()
                     },
@@ -1188,11 +1431,79 @@ fun EditProfileDialog(
                     prefix = { Text("@") },
                     singleLine = true,
                     enabled = !isSaving,
-                    isError = !shownError.isNullOrBlank(),
+                    isError = isProfileUserInvalid,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = profileUserBorderColor,
+                        unfocusedBorderColor = profileUserBorderColor,
+                        errorBorderColor = ErrorRed,
+                        focusedLabelColor = if (isProfileUserValid) Color(0xFF16A34A) else MaterialTheme.colorScheme.primary,
+                        cursorColor = EmeraldMid
+                    ),
+                    trailingIcon = {
+                        if (isProfileUserValid) {
+                            Icon(
+                                imageVector = Icons.Default.CheckCircle,
+                                contentDescription = "Valid username",
+                                tint = Color(0xFF16A34A),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        } else if (isProfileUserInvalid && cleanProfileUser.isNotEmpty()) {
+                            Icon(
+                                imageVector = Icons.Default.Cancel,
+                                contentDescription = "Invalid username",
+                                tint = ErrorRed,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    },
+                    shape = RoundedCornerShape(14.dp),
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("edit_profile_username_input")
                 )
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (cleanProfileUser.isNotEmpty() && !isProfileUserLengthValid) {
+                        Text(
+                            text = "Username must be 2–40 characters",
+                            color = ErrorRed,
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    } else if (cleanProfileUser.isNotEmpty() && !isProfileUserFormatValid) {
+                        Text(
+                            text = "Letters, numbers, _, ., - only",
+                            color = ErrorRed,
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    } else if (isProfileUserValid) {
+                        Text(
+                            text = "Valid username",
+                            color = Color(0xFF16A34A),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Medium
+                        )
+                    } else {
+                        Spacer(modifier = Modifier.weight(1f, fill = false))
+                    }
+
+                    Text(
+                        text = "${cleanProfileUser.length}/40",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = when {
+                            cleanProfileUser.length >= 40 -> ErrorRed
+                            isProfileUserValid -> Color(0xFF16A34A)
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        fontWeight = if (cleanProfileUser.length >= 40) FontWeight.Bold else FontWeight.Normal,
+                        modifier = Modifier.testTag("edit_profile_username_char_count")
+                    )
+                }
                 OutlinedTextField(
                     value = bio,
                     onValueChange = {

@@ -28,6 +28,8 @@ import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.Cake
 import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.Cancel
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
@@ -347,10 +349,24 @@ fun AuthScreen(
                                 .testTag("auth_display_name_input")
                         )
 
+                        val cleanSignUpUser = username.trim().removePrefix("@")
+                        val isSignUpUserLengthValid = cleanSignUpUser.length in 2..40
+                        val isSignUpUserFormatValid = cleanSignUpUser.matches(Regex("^[a-zA-Z0-9_.-]+$"))
+                        val hasSignUpUsernameError = errorMessage != null && (errorMessage!!.contains("username", ignoreCase = true) || errorMessage!!.contains("taken", ignoreCase = true))
+                        val isSignUpUserValid = cleanSignUpUser.isNotEmpty() && isSignUpUserLengthValid && isSignUpUserFormatValid && !hasSignUpUsernameError
+                        val isSignUpUserInvalid = hasSignUpUsernameError || (cleanSignUpUser.isNotEmpty() && (!isSignUpUserLengthValid || !isSignUpUserFormatValid))
+
+                        val signUpUserBorderColor = when {
+                            isSignUpUserInvalid -> ErrorRed
+                            isSignUpUserValid -> Color(0xFF16A34A)
+                            else -> MaterialTheme.colorScheme.outline
+                        }
+
                         OutlinedTextField(
                             value = username,
-                            onValueChange = {
-                                username = NomiChatRepository.normalizeUsername(it)
+                            onValueChange = { raw ->
+                                val cleaned = raw.removePrefix("@").lowercase().filter { it.isLetterOrDigit() || it == '_' || it == '.' || it == '-' }
+                                username = cleaned.take(40)
                                 clearError()
                             },
                             label = { Text("Username (Unique)") },
@@ -358,16 +374,80 @@ fun AuthScreen(
                             leadingIcon = {
                                 Icon(Icons.Default.AlternateEmail, contentDescription = null, tint = EmeraldMid)
                             },
+                            trailingIcon = {
+                                if (isSignUpUserValid) {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckCircle,
+                                        contentDescription = "Valid username",
+                                        tint = Color(0xFF16A34A),
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                } else if (isSignUpUserInvalid && cleanSignUpUser.isNotEmpty()) {
+                                    Icon(
+                                        imageVector = Icons.Default.Cancel,
+                                        contentDescription = "Invalid username",
+                                        tint = ErrorRed,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            },
                             singleLine = true,
+                            isError = isSignUpUserInvalid,
                             shape = RoundedCornerShape(14.dp),
                             colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = EmeraldMid,
-                                unfocusedBorderColor = MaterialTheme.colorScheme.outline
+                                focusedBorderColor = signUpUserBorderColor,
+                                unfocusedBorderColor = signUpUserBorderColor,
+                                errorBorderColor = ErrorRed,
+                                focusedLabelColor = if (isSignUpUserValid) Color(0xFF16A34A) else MaterialTheme.colorScheme.primary,
+                                cursorColor = EmeraldMid
                             ),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("auth_username_input")
                         )
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            if (cleanSignUpUser.isNotEmpty() && !isSignUpUserLengthValid) {
+                                Text(
+                                    text = "Username must be 2–40 characters",
+                                    color = ErrorRed,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            } else if (cleanSignUpUser.isNotEmpty() && !isSignUpUserFormatValid) {
+                                Text(
+                                    text = "Letters, numbers, _, ., - only",
+                                    color = ErrorRed,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            } else if (isSignUpUserValid) {
+                                Text(
+                                    text = "Valid username format",
+                                    color = Color(0xFF16A34A),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            } else {
+                                Spacer(modifier = Modifier.weight(1f, fill = false))
+                            }
+
+                            Text(
+                                text = "${cleanSignUpUser.length}/40",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = when {
+                                    cleanSignUpUser.length >= 40 -> ErrorRed
+                                    isSignUpUserValid -> Color(0xFF16A34A)
+                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                fontWeight = if (cleanSignUpUser.length >= 40) FontWeight.Bold else FontWeight.Normal,
+                                modifier = Modifier.testTag("auth_username_char_count")
+                            )
+                        }
 
                         OutlinedTextField(
                             value = dob,
@@ -502,10 +582,22 @@ fun AuthScreen(
                                 modifier = Modifier.padding(bottom = 6.dp)
                             )
 
+                            val cleanLoginId = loginIdentifier.trim().removePrefix("@")
+                            val isLoginIdLengthValid = cleanLoginId.length in 2..40
+                            val hasLoginError = errorMessage != null && (errorMessage!!.contains("user", ignoreCase = true) || errorMessage!!.contains("found", ignoreCase = true))
+                            val isLoginIdValid = cleanLoginId.isNotEmpty() && isLoginIdLengthValid && !hasLoginError
+                            val isLoginIdInvalid = hasLoginError || (cleanLoginId.isNotEmpty() && !isLoginIdLengthValid)
+
+                            val loginIdBorderColor = when {
+                                isLoginIdInvalid -> ErrorRed
+                                isLoginIdValid -> Color(0xFF16A34A)
+                                else -> LoginInputBorder
+                            }
+
                             OutlinedTextField(
                                 value = loginIdentifier,
-                                onValueChange = {
-                                    loginIdentifier = it
+                                onValueChange = { raw ->
+                                    loginIdentifier = raw.take(40)
                                     clearError()
                                 },
                                 placeholder = { Text("Enter your username") },
@@ -513,20 +605,77 @@ fun AuthScreen(
                                     Icon(
                                         imageVector = Icons.Default.AlternateEmail,
                                         contentDescription = null,
-                                        tint = LoginGreenStart
+                                        tint = if (isLoginIdValid) Color(0xFF16A34A) else LoginGreenStart
                                     )
                                 },
+                                trailingIcon = {
+                                    if (isLoginIdValid) {
+                                        Icon(
+                                            imageVector = Icons.Default.CheckCircle,
+                                            contentDescription = "Valid identifier",
+                                            tint = Color(0xFF16A34A),
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    } else if (isLoginIdInvalid && cleanLoginId.isNotEmpty()) {
+                                        Icon(
+                                            imageVector = Icons.Default.Cancel,
+                                            contentDescription = "Invalid identifier",
+                                            tint = ErrorRed,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                },
                                 singleLine = true,
+                                isError = isLoginIdInvalid,
                                 shape = RoundedCornerShape(12.dp),
                                 colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = LoginGreenStart,
-                                    unfocusedBorderColor = LoginInputBorder
+                                    focusedBorderColor = loginIdBorderColor,
+                                    unfocusedBorderColor = loginIdBorderColor,
+                                    errorBorderColor = ErrorRed,
+                                    cursorColor = LoginGreenStart
                                 ),
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(bottom = 14.dp)
                                     .testTag("auth_login_identifier_input")
                             )
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 4.dp, vertical = 2.dp)
+                                    .padding(bottom = 10.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                if (cleanLoginId.isNotEmpty() && !isLoginIdLengthValid) {
+                                    Text(
+                                        text = "Username must be 2–40 characters",
+                                        color = ErrorRed,
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                } else if (isLoginIdValid) {
+                                    Text(
+                                        text = "Valid format",
+                                        color = Color(0xFF16A34A),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                } else {
+                                    Spacer(modifier = Modifier.weight(1f, fill = false))
+                                }
+
+                                Text(
+                                    text = "${cleanLoginId.length}/40",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = when {
+                                        cleanLoginId.length >= 40 -> ErrorRed
+                                        isLoginIdValid -> Color(0xFF16A34A)
+                                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                    fontWeight = if (cleanLoginId.length >= 40) FontWeight.Bold else FontWeight.Normal,
+                                    modifier = Modifier.testTag("auth_login_identifier_char_count")
+                                )
+                            }
 
                             Text(
                                 text = "Password",
