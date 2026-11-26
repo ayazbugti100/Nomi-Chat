@@ -60,7 +60,7 @@ data class UserProfile(
     val maxProfileViewers: Long = 0L,
     val online: Boolean = true,
     val showOnlineStatus: Boolean = true,
-    val verified: Boolean = true,
+    val verified: Boolean = false,
     val premiumUnlocked: Boolean = true,
     val accountStatus: String = "active",
     val reportCount: Long = 0L,
@@ -86,6 +86,7 @@ data class UserDirectoryEntry(
     val maxProfileViewers: Long = 0L,
     val online: Boolean = false,
     val showOnlineStatus: Boolean = true,
+    val verified: Boolean = false,
     val accountStatus: String = "active",
     val reportCount: Long = 0L,
     val reportedByUids: List<String> = emptyList(),
@@ -140,6 +141,7 @@ data class ChatThread(
     val customRenamed: Boolean = false,
     val peerUid: String = "",
     val isRegisteredPeer: Boolean = false,
+    val verified: Boolean = false,
     val accountStatus: String = "active",
     val reportCount: Long = 0L,
     val reportedBy: List<String> = emptyList(),
@@ -153,7 +155,8 @@ data class DirectoryLookupResult(
     val ownerUid: String = "",
     val bio: String = "",
     val photoData: String? = null,
-    val bannerData: String? = null
+    val bannerData: String? = null,
+    val verified: Boolean = false
 )
 
 enum class StoryFontStyle(

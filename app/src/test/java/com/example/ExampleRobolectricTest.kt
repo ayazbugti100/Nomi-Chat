@@ -1035,7 +1035,7 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun `change username permanently locks old handle so lookups and logins return Account Not Found and reuse is rejected`() = runTest {
+  fun `change username releases old handle until reclaimed and allows switching back to previous username`() = runTest {
     val store = LocalAuthStore(context)
     store.signUpUser("Farhan Khan", "farhan_k", "2000-01-01", "pass123", "pass123")
     store.signUpUser("Searcher", "searcher_u", "2000-01-01", "pass123", "pass123")
@@ -1053,16 +1053,16 @@ class ExampleRobolectricTest {
     )
     assertTrue(changeRes.isSuccess)
 
-    // Old username lookup must now fail with null / Account Not Found
+    // Old username lookup must now fail with null / Account Not Found while unclaimed
     val oldLookup = store.lookupUserByUsername("@farhan_k").getOrNull()
     assertEquals(null, oldLookup)
 
-    // Adding or searching old username fails with "Account Not Found"
+    // Adding or searching old unclaimed username fails with "Account Not Found"
     val addOldRes = store.addContact("searcher_u", "", "@farhan_k", "", "chat")
     assertTrue(addOldRes.isFailure)
     assertEquals("Account Not Found", addOldRes.exceptionOrNull()?.message)
 
-    // Returning login with the invalidated old username also returns "Account Not Found"
+    // Returning login with the unclaimed old username also returns "Account Not Found"
     val oldLoginRes = store.returningLogin("farhan_k", "pass123")
     assertEquals(LocalAuthOutcome.Error("Account Not Found"), oldLoginRes)
 
@@ -1073,15 +1073,24 @@ class ExampleRobolectricTest {
     assertEquals("Farhan Pro", newLookup?.displayName)
     assertEquals(LocalAuthOutcome.Success("farhan_pro"), store.returningLogin("farhan_pro", "pass123"))
 
-    // Previously used old username is permanently locked against both sign-up and username changes
-    val reRegisterOld = store.signUpUser("New Farhan", "farhan_k", "2002-02-02", "pass123", "pass123")
-    assertEquals(
-      LocalAuthOutcome.Error("This username is already taken / already added."),
-      reRegisterOld
-    )
-    val hijackAttempt = store.updateProfile(usernameKey = "searcher_u", newUsername = "farhan_k")
+    // Active username collision is still rejected when another user tries to take @farhan_pro
+    val hijackAttempt = store.updateProfile(usernameKey = "searcher_u", newUsername = "farhan_pro")
     assertTrue(hijackAttempt.isFailure)
     assertEquals("This username is already taken / already added.", hijackAttempt.exceptionOrNull()?.message)
+
+    // Farhan dislikes @farhan_pro and switches back to previous username @farhan_k smoothly
+    val switchBackRes = store.updateProfile(
+      usernameKey = "farhan_pro",
+      newUsername = "farhan_k",
+      displayName = "Farhan Back"
+    )
+    assertTrue(switchBackRes.isSuccess)
+    val reclaimedLookup = store.lookupUserByUsername("@farhan_k").getOrNull()
+    assertNotNull(reclaimedLookup)
+    assertEquals("farhan_k", reclaimedLookup?.username)
+    assertEquals("Farhan Back", reclaimedLookup?.displayName)
+    assertEquals(LocalAuthOutcome.Success("farhan_k"), store.returningLogin("farhan_k", "pass123"))
+    assertEquals(null, store.lookupUserByUsername("@farhan_pro").getOrNull())
   }
 
   @Test

@@ -56,6 +56,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.DeleteOutline
@@ -351,6 +352,14 @@ fun ConversationScreen(
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f, fill = false)
                             )
+                            if (contact.verified) {
+                                Icon(
+                                    imageVector = Icons.Default.Verified,
+                                    contentDescription = "Verified account",
+                                    tint = Color(0xFF1E9BF0),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
                             if (contact.muted) {
                                 Icon(
                                     imageVector = Icons.Outlined.NotificationsOff,

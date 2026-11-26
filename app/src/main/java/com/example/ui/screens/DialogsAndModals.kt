@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.DonutLarge
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.WorkspacePremium
@@ -70,6 +71,7 @@ import com.example.R
 import com.example.data.model.ChatThread
 import com.example.data.model.ThemeMode
 import com.example.ui.components.AvatarCircle
+import com.example.ui.components.EmeraldWaveHeader
 import com.example.ui.theme.EmeraldBright
 import com.example.ui.theme.EmeraldDark
 import com.example.ui.theme.EmeraldDeep
@@ -292,25 +294,50 @@ fun AddContactDialog(
                                 color = MintLight,
                                 border = BorderStroke(1.dp, EmeraldMid.copy(alpha = 0.45f))
                             ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    AvatarCircle(
-                                        name = usernameSearchState.result.displayName,
-                                        photoData = usernameSearchState.result.photoData,
-                                        size = 40.dp
-                                    )
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = usernameSearchState.result.displayName,
-                                            style = MaterialTheme.typography.titleSmall,
-                                            color = EmeraldDeep,
-                                            fontWeight = FontWeight.Bold
+                                Column(modifier = Modifier.fillMaxWidth()) {
+                                    if (!usernameSearchState.result.bannerData.isNullOrBlank()) {
+                                        EmeraldWaveHeader(
+                                            bannerData = usernameSearchState.result.bannerData,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(64.dp)
+                                        ) {}
+                                    }
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        AvatarCircle(
+                                            name = usernameSearchState.result.displayName,
+                                            photoData = usernameSearchState.result.photoData,
+                                            size = 40.dp
                                         )
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                            ) {
+                                                Text(
+                                                    text = usernameSearchState.result.displayName,
+                                                    style = MaterialTheme.typography.titleSmall,
+                                                    color = EmeraldDeep,
+                                                    fontWeight = FontWeight.Bold,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f, fill = false)
+                                                )
+                                                if (usernameSearchState.result.verified) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Verified,
+                                                        contentDescription = "Verified account",
+                                                        tint = Color(0xFF1E9BF0),
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                }
+                                            }
                                         Text(
                                             text = "@${usernameSearchState.result.username}",
                                             style = MaterialTheme.typography.labelSmall,
@@ -334,6 +361,7 @@ fun AddContactDialog(
                                         modifier = Modifier.testTag("add_found_user_button")
                                     ) {
                                         Text("Add", color = Color.White)
+                                    }
                                     }
                                 }
                             }
@@ -776,33 +804,34 @@ fun AvatarPreviewDialog(
                     }
                 }
 
-                // Spacious circular profile showcase displaying the full photo cleanly without cropping
-                Box(
+                // Spacious circular profile showcase displaying the full photo cleanly with live banner backdrop
+                EmeraldWaveHeader(
+                    bannerData = thread.bannerData,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(236.dp)
-                        .background(
-                            brush = Brush.verticalGradient(
-                                listOf(EmeraldDeep, EmeraldDark, EmeraldMid)
-                            )
-                        )
-                        .padding(18.dp),
-                    contentAlignment = Alignment.Center
                 ) {
-                    AvatarCircle(
-                        name = thread.name,
-                        photoData = thread.photoData,
-                        isGroup = isGroup,
-                        isChannel = isChannel,
-                        showOnlineDot = isOnline,
-                        hasStoryRing = hasActiveStory,
-                        storyRingSeen = storyRingSeen,
-                        size = 188.dp,
-                        borderColor = Color.White.copy(alpha = 0.85f),
-                        imageContentScale = ContentScale.Fit,
-                        imageBackgroundColor = Color(0xFF0A241A),
-                        modifier = Modifier.testTag("avatar_preview_circle")
-                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(18.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        AvatarCircle(
+                            name = thread.name,
+                            photoData = thread.photoData,
+                            isGroup = isGroup,
+                            isChannel = isChannel,
+                            showOnlineDot = isOnline,
+                            hasStoryRing = hasActiveStory,
+                            storyRingSeen = storyRingSeen,
+                            size = 188.dp,
+                            borderColor = Color.White.copy(alpha = 0.85f),
+                            imageContentScale = ContentScale.Fit,
+                            imageBackgroundColor = Color(0xFF0A241A),
+                            modifier = Modifier.testTag("avatar_preview_circle")
+                        )
+                    }
                 }
 
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
@@ -895,6 +924,13 @@ fun ContactProfileDialog(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                EmeraldWaveHeader(
+                    bannerData = contact.bannerData,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(88.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                ) {}
                 AvatarCircle(
                     name = contact.name,
                     photoData = contact.photoData,
@@ -905,11 +941,24 @@ fun ContactProfileDialog(
                     imageContentScale = ContentScale.Fit,
                     imageBackgroundColor = Color(0xFF0A241A)
                 )
-                Text(
-                    text = contact.name,
-                    style = MaterialTheme.typography.titleLarge,
-                    textAlign = TextAlign.Center
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = contact.name,
+                        style = MaterialTheme.typography.titleLarge,
+                        textAlign = TextAlign.Center
+                    )
+                    if (contact.verified) {
+                        Icon(
+                            imageVector = Icons.Default.Verified,
+                            contentDescription = "Verified account",
+                            tint = Color(0xFF1E9BF0),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
                 if (contact.username.isNotBlank()) {
                     Text(
                         text = "@${contact.username}",

@@ -84,12 +84,15 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import coil.request.CachePolicy
+import coil.request.ImageRequest
 import com.example.R
 import com.example.data.model.ADMIN_GMAIL
 import com.example.data.model.ProfileVisibilityMode
@@ -477,7 +480,7 @@ fun ProfileScreen(
                                             .weight(1f, fill = false)
                                             .testTag("profile_display_name_text")
                                     )
-                                    if (profile?.verified != false) {
+                                    if (profile?.verified == true) {
                                         Icon(
                                             imageVector = Icons.Default.Verified,
                                             contentDescription = "Verified account",
@@ -853,8 +856,17 @@ private fun ProfileBannerCard(
                 )
         ) {
             if (decodedBannerBytes != null) {
+                val bannerContext = LocalContext.current
+                val bannerRequest = remember(bannerData, decodedBannerBytes) {
+                    ImageRequest.Builder(bannerContext)
+                        .data(decodedBannerBytes)
+                        .memoryCacheKey("profile_banner_${bannerData?.length}_${bannerData?.hashCode()}")
+                        .diskCachePolicy(CachePolicy.DISABLED)
+                        .crossfade(false)
+                        .build()
+                }
                 AsyncImage(
-                    model = decodedBannerBytes,
+                    model = bannerRequest,
                     contentDescription = "Profile banner image",
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()

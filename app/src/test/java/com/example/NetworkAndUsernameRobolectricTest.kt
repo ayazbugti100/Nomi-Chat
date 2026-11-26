@@ -38,6 +38,7 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -256,7 +257,7 @@ class NetworkAndUsernameRobolectricTest {
         assertTrue(closedDialog)
         assertEquals(null, vm.profileSaveError.value)
 
-        // Searching the old invalidated username returns "Account Not Found"
+        // Searching the old unclaimed username returns "Account Not Found"
         val otherVm = NomiChatViewModel(
             repository = LocalNomiRepository(store),
             smartReplyRepository = SmartReplyRepository(),
@@ -270,6 +271,24 @@ class NetworkAndUsernameRobolectricTest {
         val searchState = otherVm.usernameSearchState.value
         assertTrue(searchState is UsernameSearchState.NotFound)
         assertEquals("Account Not Found", (searchState as UsernameSearchState.NotFound).message)
+
+        // Switching back from nomi_new -> nomi_old works smoothly without false "already exists" error
+        val updatedVm = NomiChatViewModel(
+            repository = LocalNomiRepository(store),
+            smartReplyRepository = SmartReplyRepository(),
+            preferencesRepository = UserPreferencesRepository(context),
+            currentUserId = "nomi_new",
+            networkObserver = fakeObserver
+        )
+        advanceUntilIdle()
+        var switchedBack = false
+        updatedVm.updateProfileField(username = "nomi_old", onSuccess = { switchedBack = true })
+        advanceUntilIdle()
+        assertTrue(switchedBack)
+        assertEquals(null, updatedVm.profileSaveError.value)
+        val reclaimed = store.lookupUserByUsername("@nomi_old").getOrNull()
+        assertNotNull(reclaimed)
+        assertEquals("nomi_old", reclaimed?.username)
     }
 
     @Test

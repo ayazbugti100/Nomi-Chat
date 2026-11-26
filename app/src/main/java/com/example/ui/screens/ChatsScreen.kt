@@ -47,6 +47,7 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Unarchive
+import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.Button
@@ -790,6 +791,14 @@ fun ChatListRow(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
                         )
+                        if (thread.verified) {
+                            Icon(
+                                imageVector = Icons.Default.Verified,
+                                contentDescription = "Verified account",
+                                tint = Color(0xFF1E9BF0),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
                         if (thread.locked) {
                             Surface(
                                 shape = RoundedCornerShape(10.dp),

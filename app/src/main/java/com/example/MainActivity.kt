@@ -125,6 +125,8 @@ import com.example.ui.viewmodel.NomiChatViewModel
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreSettings
+import com.google.firebase.firestore.PersistentCacheSettings
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -299,7 +301,13 @@ fun AppNavigation(
                             initializer {
                                 val app = checkNotNull(this[APPLICATION_KEY])
                                 val databaseId = app.getString(R.string.firestore_database_id)
-                                val db = FirebaseFirestore.getInstance(databaseId)
+                                val db = FirebaseFirestore.getInstance(databaseId).apply {
+                                    runCatching {
+                                        firestoreSettings = FirebaseFirestoreSettings.Builder()
+                                            .setLocalCacheSettings(PersistentCacheSettings.newBuilder().build())
+                                            .build()
+                                    }
+                                }
                                 NomiChatViewModel(
                                     repository = NomiChatRepository(db),
                                     smartReplyRepository = SmartReplyRepository(),

@@ -25,6 +25,7 @@ import com.example.firebase.handleFirestoreError
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
+import com.google.firebase.firestore.DocumentReference
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
@@ -33,6 +34,7 @@ import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.Source
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -48,6 +50,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withTimeoutOrNull
@@ -106,6 +109,69 @@ class NomiChatRepository(
     private fun sanitizeHandle(raw: String): String {
         val cleaned = normalizeUsername(raw)
         return cleaned.ifBlank { "nomiuser" }.take(40)
+    }
+
+    private fun isValidFirestoreId(id: String): Boolean {
+        return id.isNotBlank() && id.length <= 128 && !id.contains('/')
+    }
+
+    private suspend fun getFreshSnapshot(
+        ref: DocumentReference,
+        serverTimeoutMs: Long = 3000L
+    ): DocumentSnapshot? {
+        val fromServer = try {
+            withTimeoutOrNull(serverTimeoutMs) {
+                ref.get(Source.SERVER).await()
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+        if (fromServer != null) return fromServer
+        return try {
+            withTimeoutOrNull(1500L) {
+                ref.get().await()
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun pickFresherDoc(a: DocumentSnapshot?, b: DocumentSnapshot?): DocumentSnapshot? {
+        val aValid = a?.takeIf { it.exists() }
+        val bValid = b?.takeIf { it.exists() }
+        if (aValid == null) return bValid
+        if (bValid == null) return aValid
+        val aTs = aValid.getTimestamp("updatedAt")
+        val bTs = bValid.getTimestamp("updatedAt")
+        val aSec = aTs?.seconds ?: 0L
+        val aNano = aTs?.nanoseconds ?: 0
+        val bSec = bTs?.seconds ?: 0L
+        val bNano = bTs?.nanoseconds ?: 0
+        return if (aSec > bSec || (aSec == bSec && aNano >= bNano)) aValid else bValid
+    }
+
+    private fun mergeFresherDirectoryEntry(
+        a: UserDirectoryEntry?,
+        b: UserDirectoryEntry?
+    ): UserDirectoryEntry? {
+        if (a == null) return b
+        if (b == null) return a
+        val aSec = a.updatedAt?.seconds ?: 0L
+        val aNano = a.updatedAt?.nanoseconds ?: 0
+        val bSec = b.updatedAt?.seconds ?: 0L
+        val bNano = b.updatedAt?.nanoseconds ?: 0
+        val aIsNewer = aSec > bSec || (aSec == bSec && aNano >= bNano)
+        val newer = if (aIsNewer) a else b
+        val older = if (aIsNewer) b else a
+        return newer.copy(
+            ownerUid = newer.ownerUid?.takeIf { it.isNotBlank() } ?: older.ownerUid,
+            photoData = newer.photoData?.takeIf { it.isNotBlank() } ?: older.photoData,
+            bannerData = newer.bannerData?.takeIf { it.isNotBlank() } ?: older.bannerData
+        )
     }
 
     override fun observeUserProfile(userId: String): Flow<UserProfile?> = flow {
@@ -200,17 +266,6 @@ class NomiChatRepository(
                 launch {
                     contactsFlow.collect { threads ->
                         latestContacts.value = threads
-                        val peerUids = threads
-                            .asSequence()
-                            .filter { it.threadType == "chat" && it.peerUid.isNotBlank() }
-                            .map { it.peerUid.trim() }
-                            .distinct()
-                            .sorted()
-                            .take(40)
-                            .toList()
-                        if (peerUids != trackedPeerUids.value) {
-                            trackedPeerUids.value = peerUids
-                        }
                         val peerHandles = threads
                             .asSequence()
                             .filter {
@@ -223,6 +278,27 @@ class NomiChatRepository(
                             .toList()
                         if (peerHandles != trackedHandles.value) {
                             trackedHandles.value = peerHandles
+                        }
+                    }
+                }
+
+                launch {
+                    combine(latestContacts, directoryEntries) { threads, dirMap ->
+                        val fromThreads = threads.orEmpty()
+                            .asSequence()
+                            .filter { it.threadType == "chat" && it.peerUid.isNotBlank() }
+                            .map { it.peerUid.trim() }
+                        val fromDir = dirMap.values
+                            .asSequence()
+                            .mapNotNull { it.ownerUid?.trim()?.takeIf { peerId -> peerId.isNotBlank() } }
+                        (fromThreads + fromDir)
+                            .distinct()
+                            .sorted()
+                            .take(40)
+                            .toList()
+                    }.collect { peerUids ->
+                        if (peerUids != trackedPeerUids.value) {
+                            trackedPeerUids.value = peerUids
                         }
                     }
                 }
@@ -285,6 +361,10 @@ class NomiChatRepository(
                                                         current + (handle to entry)
                                                     }
                                                 }
+                                            } else {
+                                                directoryEntries.update { current ->
+                                                    if (handle in current) current - handle else current
+                                                }
                                             }
                                         }
                                 }
@@ -296,8 +376,12 @@ class NomiChatRepository(
                 combine(latestContacts, publicProfileEntries, directoryEntries) { contacts, pubMap, dirMap ->
                     contacts?.map { thread ->
                         val entry = if (thread.threadType == "chat") {
-                            val byUid = thread.peerUid.takeIf { it.isNotBlank() }?.let { pubMap[it] }
-                            byUid ?: thread.username.takeIf { it.isNotBlank() }?.let { dirMap[sanitizeHandle(it)] }
+                            val byHandle = thread.username.takeIf { it.isNotBlank() }?.let { dirMap[sanitizeHandle(it)] }
+                            val resolvedPeerUid = thread.peerUid.takeIf { it.isNotBlank() }
+                                ?: byHandle?.ownerUid?.takeIf { it.isNotBlank() }
+                                ?: ""
+                            val byUid = resolvedPeerUid.takeIf { it.isNotBlank() }?.let { pubMap[it] }
+                            mergeFresherDirectoryEntry(byUid, byHandle)
                         } else null
                         mergeThreadWithDirectory(
                             thread = thread,
@@ -702,12 +786,23 @@ class NomiChatRepository(
             check(uid == userId) { "Signed-in user changed." }
 
             val userRef = db.collection("users").document(uid)
-            val existingUser = userRef.get().await()
+            val existingUser = getFreshSnapshot(userRef, 3000L) ?: userRef.get().await()
 
             if (existingUser.exists()) {
                 val status = existingUser.getString("accountStatus") ?: "active"
                 if (status == "banned") {
                     return Result.success(UserSetupOutcome.Banned)
+                }
+                val shouldBeVerified = isVerifiedAdminSession()
+                if (existingUser.getBoolean("verified") != shouldBeVerified) {
+                    runCatching {
+                        userRef.update(
+                            mapOf(
+                                "verified" to shouldBeVerified,
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        ).await()
+                    }
                 }
                 val existingHandle = sanitizeHandle(existingUser.getString("username").orEmpty())
                 val existingDisplayName = existingUser.getString("displayName").orEmpty().ifBlank { "Nomi User" }
@@ -724,7 +819,7 @@ class NomiChatRepository(
                 val existingMaxViewers = (existingUser.getLong("maxProfileViewers") ?: 0L).coerceIn(0L, 500L)
                 if (existingHandle.isNotBlank()) {
                     val existingDirRef = db.collection("directory").document(existingHandle)
-                    val existingDirSnap = existingDirRef.get().await()
+                    val existingDirSnap = getFreshSnapshot(existingDirRef, 2500L) ?: existingDirRef.get().await()
                     if (existingDirSnap.exists() && existingDirSnap.getString("accountStatus") == "banned") {
                         return Result.success(UserSetupOutcome.Banned)
                     }
@@ -739,6 +834,8 @@ class NomiChatRepository(
                             "allowedViewerUids" to existingAllowedViewers,
                             "maxProfileViewers" to existingMaxViewers,
                             "online" to true,
+                            "showOnlineStatus" to (existingUser.getBoolean("showOnlineStatus") ?: true),
+                            "verified" to shouldBeVerified,
                             "accountStatus" to "active",
                             "reportCount" to 0L,
                             "reportedByUids" to emptyList<String>(),
@@ -758,6 +855,7 @@ class NomiChatRepository(
                         val dirPhoto = existingDirSnap.getString("photoData")
                         val dirBanner = existingDirSnap.getString("bannerData")
                         val dirVisibility = existingDirSnap.getString("profileVisibility")
+                        val dirVerified = existingDirSnap.getBoolean("verified")
                         val dirSync = mutableMapOf<String, Any>()
                         if (existingDisplayName.isNotBlank() && dirName != existingDisplayName.take(60)) {
                             dirSync["displayName"] = existingDisplayName.take(60)
@@ -776,6 +874,9 @@ class NomiChatRepository(
                             dirSync["allowedViewerUids"] = existingAllowedViewers
                             dirSync["maxProfileViewers"] = existingMaxViewers
                         }
+                        if (dirVerified != shouldBeVerified) {
+                            dirSync["verified"] = shouldBeVerified
+                        }
                         if (dirSync.isNotEmpty()) {
                             dirSync["updatedAt"] = FieldValue.serverTimestamp()
                             runCatching { existingDirRef.update(dirSync).await() }
@@ -783,7 +884,7 @@ class NomiChatRepository(
                     }
                     if (existingHandle.isNotBlank()) {
                         val existingUsernameRef = db.collection("usernames").document(existingHandle)
-                        val existingUsernameSnap = runCatching { existingUsernameRef.get().await() }.getOrNull()
+                        val existingUsernameSnap = getFreshSnapshot(existingUsernameRef, 2500L)
                         if (existingUsernameSnap != null && !existingUsernameSnap.exists()) {
                             runCatching {
                                 existingUsernameRef.set(
@@ -792,6 +893,19 @@ class NomiChatRepository(
                                         "ownerUid" to uid,
                                         "status" to "active",
                                         "createdAt" to FieldValue.serverTimestamp(),
+                                        "updatedAt" to FieldValue.serverTimestamp()
+                                    )
+                                ).await()
+                            }
+                        } else if (existingUsernameSnap != null &&
+                            existingUsernameSnap.getString("status") == "retired" &&
+                            existingUsernameSnap.getString("ownerUid").isNullOrBlank()
+                        ) {
+                            runCatching {
+                                existingUsernameRef.update(
+                                    mapOf(
+                                        "ownerUid" to uid,
+                                        "status" to "active",
                                         "updatedAt" to FieldValue.serverTimestamp()
                                     )
                                 ).await()
@@ -809,7 +923,8 @@ class NomiChatRepository(
                             allowedViewerUids = existingAllowedViewers,
                             maxProfileViewers = existingMaxViewers,
                             online = existingUser.getBoolean("online") ?: true,
-                            showOnlineStatus = existingUser.getBoolean("showOnlineStatus") ?: true
+                            showOnlineStatus = existingUser.getBoolean("showOnlineStatus") ?: true,
+                            verified = shouldBeVerified
                         )
                     }
                 }
@@ -874,6 +989,7 @@ class NomiChatRepository(
                                     "username" to cleanUser,
                                     "displayName" to restoredName,
                                     "dob" to restoredDob,
+                                    "verified" to shouldBeVerified,
                                     "updatedAt" to FieldValue.serverTimestamp()
                                 )
                             ).await()
@@ -900,14 +1016,16 @@ class NomiChatRepository(
                         }
 
                         val requestedUsernameRef = db.collection("usernames").document(cleanUser)
-                        val requestedUsernameSnap = requestedUsernameRef.get().await()
+                        val requestedUsernameSnap = getFreshSnapshot(requestedUsernameRef, 3000L)
+                            ?: requestedUsernameRef.get().await()
                         val requestedDirRef = db.collection("directory").document(cleanUser)
-                        val requestedDirSnap = requestedDirRef.get().await()
+                        val requestedDirSnap = getFreshSnapshot(requestedDirRef, 3000L)
+                            ?: requestedDirRef.get().await()
                         val takenInUsernames = requestedUsernameSnap.exists() &&
-                            (requestedUsernameSnap.getString("status") != "active" ||
-                                requestedUsernameSnap.getString("ownerUid") != uid)
+                            requestedUsernameSnap.getString("status") == "active" &&
+                            requestedUsernameSnap.getString("ownerUid").orEmpty().let { it.isNotBlank() && it != uid }
                         val takenInDir = requestedDirSnap.exists() &&
-                            requestedDirSnap.getString("ownerUid") != uid
+                            requestedDirSnap.getString("ownerUid").orEmpty().let { it.isNotBlank() && it != uid }
                         if (takenInUsernames || takenInDir) {
                             return Result.success(
                                 UserSetupOutcome.Rejected("This username is already taken / already added.")
@@ -925,6 +1043,7 @@ class NomiChatRepository(
                                 "displayName" to cleanName,
                                 "username" to cleanUser,
                                 "dob" to cleanDob,
+                                "verified" to shouldBeVerified,
                                 "updatedAt" to FieldValue.serverTimestamp()
                             )
                         )
@@ -953,6 +1072,17 @@ class NomiChatRepository(
                                     "updatedAt" to FieldValue.serverTimestamp()
                                 )
                             )
+                        } else if (requestedUsernameSnap.getString("status") != "active" ||
+                            requestedUsernameSnap.getString("ownerUid") != uid
+                        ) {
+                            batch.update(
+                                requestedUsernameRef,
+                                mapOf(
+                                    "ownerUid" to uid,
+                                    "status" to "active",
+                                    "updatedAt" to FieldValue.serverTimestamp()
+                                )
+                            )
                         }
                         if (!requestedDirSnap.exists()) {
                             batch.set(
@@ -964,6 +1094,7 @@ class NomiChatRepository(
                                     "provider" to (existingUser.getString("provider") ?: "username"),
                                     "online" to true,
                                     "showOnlineStatus" to true,
+                                    "verified" to shouldBeVerified,
                                     "accountStatus" to "active",
                                     "reportCount" to 0L,
                                     "reportedByUids" to emptyList<String>(),
@@ -1000,6 +1131,21 @@ class NomiChatRepository(
                             }
                         }
                         batch.commit().await()
+                        syncPublicProfile(
+                            uid = uid,
+                            username = cleanUser,
+                            displayName = cleanName,
+                            provider = existingUser.getString("provider") ?: "username",
+                            bio = existingBio,
+                            photoData = existingPhotoData,
+                            bannerData = existingBannerData,
+                            profileVisibility = existingVisibility,
+                            allowedViewerUids = existingAllowedViewers,
+                            maxProfileViewers = existingMaxViewers,
+                            online = true,
+                            showOnlineStatus = existingUser.getBoolean("showOnlineStatus") ?: true,
+                            verified = shouldBeVerified
+                        )
                         return Result.success(UserSetupOutcome.Allowed)
                     }
                 }
@@ -1095,18 +1241,21 @@ class NomiChatRepository(
             val baseHandle = if (desiredHandleRaw.length >= 2) desiredHandleRaw.take(40) else "nomi_$desiredHandleRaw"
 
             val usernameRefCandidate = db.collection("usernames").document(baseHandle)
-            val usernameSnapCandidate = usernameRefCandidate.get().await()
+            val usernameSnapCandidate = getFreshSnapshot(usernameRefCandidate, 3000L)
+                ?: usernameRefCandidate.get().await()
             val dirRefCandidate = db.collection("directory").document(baseHandle)
-            val dirSnapCandidate = dirRefCandidate.get().await()
+            val dirSnapCandidate = getFreshSnapshot(dirRefCandidate, 3000L)
+                ?: dirRefCandidate.get().await()
 
             val resolvedUsername: String
-            val dirRefToCreate: com.google.firebase.firestore.DocumentReference?
-            val usernameRefToCreate: com.google.firebase.firestore.DocumentReference?
+            val dirRefToCreate: DocumentReference?
+            val usernameRefToCreate: DocumentReference?
+            val usernameRefExists: Boolean
 
-            val isUsernameUnavailable = (usernameSnapCandidate.exists() &&
-                (usernameSnapCandidate.getString("status") != "active" ||
-                    usernameSnapCandidate.getString("ownerUid") != uid)) ||
-                dirSnapCandidate.exists()
+            val candidateResTaken = usernameSnapCandidate.exists() &&
+                usernameSnapCandidate.getString("status") == "active" &&
+                usernameSnapCandidate.getString("ownerUid").orEmpty().let { it.isNotBlank() && it != uid }
+            val isUsernameUnavailable = candidateResTaken || dirSnapCandidate.exists()
 
             if (isUsernameUnavailable) {
                 if (dirSnapCandidate.exists() &&
@@ -1121,37 +1270,52 @@ class NomiChatRepository(
                     )
                 } else if (dirSnapCandidate.exists() && dirSnapCandidate.getString("ownerUid") == uid &&
                     (!usernameSnapCandidate.exists() ||
-                        (usernameSnapCandidate.getString("status") == "active" &&
-                            usernameSnapCandidate.getString("ownerUid") == uid))
+                        usernameSnapCandidate.getString("ownerUid") == uid ||
+                        usernameSnapCandidate.getString("status") != "active")
                 ) {
                     resolvedUsername = baseHandle
                     dirRefToCreate = null
-                    usernameRefToCreate = if (usernameSnapCandidate.exists()) null else usernameRefCandidate
+                    val alreadyOwned = usernameSnapCandidate.exists() &&
+                        usernameSnapCandidate.getString("status") == "active" &&
+                        usernameSnapCandidate.getString("ownerUid") == uid
+                    usernameRefToCreate = if (alreadyOwned) null else usernameRefCandidate
+                    usernameRefExists = usernameSnapCandidate.exists()
                 } else {
                     val fallbackHandle = "${baseHandle.take(30)}_${uid.take(6).lowercase()}"
                     val fallbackUsernameRef = db.collection("usernames").document(fallbackHandle)
-                    val fallbackUsernameSnap = fallbackUsernameRef.get().await()
+                    val fallbackUsernameSnap = getFreshSnapshot(fallbackUsernameRef, 2500L)
+                        ?: fallbackUsernameRef.get().await()
                     val fallbackRef = db.collection("directory").document(fallbackHandle)
-                    val fallbackSnap = fallbackRef.get().await()
+                    val fallbackSnap = getFreshSnapshot(fallbackRef, 2500L)
+                        ?: fallbackRef.get().await()
                     val fallbackBusy = (fallbackUsernameSnap.exists() &&
-                        (fallbackUsernameSnap.getString("status") != "active" ||
-                            fallbackUsernameSnap.getString("ownerUid") != uid)) ||
+                        fallbackUsernameSnap.getString("status") == "active" &&
+                        fallbackUsernameSnap.getString("ownerUid").orEmpty().let { it.isNotBlank() && it != uid }) ||
                         (fallbackSnap.exists() && fallbackSnap.getString("ownerUid") != uid)
                     if (fallbackBusy) {
                         val uniqueHandle = "${baseHandle.take(24)}_${(System.currentTimeMillis() % 100000)}"
                         resolvedUsername = uniqueHandle
                         dirRefToCreate = db.collection("directory").document(uniqueHandle)
                         usernameRefToCreate = db.collection("usernames").document(uniqueHandle)
+                        usernameRefExists = false
                     } else {
                         resolvedUsername = fallbackHandle
                         dirRefToCreate = if (fallbackSnap.exists()) null else fallbackRef
-                        usernameRefToCreate = if (fallbackUsernameSnap.exists()) null else fallbackUsernameRef
+                        val alreadyOwned = fallbackUsernameSnap.exists() &&
+                            fallbackUsernameSnap.getString("status") == "active" &&
+                            fallbackUsernameSnap.getString("ownerUid") == uid
+                        usernameRefToCreate = if (alreadyOwned) null else fallbackUsernameRef
+                        usernameRefExists = fallbackUsernameSnap.exists()
                     }
                 }
             } else {
                 resolvedUsername = baseHandle
                 dirRefToCreate = dirRefCandidate
-                usernameRefToCreate = if (usernameSnapCandidate.exists()) null else usernameRefCandidate
+                val alreadyOwned = usernameSnapCandidate.exists() &&
+                    usernameSnapCandidate.getString("status") == "active" &&
+                    usernameSnapCandidate.getString("ownerUid") == uid
+                usernameRefToCreate = if (alreadyOwned) null else usernameRefCandidate
+                usernameRefExists = usernameSnapCandidate.exists()
             }
 
             val resolvedDob = preferredDob.trim().ifBlank { "2000-01-01" }.take(20)
@@ -1172,6 +1336,7 @@ class NomiChatRepository(
                 resolvedProvider = resolvedProvider,
                 dirRef = dirRefToCreate,
                 usernameRef = usernameRefToCreate,
+                usernameRefExists = usernameRefExists,
                 credentialSaltAndHash = credPair
             )
 
@@ -1186,18 +1351,20 @@ class NomiChatRepository(
 
     private suspend fun createFreshUserProfile(
         uid: String,
-        userRef: com.google.firebase.firestore.DocumentReference,
+        userRef: DocumentReference,
         resolvedName: String,
         resolvedUsername: String,
         resolvedEmail: String,
         resolvedDob: String,
         resolvedProvider: String,
-        dirRef: com.google.firebase.firestore.DocumentReference?,
-        usernameRef: com.google.firebase.firestore.DocumentReference? = null,
+        dirRef: DocumentReference?,
+        usernameRef: DocumentReference? = null,
+        usernameRefExists: Boolean = false,
         credentialSaltAndHash: Pair<String, String>? = null
     ) {
         val batch = db.batch()
         val defaultBio = "Dream Big... 💚"
+        val isVerified = isVerifiedAdminSession()
         val profilePayload = mapOf(
             "userId" to uid,
             "displayName" to resolvedName,
@@ -1211,7 +1378,7 @@ class NomiChatRepository(
             "maxProfileViewers" to 0L,
             "online" to true,
             "showOnlineStatus" to true,
-            "verified" to true,
+            "verified" to isVerified,
             "premiumUnlocked" to true,
             "accountStatus" to "active",
             "reportCount" to 0L,
@@ -1239,16 +1406,27 @@ class NomiChatRepository(
         }
 
         if (usernameRef != null) {
-            batch.set(
-                usernameRef,
-                mapOf(
-                    "username" to resolvedUsername,
-                    "ownerUid" to uid,
-                    "status" to "active",
-                    "createdAt" to FieldValue.serverTimestamp(),
-                    "updatedAt" to FieldValue.serverTimestamp()
+            if (usernameRefExists) {
+                batch.update(
+                    usernameRef,
+                    mapOf(
+                        "ownerUid" to uid,
+                        "status" to "active",
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
                 )
-            )
+            } else {
+                batch.set(
+                    usernameRef,
+                    mapOf(
+                        "username" to resolvedUsername,
+                        "ownerUid" to uid,
+                        "status" to "active",
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }
         }
 
         if (dirRef != null) {
@@ -1265,6 +1443,7 @@ class NomiChatRepository(
                     "maxProfileViewers" to 0L,
                     "online" to true,
                     "showOnlineStatus" to true,
+                    "verified" to isVerified,
                     "accountStatus" to "active",
                     "reportCount" to 0L,
                     "reportedByUids" to emptyList<String>(),
@@ -1288,6 +1467,7 @@ class NomiChatRepository(
                 "maxProfileViewers" to 0L,
                 "online" to true,
                 "showOnlineStatus" to true,
+                "verified" to isVerified,
                 "accountStatus" to "active",
                 "bannedByAdmin" to false,
                 "createdAt" to FieldValue.serverTimestamp(),
@@ -1310,13 +1490,14 @@ class NomiChatRepository(
         allowedViewerUids: List<String>,
         maxProfileViewers: Long,
         online: Boolean,
-        showOnlineStatus: Boolean
+        showOnlineStatus: Boolean,
+        verified: Boolean = isVerifiedAdminSession()
     ) {
         val cleanHandle = sanitizeHandle(username)
         if (cleanHandle.isBlank()) return
         runCatching {
             val pubRef = db.collection("public_profiles").document(uid)
-            val snap = pubRef.get().await()
+            val snap = getFreshSnapshot(pubRef, 2500L) ?: pubRef.get().await()
             if (!snap.exists()) {
                 val payload = mutableMapOf<String, Any>(
                     "ownerUid" to uid,
@@ -1329,6 +1510,7 @@ class NomiChatRepository(
                     "maxProfileViewers" to maxProfileViewers.coerceIn(0L, 500L),
                     "online" to online,
                     "showOnlineStatus" to showOnlineStatus,
+                    "verified" to verified,
                     "accountStatus" to "active",
                     "bannedByAdmin" to false,
                     "createdAt" to FieldValue.serverTimestamp(),
@@ -1347,6 +1529,7 @@ class NomiChatRepository(
                     "maxProfileViewers" to maxProfileViewers.coerceIn(0L, 500L),
                     "online" to online,
                     "showOnlineStatus" to showOnlineStatus,
+                    "verified" to verified,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
                 if (!photoData.isNullOrBlank() && photoData.length <= 150000) updates["photoData"] = photoData
@@ -1369,8 +1552,11 @@ class NomiChatRepository(
         return try {
             val uid = requireUserId()
             check(uid == userId) { "Signed-in user mismatch." }
+            runCatching { db.enableNetwork() }
+            val isVerified = isVerifiedAdminSession()
 
             val updates = mutableMapOf<String, Any>(
+                "verified" to isVerified,
                 "updatedAt" to FieldValue.serverTimestamp()
             )
             displayName?.trim()?.takeIf { it.isNotEmpty() }?.let {
@@ -1402,23 +1588,45 @@ class NomiChatRepository(
             }
 
             val userRef = db.collection("users").document(uid)
-            val currentUserSnap = userRef.get().await()
+            var currentUserSnap = getFreshSnapshot(userRef, 3000L)?.takeIf { it.exists() }
+            if (currentUserSnap == null || !currentUserSnap.exists()) {
+                val currentAuth = auth.currentUser
+                ensureInitialUserSetup(
+                    userId = uid,
+                    googleDisplayName = currentAuth?.displayName,
+                    googleEmail = currentAuth?.email,
+                    preferredDisplayName = displayName?.trim().orEmpty(),
+                    preferredUsername = username?.trim().orEmpty(),
+                    preferredDob = dob?.trim().orEmpty(),
+                    authFlowMode = AuthFlowMode.GOOGLE_QUICK,
+                    returningIdentifier = ""
+                )
+                currentUserSnap = getFreshSnapshot(userRef, 3000L)?.takeIf { it.exists() }
+                    ?: userRef.get().await()
+            }
             val currentHandle = currentUserSnap.getString("username").orEmpty()
             val previousHandle = currentHandle.takeIf { it.isNotBlank() }?.let { sanitizeHandle(it) }.orEmpty()
             val targetNewHandle = requestedHandle
 
             if (targetNewHandle != null && targetNewHandle != previousHandle) {
-                val existingReservation = db.collection("usernames").document(targetNewHandle).get().await()
-                if (existingReservation.exists() &&
-                    (existingReservation.getString("status") != "active" ||
-                        existingReservation.getString("ownerUid") != uid)
-                ) {
+                val (existingReservation, existingDir) = coroutineScope {
+                    val resTask = async { getFreshSnapshot(db.collection("usernames").document(targetNewHandle), 3500L) }
+                    val dirTask = async { getFreshSnapshot(db.collection("directory").document(targetNewHandle), 3500L) }
+                    resTask.await() to dirTask.await()
+                }
+                val resTaken = existingReservation != null &&
+                    existingReservation.exists() &&
+                    existingReservation.getString("status") == "active" &&
+                    existingReservation.getString("ownerUid").orEmpty().let { it.isNotBlank() && it != uid }
+                if (resTaken) {
                     return Result.failure(
                         IllegalStateException("This username is already taken / already added.")
                     )
                 }
-                val existingDir = db.collection("directory").document(targetNewHandle).get().await()
-                if (existingDir.exists() && existingDir.getString("ownerUid") != uid) {
+                val dirTaken = existingDir != null &&
+                    existingDir.exists() &&
+                    existingDir.getString("ownerUid").orEmpty().let { it.isNotBlank() && it != uid }
+                if (dirTaken) {
                     return Result.failure(
                         IllegalStateException("This username is already taken / already added.")
                     )
@@ -1453,6 +1661,7 @@ class NomiChatRepository(
                 val newUsernameRef = db.collection("usernames").document(targetNewHandle)
                 val newDirRef = db.collection("directory").document(targetNewHandle)
                 val newCredRef = userRef.collection("credentials").document(targetNewHandle)
+                val pubRef = db.collection("public_profiles").document(uid)
                 val oldUsernameRef = previousHandle.takeIf { it.isNotBlank() }?.let { db.collection("usernames").document(it) }
                 val oldDirRef = previousHandle.takeIf { it.isNotBlank() }?.let { db.collection("directory").document(it) }
                 val oldCredRef = previousHandle.takeIf { it.isNotBlank() }?.let { userRef.collection("credentials").document(it) }
@@ -1461,14 +1670,15 @@ class NomiChatRepository(
                     // All transaction reads must happen before any writes
                     val newUsernameSnap = tx.get(newUsernameRef)
                     val newDirSnap = tx.get(newDirRef)
+                    val pubSnap = tx.get(pubRef)
                     val oldUsernameSnap = oldUsernameRef?.let { tx.get(it) }
                     val oldDirSnap = oldDirRef?.let { tx.get(it) }
                     val oldCredSnap = oldCredRef?.let { tx.get(it) }
 
-                    if (newUsernameSnap.exists() &&
-                        (newUsernameSnap.getString("status") != "active" ||
-                            newUsernameSnap.getString("ownerUid") != uid)
-                    ) {
+                    val resActiveByOther = newUsernameSnap.exists() &&
+                        newUsernameSnap.getString("status") == "active" &&
+                        newUsernameSnap.getString("ownerUid").orEmpty().let { it.isNotBlank() && it != uid }
+                    if (resActiveByOther) {
                         throw IllegalStateException("This username is already taken / already added.")
                     }
                     if (newDirSnap.exists() && newDirSnap.getString("ownerUid") != uid) {
@@ -1488,6 +1698,17 @@ class NomiChatRepository(
                                 "updatedAt" to FieldValue.serverTimestamp()
                             )
                         )
+                    } else if (newUsernameSnap.getString("status") != "active" ||
+                        newUsernameSnap.getString("ownerUid") != uid
+                    ) {
+                        tx.update(
+                            newUsernameRef,
+                            mapOf(
+                                "ownerUid" to uid,
+                                "status" to "active",
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        )
                     }
 
                     if (!newDirSnap.exists()) {
@@ -1502,6 +1723,7 @@ class NomiChatRepository(
                             "maxProfileViewers" to currentMaxViewers,
                             "online" to currentOnline,
                             "showOnlineStatus" to currentShowOnlineStatus,
+                            "verified" to isVerified,
                             "accountStatus" to "active",
                             "reportCount" to 0L,
                             "reportedByUids" to emptyList<String>(),
@@ -1521,6 +1743,7 @@ class NomiChatRepository(
                             "bio" to updatedBio.take(200),
                             "online" to currentOnline,
                             "showOnlineStatus" to currentShowOnlineStatus,
+                            "verified" to isVerified,
                             "updatedAt" to FieldValue.serverTimestamp()
                         )
                         if (!updatedPhotoData.isNullOrBlank()) {
@@ -1532,7 +1755,46 @@ class NomiChatRepository(
                         tx.update(newDirRef, dirUpdates)
                     }
 
-                    // Lock old username permanently as retired so it cannot be reused, searched, or logged into again
+                    if (!pubSnap.exists()) {
+                        val pubPayload = mutableMapOf<String, Any>(
+                            "ownerUid" to uid,
+                            "username" to targetNewHandle,
+                            "displayName" to updatedName.take(60),
+                            "provider" to currentProvider,
+                            "bio" to updatedBio.take(200),
+                            "profileVisibility" to currentVisibility,
+                            "allowedViewerUids" to currentAllowedViewers,
+                            "maxProfileViewers" to currentMaxViewers,
+                            "online" to currentOnline,
+                            "showOnlineStatus" to currentShowOnlineStatus,
+                            "verified" to isVerified,
+                            "accountStatus" to "active",
+                            "bannedByAdmin" to false,
+                            "createdAt" to FieldValue.serverTimestamp(),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                        if (!updatedPhotoData.isNullOrBlank()) pubPayload["photoData"] = updatedPhotoData
+                        if (!updatedBannerData.isNullOrBlank()) pubPayload["bannerData"] = updatedBannerData
+                        tx.set(pubRef, pubPayload)
+                    } else {
+                        val pubUpdates = mutableMapOf<String, Any>(
+                            "username" to targetNewHandle,
+                            "displayName" to updatedName.take(60),
+                            "bio" to updatedBio.take(200),
+                            "profileVisibility" to currentVisibility,
+                            "allowedViewerUids" to currentAllowedViewers,
+                            "maxProfileViewers" to currentMaxViewers,
+                            "online" to currentOnline,
+                            "showOnlineStatus" to currentShowOnlineStatus,
+                            "verified" to isVerified,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                        if (!updatedPhotoData.isNullOrBlank()) pubUpdates["photoData"] = updatedPhotoData
+                        if (!updatedBannerData.isNullOrBlank()) pubUpdates["bannerData"] = updatedBannerData
+                        tx.update(pubRef, pubUpdates)
+                    }
+
+                    // Release old username as retired/unowned so it stops matching searches until claimed again
                     if (oldUsernameRef != null && oldUsernameSnap != null && oldUsernameSnap.exists() &&
                         oldUsernameSnap.getString("status") == "active" &&
                         oldUsernameSnap.getString("ownerUid") == uid
@@ -1576,12 +1838,32 @@ class NomiChatRepository(
                     null
                 }.await()
             } else {
-                userRef.update(updates).await()
+                val dirRef = updatedHandle.takeIf { it.isNotBlank() && updatedName.isNotBlank() }
+                    ?.let { db.collection("directory").document(it) }
+                val pubRef = updatedHandle.takeIf { it.isNotBlank() }
+                    ?.let { db.collection("public_profiles").document(uid) }
+                val oldCredRef = previousHandle.takeIf {
+                    it.isNotBlank() && (updates.containsKey("displayName") || updates.containsKey("dob"))
+                }?.let { userRef.collection("credentials").document(it) }
 
-                if (updatedHandle.isNotBlank() && updatedName.isNotBlank()) {
-                    val dirRef = db.collection("directory").document(updatedHandle)
-                    val dirSnap = dirRef.get().await()
-                    if (!dirSnap.exists()) {
+                val (dirSnap, pubSnap, oldCredSnap) = coroutineScope {
+                    val dirTask = async {
+                        dirRef?.let { ref -> getFreshSnapshot(ref, 2500L) }
+                    }
+                    val pubTask = async {
+                        pubRef?.let { ref -> getFreshSnapshot(ref, 2500L) }
+                    }
+                    val credTask = async {
+                        oldCredRef?.let { ref -> getFreshSnapshot(ref, 2000L) }
+                    }
+                    Triple(dirTask.await(), pubTask.await(), credTask.await())
+                }
+
+                val batch = db.batch()
+                batch.update(userRef, updates)
+
+                if (dirRef != null && updatedHandle.isNotBlank() && updatedName.isNotBlank()) {
+                    if (dirSnap == null || !dirSnap.exists()) {
                         val dirPayload = mutableMapOf<String, Any>(
                             "ownerUid" to uid,
                             "username" to updatedHandle,
@@ -1593,69 +1875,84 @@ class NomiChatRepository(
                             "maxProfileViewers" to currentMaxViewers,
                             "online" to currentOnline,
                             "showOnlineStatus" to currentShowOnlineStatus,
+                            "verified" to isVerified,
                             "accountStatus" to "active",
                             "reportCount" to 0L,
                             "reportedByUids" to emptyList<String>(),
                             "createdAt" to FieldValue.serverTimestamp(),
                             "updatedAt" to FieldValue.serverTimestamp()
                         )
-                        if (!updatedPhotoData.isNullOrBlank()) {
-                            dirPayload["photoData"] = updatedPhotoData
-                        }
-                        if (!updatedBannerData.isNullOrBlank()) {
-                            dirPayload["bannerData"] = updatedBannerData
-                        }
-                        dirRef.set(dirPayload).await()
+                        if (!updatedPhotoData.isNullOrBlank()) dirPayload["photoData"] = updatedPhotoData
+                        if (!updatedBannerData.isNullOrBlank()) dirPayload["bannerData"] = updatedBannerData
+                        batch.set(dirRef, dirPayload)
                     } else if (dirSnap.getString("ownerUid") == uid) {
                         val dirUpdates = mutableMapOf<String, Any>(
                             "displayName" to updatedName.take(60),
                             "bio" to updatedBio.take(200),
                             "online" to currentOnline,
                             "showOnlineStatus" to currentShowOnlineStatus,
+                            "verified" to isVerified,
                             "updatedAt" to FieldValue.serverTimestamp()
                         )
-                        if (!updatedPhotoData.isNullOrBlank()) {
-                            dirUpdates["photoData"] = updatedPhotoData
-                        }
-                        if (!updatedBannerData.isNullOrBlank()) {
-                            dirUpdates["bannerData"] = updatedBannerData
-                        }
-                        dirRef.update(dirUpdates).await()
+                        if (!updatedPhotoData.isNullOrBlank()) dirUpdates["photoData"] = updatedPhotoData
+                        if (!updatedBannerData.isNullOrBlank()) dirUpdates["bannerData"] = updatedBannerData
+                        batch.update(dirRef, dirUpdates)
                     }
                 }
 
-                if (previousHandle.isNotBlank() && (updates.containsKey("displayName") || updates.containsKey("dob"))) {
-                    val oldCredRef = userRef.collection("credentials").document(previousHandle)
-                    val oldCredSnap = runCatching { oldCredRef.get().await() }.getOrNull()
-                    if (oldCredSnap != null && oldCredSnap.exists()) {
-                        runCatching {
-                            oldCredRef.update(
-                                mapOf(
-                                    "displayName" to updatedName.take(60),
-                                    "dob" to updatedDob,
-                                    "updatedAt" to FieldValue.serverTimestamp()
-                                )
-                            ).await()
-                        }
+                if (pubRef != null && updatedHandle.isNotBlank()) {
+                    if (pubSnap == null || !pubSnap.exists()) {
+                        val pubPayload = mutableMapOf<String, Any>(
+                            "ownerUid" to uid,
+                            "username" to updatedHandle,
+                            "displayName" to updatedName.take(60),
+                            "provider" to currentProvider,
+                            "bio" to updatedBio.take(200),
+                            "profileVisibility" to currentVisibility,
+                            "allowedViewerUids" to currentAllowedViewers,
+                            "maxProfileViewers" to currentMaxViewers,
+                            "online" to currentOnline,
+                            "showOnlineStatus" to currentShowOnlineStatus,
+                            "verified" to isVerified,
+                            "accountStatus" to "active",
+                            "bannedByAdmin" to false,
+                            "createdAt" to FieldValue.serverTimestamp(),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                        if (!updatedPhotoData.isNullOrBlank()) pubPayload["photoData"] = updatedPhotoData
+                        if (!updatedBannerData.isNullOrBlank()) pubPayload["bannerData"] = updatedBannerData
+                        batch.set(pubRef, pubPayload)
+                    } else {
+                        val pubUpdates = mutableMapOf<String, Any>(
+                            "username" to updatedHandle,
+                            "displayName" to updatedName.take(60),
+                            "bio" to updatedBio.take(200),
+                            "profileVisibility" to currentVisibility,
+                            "allowedViewerUids" to currentAllowedViewers,
+                            "maxProfileViewers" to currentMaxViewers,
+                            "online" to currentOnline,
+                            "showOnlineStatus" to currentShowOnlineStatus,
+                            "verified" to isVerified,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                        if (!updatedPhotoData.isNullOrBlank()) pubUpdates["photoData"] = updatedPhotoData
+                        if (!updatedBannerData.isNullOrBlank()) pubUpdates["bannerData"] = updatedBannerData
+                        batch.update(pubRef, pubUpdates)
                     }
                 }
-            }
 
-            if (updatedHandle.isNotBlank()) {
-                syncPublicProfile(
-                    uid = uid,
-                    username = updatedHandle,
-                    displayName = updatedName,
-                    provider = currentProvider,
-                    bio = updatedBio,
-                    photoData = updatedPhotoData,
-                    bannerData = updatedBannerData,
-                    profileVisibility = currentVisibility,
-                    allowedViewerUids = currentAllowedViewers,
-                    maxProfileViewers = currentMaxViewers,
-                    online = currentOnline,
-                    showOnlineStatus = currentShowOnlineStatus
-                )
+                if (oldCredRef != null && oldCredSnap != null && oldCredSnap.exists()) {
+                    batch.update(
+                        oldCredRef,
+                        mapOf(
+                            "displayName" to updatedName.take(60),
+                            "dob" to updatedDob,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    )
+                }
+
+                batch.commit().await()
             }
 
             Result.success(null)
@@ -1678,6 +1975,8 @@ class NomiChatRepository(
         return try {
             val uid = requireUserId()
             check(uid == userId) { "Signed-in user mismatch." }
+            runCatching { db.enableNetwork() }
+            val isVerified = isVerifiedAdminSession()
             val cleanVisibility = ProfileVisibilityMode.fromKey(profileVisibility).key
             val cleanAllowed = allowedViewerUids
                 .map { it.trim() }
@@ -1687,7 +1986,8 @@ class NomiChatRepository(
             val cleanMax = maxProfileViewers.coerceIn(0L, 500L)
 
             val userRef = db.collection("users").document(uid)
-            val snap = userRef.get().await()
+            val snap = getFreshSnapshot(userRef, 3000L)?.takeIf { it.exists() }
+                ?: userRef.get().await()
             val handle = sanitizeHandle(snap.getString("username").orEmpty())
             val displayName = snap.getString("displayName").orEmpty().ifBlank { "Nomi User" }.take(60)
             val bio = snap.getString("bio").orEmpty().take(200)
@@ -1695,21 +1995,30 @@ class NomiChatRepository(
             val photoData = snap.getString("photoData")?.takeIf { it.isNotBlank() && it.length <= 150000 }
             val bannerData = snap.getString("bannerData")?.takeIf { it.isNotBlank() && it.length <= 150000 }
 
-            userRef.update(
+            val dirRef = handle.takeIf { it.isNotBlank() }?.let { db.collection("directory").document(it) }
+            val pubRef = handle.takeIf { it.isNotBlank() }?.let { db.collection("public_profiles").document(uid) }
+            val (dirSnap, pubSnap) = coroutineScope {
+                val dirTask = async { dirRef?.let { ref -> getFreshSnapshot(ref, 2500L) } }
+                val pubTask = async { pubRef?.let { ref -> getFreshSnapshot(ref, 2500L) } }
+                dirTask.await() to pubTask.await()
+            }
+
+            val batch = db.batch()
+            batch.update(
+                userRef,
                 mapOf(
                     "profileVisibility" to cleanVisibility,
                     "allowedViewerUids" to cleanAllowed,
                     "maxProfileViewers" to cleanMax,
                     "showOnlineStatus" to showOnlineStatus,
                     "online" to showOnlineStatus,
+                    "verified" to isVerified,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            ).await()
+            )
 
-            if (handle.isNotBlank()) {
-                val dirRef = db.collection("directory").document(handle)
-                val dirSnap = dirRef.get().await()
-                if (!dirSnap.exists()) {
+            if (dirRef != null && handle.isNotBlank()) {
+                if (dirSnap == null || !dirSnap.exists()) {
                     val dirPayload = mutableMapOf<String, Any>(
                         "ownerUid" to uid,
                         "username" to handle,
@@ -1721,6 +2030,7 @@ class NomiChatRepository(
                         "maxProfileViewers" to cleanMax,
                         "online" to showOnlineStatus,
                         "showOnlineStatus" to showOnlineStatus,
+                        "verified" to isVerified,
                         "accountStatus" to "active",
                         "reportCount" to 0L,
                         "reportedByUids" to emptyList<String>(),
@@ -1729,37 +2039,66 @@ class NomiChatRepository(
                     )
                     if (!photoData.isNullOrBlank()) dirPayload["photoData"] = photoData
                     if (!bannerData.isNullOrBlank()) dirPayload["bannerData"] = bannerData
-                    dirRef.set(dirPayload).await()
+                    batch.set(dirRef, dirPayload)
                 } else if (dirSnap.getString("ownerUid") == uid) {
-                    dirRef.update(
+                    batch.update(
+                        dirRef,
                         mapOf(
                             "profileVisibility" to cleanVisibility,
                             "allowedViewerUids" to cleanAllowed,
                             "maxProfileViewers" to cleanMax,
                             "showOnlineStatus" to showOnlineStatus,
                             "online" to showOnlineStatus,
+                            "verified" to isVerified,
                             "bio" to bio,
                             "updatedAt" to FieldValue.serverTimestamp()
                         )
-                    ).await()
+                    )
                 }
             }
-            if (handle.isNotBlank()) {
-                syncPublicProfile(
-                    uid = uid,
-                    username = handle,
-                    displayName = displayName,
-                    provider = provider,
-                    bio = bio,
-                    photoData = photoData,
-                    bannerData = bannerData,
-                    profileVisibility = cleanVisibility,
-                    allowedViewerUids = cleanAllowed,
-                    maxProfileViewers = cleanMax,
-                    online = showOnlineStatus,
-                    showOnlineStatus = showOnlineStatus
-                )
+
+            if (pubRef != null && handle.isNotBlank()) {
+                if (pubSnap == null || !pubSnap.exists()) {
+                    val pubPayload = mutableMapOf<String, Any>(
+                        "ownerUid" to uid,
+                        "username" to handle,
+                        "displayName" to displayName,
+                        "provider" to provider,
+                        "bio" to bio,
+                        "profileVisibility" to cleanVisibility,
+                        "allowedViewerUids" to cleanAllowed,
+                        "maxProfileViewers" to cleanMax,
+                        "online" to showOnlineStatus,
+                        "showOnlineStatus" to showOnlineStatus,
+                        "verified" to isVerified,
+                        "accountStatus" to "active",
+                        "bannedByAdmin" to false,
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                    if (!photoData.isNullOrBlank()) pubPayload["photoData"] = photoData
+                    if (!bannerData.isNullOrBlank()) pubPayload["bannerData"] = bannerData
+                    batch.set(pubRef, pubPayload)
+                } else {
+                    val pubUpdates = mutableMapOf<String, Any>(
+                        "username" to handle,
+                        "displayName" to displayName,
+                        "bio" to bio,
+                        "profileVisibility" to cleanVisibility,
+                        "allowedViewerUids" to cleanAllowed,
+                        "maxProfileViewers" to cleanMax,
+                        "online" to showOnlineStatus,
+                        "showOnlineStatus" to showOnlineStatus,
+                        "verified" to isVerified,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                    if (!photoData.isNullOrBlank()) pubUpdates["photoData"] = photoData
+                    if (!bannerData.isNullOrBlank()) pubUpdates["bannerData"] = bannerData
+                    batch.update(pubRef, pubUpdates)
+                }
             }
+
+            batch.commit().await()
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -1848,7 +2187,33 @@ class NomiChatRepository(
                 runCatching { db.collection("directory").document(handle).get(Source.SERVER).await() }
             }
             runCatching {
+                db.collection("public_profiles").document(uid).get(Source.SERVER).await()
+            }
+            val contactsSnap = runCatching {
                 db.collection("users").document(uid).collection("contacts").get(Source.SERVER).await()
+            }.getOrNull()
+            if (contactsSnap != null) {
+                val peerUids = contactsSnap.documents
+                    .mapNotNull { it.getString("peerUid")?.trim()?.takeIf { id -> id.isNotBlank() } }
+                    .distinct()
+                    .take(25)
+                if (peerUids.isNotEmpty()) {
+                    coroutineScope {
+                        for (peerUid in peerUids) {
+                            launch {
+                                try {
+                                    withTimeoutOrNull(2500L) {
+                                        db.collection("public_profiles").document(peerUid)
+                                            .get(Source.SERVER).await()
+                                    }
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (_: Exception) {
+                                }
+                            }
+                        }
+                    }
+                }
             }
             runCatching {
                 db.collection("stories").limit(60).get(Source.SERVER).await()
@@ -1889,13 +2254,23 @@ class NomiChatRepository(
             }
             val storedHandle = snap.getString("username").orEmpty().ifBlank { cleanHandle }
             if (!storedHandle.equals(cleanHandle, ignoreCase = true)) return Result.success(null)
-            val displayName = snap.getString("displayName").orEmpty().ifBlank { storedHandle }
-            val visibility = snap.getString("profileVisibility")
+            val pubSnap = getFreshSnapshot(db.collection("public_profiles").document(ownerUid), 2500L)
+                ?.takeIf { it.exists() }
+            if (pubSnap?.getString("accountStatus") == "banned") {
+                return Result.failure(IllegalStateException("This account is banned, so it cannot be added here."))
+            }
+            val primarySnap = pickFresherDoc(pubSnap, snap) ?: snap
+            val secondarySnap = if (primarySnap == pubSnap) snap else pubSnap
+            val displayName = primarySnap.getString("displayName").orEmpty()
+                .ifBlank { snap.getString("displayName").orEmpty() }
+                .ifBlank { storedHandle }
+            val visibility = primarySnap.getString("profileVisibility")
+                ?: snap.getString("profileVisibility")
             @Suppress("UNCHECKED_CAST")
-            val allowedViewers = (snap.get("allowedViewerUids") as? List<*>)
+            val allowedViewers = (primarySnap.get("allowedViewerUids") as? List<*>)
                 ?.mapNotNull { it as? String }
                 ?: emptyList()
-            val maxViewers = snap.getLong("maxProfileViewers") ?: 0L
+            val maxViewers = primarySnap.getLong("maxProfileViewers") ?: 0L
             val visible = canViewerSeeProfile(
                 profileVisibility = visibility,
                 allowedViewerUids = allowedViewers,
@@ -1903,9 +2278,19 @@ class NomiChatRepository(
                 ownerUid = ownerUid,
                 viewerUid = viewerUid
             )
-            val bio = if (visible) snap.getString("bio").orEmpty() else ""
-            val photoData = if (visible) snap.getString("photoData")?.takeIf { it.isNotBlank() } else null
-            val bannerData = if (visible) snap.getString("bannerData")?.takeIf { it.isNotBlank() } else null
+            val bio = if (visible) {
+                primarySnap.getString("bio").orEmpty().ifBlank { secondarySnap?.getString("bio").orEmpty() }
+            } else ""
+            val photoData = if (visible) {
+                primarySnap.getString("photoData")?.takeIf { it.isNotBlank() }
+                    ?: secondarySnap?.getString("photoData")?.takeIf { it.isNotBlank() }
+            } else null
+            val bannerData = if (visible) {
+                primarySnap.getString("bannerData")?.takeIf { it.isNotBlank() }
+                    ?: secondarySnap?.getString("bannerData")?.takeIf { it.isNotBlank() }
+            } else null
+            val verified = (primarySnap.getBoolean("verified") == true) ||
+                (secondarySnap?.getBoolean("verified") == true)
             Result.success(
                 DirectoryLookupResult(
                     username = storedHandle,
@@ -1913,7 +2298,8 @@ class NomiChatRepository(
                     ownerUid = ownerUid,
                     bio = bio,
                     photoData = photoData,
-                    bannerData = bannerData
+                    bannerData = bannerData,
+                    verified = verified
                 )
             )
         } catch (e: CancellationException) {
@@ -1978,31 +2364,46 @@ class NomiChatRepository(
                 if (owner == uid) {
                     return Result.failure(IllegalStateException("You cannot add your own username."))
                 }
+                val pubSnap = getFreshSnapshot(db.collection("public_profiles").document(owner), 2500L)
+                    ?.takeIf { it.exists() }
+                if (pubSnap?.getString("accountStatus") == "banned") {
+                    return Result.failure(IllegalStateException("This account is banned, so it cannot be added here."))
+                }
+                val primarySnap = pickFresherDoc(pubSnap, dirSnap) ?: dirSnap
+                val secondarySnap = if (primarySnap == pubSnap) dirSnap else pubSnap
                 resolvedPeerUid = owner
                 resolvedIsPeer = true
-                resolvedDirName = dirSnap.getString("displayName").orEmpty()
+                resolvedDirName = primarySnap.getString("displayName").orEmpty()
+                    .ifBlank { dirSnap.getString("displayName").orEmpty() }
                 @Suppress("UNCHECKED_CAST")
-                val allowedViewers = (dirSnap.get("allowedViewerUids") as? List<*>)
+                val allowedViewers = (primarySnap.get("allowedViewerUids") as? List<*>)
                     ?.mapNotNull { it as? String }
                     ?: emptyList()
                 val visible = canViewerSeeProfile(
-                    profileVisibility = dirSnap.getString("profileVisibility"),
+                    profileVisibility = primarySnap.getString("profileVisibility")
+                        ?: dirSnap.getString("profileVisibility"),
                     allowedViewerUids = allowedViewers,
-                    maxProfileViewers = dirSnap.getLong("maxProfileViewers") ?: 0L,
+                    maxProfileViewers = primarySnap.getLong("maxProfileViewers") ?: 0L,
                     ownerUid = owner,
                     viewerUid = uid
                 )
-                resolvedBio = if (visible) dirSnap.getString("bio").orEmpty().take(200) else ""
+                resolvedBio = if (visible) {
+                    primarySnap.getString("bio").orEmpty()
+                        .ifBlank { secondarySnap?.getString("bio").orEmpty() }
+                        .take(200)
+                } else ""
                 resolvedPhotoData = if (visible) {
-                    dirSnap.getString("photoData")?.takeIf { it.isNotBlank() && it.length <= 150000 }
+                    primarySnap.getString("photoData")?.takeIf { it.isNotBlank() && it.length <= 150000 }
+                        ?: secondarySnap?.getString("photoData")?.takeIf { it.isNotBlank() && it.length <= 150000 }
                 } else null
                 resolvedBannerData = if (visible) {
-                    dirSnap.getString("bannerData")?.takeIf { it.isNotBlank() && it.length <= 150000 }
+                    primarySnap.getString("bannerData")?.takeIf { it.isNotBlank() && it.length <= 150000 }
+                        ?: secondarySnap?.getString("bannerData")?.takeIf { it.isNotBlank() && it.length <= 150000 }
                 } else null
-                val updatedTs = dirSnap.getTimestamp("updatedAt")?.toDate()?.time
+                val updatedTs = primarySnap.getTimestamp("updatedAt")?.toDate()?.time
                 val fresh = updatedTs == null || (System.currentTimeMillis() - updatedTs) <= PRESENCE_STALE_MS
-                val showOnline = dirSnap.getBoolean("showOnlineStatus") ?: true
-                resolvedOnline = showOnline && (dirSnap.getBoolean("online") == true) && fresh
+                val showOnline = primarySnap.getBoolean("showOnlineStatus") ?: true
+                resolvedOnline = showOnline && (primarySnap.getBoolean("online") == true) && fresh
                 finalName = resolvedDirName.trim().ifBlank { storedHandle }.take(60)
             } else {
                 cleanHandle = sanitizeHandle(rawHandle.ifBlank { name })
@@ -2170,9 +2571,11 @@ class NomiChatRepository(
             val contactRef = userRef.collection("contacts").document(contactId)
             val msgRef = contactRef.collection("messages").document()
 
-            val contactSnap = withTimeoutOrNull(2500L) {
-                runCatching { contactRef.get().await() }.getOrNull()
-            } ?: runCatching { contactRef.get(Source.CACHE).await() }.getOrNull()
+            val contactSnap = runCatching { contactRef.get(Source.CACHE).await() }.getOrNull()
+                ?.takeIf { it.exists() }
+                ?: withTimeoutOrNull(2500L) {
+                    runCatching { contactRef.get().await() }.getOrNull()
+                }
             var peerUid = contactSnap?.getString("peerUid").orEmpty()
             val peerUsername = contactSnap?.getString("username").orEmpty()
             val threadType = contactSnap?.getString("threadType").orEmpty()
@@ -2185,18 +2588,28 @@ class NomiChatRepository(
             var resolvedPeerName: String? = null
             var linkedNewly = false
 
-            if (validSender == "me" && threadType != "group" && peerUid.isBlank() && peerUsername.isNotBlank()) {
-                val cleanPeerHandle = sanitizeHandle(peerUsername)
-                val dirSnap = withTimeoutOrNull(2500L) {
-                    runCatching { db.collection("directory").document(cleanPeerHandle).get().await() }.getOrNull()
-                }
-                if (dirSnap != null && dirSnap.exists() && dirSnap.getString("accountStatus") != "banned") {
-                    val owner = dirSnap.getString("ownerUid").orEmpty()
-                    if (owner.isNotBlank() && owner != uid) {
-                        peerUid = owner
-                        resolvedPeerName = dirSnap.getString("displayName")?.takeIf { it.isNotBlank() }?.take(60)
-                        linkedNewly = true
+            if (validSender == "me" && threadType != "group" && peerUid.isBlank()) {
+                if (peerUsername.isNotBlank()) {
+                    val cleanPeerHandle = sanitizeHandle(peerUsername)
+                    val dirRef = db.collection("directory").document(cleanPeerHandle)
+                    val dirSnap = runCatching { dirRef.get(Source.CACHE).await() }.getOrNull()
+                        ?.takeIf { it.exists() }
+                        ?: withTimeoutOrNull(3500L) {
+                            runCatching { dirRef.get().await() }.getOrNull()
+                        }
+                    if (dirSnap != null && dirSnap.exists() && dirSnap.getString("accountStatus") != "banned") {
+                        val owner = dirSnap.getString("ownerUid").orEmpty()
+                        if (owner.isNotBlank() && owner != uid) {
+                            peerUid = owner
+                            resolvedPeerName = dirSnap.getString("displayName")?.takeIf { it.isNotBlank() }?.take(60)
+                            linkedNewly = true
+                        }
                     }
+                }
+                if (peerUid.isBlank()) {
+                    return Result.failure(
+                        IllegalStateException("Recipient account could not be verified. Please refresh or re-add the user.")
+                    )
                 }
             }
 
@@ -2250,9 +2663,11 @@ class NomiChatRepository(
             batch.update(contactRef, contactUpdates)
 
             if (validSender == "me" && peerUid.isNotBlank() && peerUid != uid) {
-                val myProfileSnap = withTimeoutOrNull(2000L) {
-                    runCatching { userRef.get().await() }.getOrNull()
-                } ?: runCatching { userRef.get(Source.CACHE).await() }.getOrNull()
+                val myProfileSnap = runCatching { userRef.get(Source.CACHE).await() }.getOrNull()
+                    ?.takeIf { it.exists() }
+                    ?: withTimeoutOrNull(2000L) {
+                        runCatching { userRef.get().await() }.getOrNull()
+                    }
                 val myUsername = myProfileSnap?.getString("username").orEmpty().ifBlank { "nomiuser" }.take(40)
                 val myDisplayName = myProfileSnap?.getString("displayName").orEmpty()
                     .ifBlank { auth.currentUser?.displayName.orEmpty() }
@@ -2299,281 +2714,352 @@ class NomiChatRepository(
     override suspend fun startIncomingSync(userId: String, activeContactIdProvider: () -> String?) {
         val uid = auth.currentUser?.uid ?: return
         if (uid != userId) return
-        val processedDocIds = mutableSetOf<String>()
+        val processedDocIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+        val retrySignals = MutableSharedFlow<Unit>(extraBufferCapacity = 8)
 
-        db.collection("direct_messages")
-            .whereEqualTo("toUid", uid)
-            .snapshots()
-            .retryWhen { error, attempt ->
-                val firestoreError = generateSequence(error) { it.cause }
-                    .filterIsInstance<FirebaseFirestoreException>()
-                    .firstOrNull()
-                if (firestoreError == null && error is CancellationException) throw error
-                val toLog = firestoreError ?: (error as? Exception)
-                if (toLog != null && auth.currentUser?.uid == uid) {
-                    handleFirestoreError(toLog, OperationType.LIST, "direct_messages")
+        suspend fun processRelayDocument(doc: DocumentSnapshot): Boolean {
+            if (!processedDocIds.add(doc.id)) {
+                return true
+            }
+            if (processedDocIds.size > 500) {
+                synchronized(processedDocIds) {
+                    val iter = processedDocIds.iterator()
+                    if (iter.hasNext()) {
+                        iter.next()
+                        iter.remove()
+                    }
                 }
-                if (firestoreError?.code == FirebaseFirestoreException.Code.PERMISSION_DENIED) {
-                    false
+            }
+
+            val fromUid = doc.getString("fromUid").orEmpty()
+            val fromUsername = sanitizeHandle(doc.getString("fromUsername").orEmpty())
+            val fromDisplayName = doc.getString("fromDisplayName").orEmpty().ifBlank { fromUsername }.take(60)
+            val text = doc.getString("text").orEmpty().take(2000)
+            val messageType = doc.getString("messageType")?.takeIf {
+                it in listOf("text", "voice", "image", "file", "call")
+            } ?: "text"
+            val mediaData = doc.getString("mediaData")?.takeIf { it.isNotBlank() && it.length <= 240_000 }
+            val durationSec = (doc.getLong("durationSec") ?: 0L).coerceIn(0L, 600L)
+            val timeLabel = doc.getString("timeLabel").orEmpty().ifBlank { currentFormattedTime() }.take(30)
+            val replyToText = doc.getString("replyToText")?.takeIf { it.isNotBlank() }?.take(200)
+            val replyToSender = doc.getString("replyToSender")?.takeIf { it.isNotBlank() }?.take(60)
+            val replyToMessageId = doc.getString("replyToMessageId")?.takeIf { it.isNotBlank() }?.take(128)
+            if (fromUid.isBlank() || text.isBlank()) {
+                runCatching { doc.reference.delete().await() }
+                return true
+            }
+
+            val delivered = runCatching {
+                val userRef = db.collection("users").document(uid)
+                val contactsCol = userRef.collection("contacts")
+                val existingByUid = runCatching {
+                    contactsCol.whereEqualTo("peerUid", fromUid).limit(1).get(Source.CACHE).await()
+                }.getOrNull()?.documents?.firstOrNull()
+                    ?: contactsCol.whereEqualTo("peerUid", fromUid).limit(1).get().await().documents.firstOrNull()
+                val existingDoc = existingByUid ?: runCatching {
+                    contactsCol.whereEqualTo("username", fromUsername).limit(1).get(Source.CACHE).await()
+                }.getOrNull()?.documents?.firstOrNull()
+                    ?: contactsCol.whereEqualTo("username", fromUsername).limit(1).get().await().documents.firstOrNull()
+
+                if (existingDoc != null && existingDoc.getBoolean("blocked") == true) {
+                    doc.reference.delete().await()
+                    return@runCatching true
+                }
+
+                val peerPubRef = db.collection("public_profiles").document(fromUid)
+                val peerPubSnap = getFreshSnapshot(peerPubRef, 2500L)?.takeIf { it.exists() }
+                val peerDirDirectSnap = if (fromUsername.isNotBlank()) {
+                    getFreshSnapshot(db.collection("directory").document(fromUsername), 2000L)
+                        ?.takeIf { it.exists() }
+                } else null
+                val peerDirSnap = pickFresherDoc(peerPubSnap, peerDirDirectSnap)
+                val peerFallbackSnap = if (peerDirSnap == peerPubSnap) peerDirDirectSnap else peerPubSnap
+                val livePeerHandle = peerDirSnap?.getString("username")
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { sanitizeHandle(it) }
+                    ?: fromUsername
+                val livePeerName = peerDirSnap?.getString("displayName")
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?.take(60)
+                    ?: fromDisplayName
+                @Suppress("UNCHECKED_CAST")
+                val peerAllowedViewers = (peerDirSnap?.get("allowedViewerUids") as? List<*>)
+                    ?.mapNotNull { it as? String }
+                    ?: emptyList()
+                val visibleToMe = if (peerDirSnap == null || !peerDirSnap.exists()) {
+                    true
                 } else {
-                    delay(minOf(15_000L, 1_000L * (attempt + 1)))
-                    auth.currentUser?.uid == uid
+                    canViewerSeeProfile(
+                        profileVisibility = peerDirSnap.getString("profileVisibility"),
+                        allowedViewerUids = peerAllowedViewers,
+                        maxProfileViewers = peerDirSnap.getLong("maxProfileViewers") ?: 0L,
+                        ownerUid = peerDirSnap.getString("ownerUid").orEmpty().ifBlank { fromUid },
+                        viewerUid = uid
+                    )
                 }
+                val peerBio = if (visibleToMe) {
+                    peerDirSnap?.getString("bio").orEmpty()
+                        .ifBlank { peerFallbackSnap?.getString("bio").orEmpty() }
+                        .take(200)
+                } else ""
+                val peerPhotoData = if (visibleToMe) {
+                    peerDirSnap?.getString("photoData")?.takeIf { it.isNotBlank() && it.length <= 150000 }
+                        ?: peerFallbackSnap?.getString("photoData")?.takeIf { it.isNotBlank() && it.length <= 150000 }
+                } else null
+                val peerBannerData = if (visibleToMe) {
+                    peerDirSnap?.getString("bannerData")?.takeIf { it.isNotBlank() && it.length <= 150000 }
+                        ?: peerFallbackSnap?.getString("bannerData")?.takeIf { it.isNotBlank() && it.length <= 150000 }
+                } else null
+
+                val batch = db.batch()
+                val targetContactId: String
+                var isBlockedContact = false
+                var isMutedContact = false
+                if (existingDoc == null) {
+                    val newContactRef = contactsCol.document()
+                    targetContactId = newContactRef.id
+                    val msgRef = if (isValidFirestoreId(doc.id)) {
+                        newContactRef.collection("messages").document(doc.id)
+                    } else {
+                        newContactRef.collection("messages").document()
+                    }
+                    val isActiveOpen = activeContactIdProvider() == targetContactId
+                    val newContactPayload = mutableMapOf<String, Any>(
+                        "userId" to uid,
+                        "name" to livePeerName,
+                        "username" to livePeerHandle,
+                        "phone" to "@$livePeerHandle",
+                        "threadType" to "chat",
+                        "bio" to peerBio,
+                        "online" to false,
+                        "typing" to false,
+                        "unreadCount" to if (isActiveOpen) 0L else 1L,
+                        "lastMessageText" to text.take(1000),
+                        "lastMessageFromMe" to false,
+                        "lastMessageTimeLabel" to timeLabel,
+                        "pinned" to false,
+                        "locked" to false,
+                        "blocked" to false,
+                        "archived" to false,
+                        "muted" to false,
+                        "disappearingSeconds" to 0L,
+                        "chatTheme" to "classic",
+                        "customRenamed" to false,
+                        "peerUid" to fromUid,
+                        "isRegisteredPeer" to true,
+                        "accountStatus" to "active",
+                        "reportCount" to 0L,
+                        "reportedBy" to emptyList<String>(),
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                    if (!peerPhotoData.isNullOrBlank()) {
+                        newContactPayload["photoData"] = peerPhotoData
+                    }
+                    if (!peerBannerData.isNullOrBlank()) {
+                        newContactPayload["bannerData"] = peerBannerData
+                    }
+                    batch.set(newContactRef, newContactPayload)
+                    val msgPayload = mutableMapOf<String, Any>(
+                        "userId" to uid,
+                        "contactId" to targetContactId,
+                        "sender" to "them",
+                        "text" to text,
+                        "messageType" to messageType,
+                        "durationSec" to durationSec,
+                        "expiresAtMs" to 0L,
+                        "timeLabel" to timeLabel,
+                        "aiGenerated" to false,
+                        "createdAt" to FieldValue.serverTimestamp()
+                    )
+                    if (mediaData != null) {
+                        msgPayload["mediaData"] = mediaData
+                    }
+                    if (replyToText != null) {
+                        msgPayload["replyToText"] = replyToText
+                    }
+                    if (replyToSender != null) {
+                        msgPayload["replyToSender"] = replyToSender
+                    }
+                    if (replyToMessageId != null) {
+                        msgPayload["replyToMessageId"] = replyToMessageId
+                    }
+                    batch.set(msgRef, msgPayload)
+                } else {
+                    targetContactId = existingDoc.id
+                    isBlockedContact = existingDoc.getBoolean("blocked") == true
+                    isMutedContact = existingDoc.getBoolean("muted") == true
+                    val isCustomRenamed = existingDoc.getBoolean("customRenamed") == true
+                    val disappearingSec = (existingDoc.getLong("disappearingSeconds") ?: 0L).coerceAtLeast(0L)
+                    val expiresAtMs = if (disappearingSec > 0L) {
+                        System.currentTimeMillis() + disappearingSec * 1000L
+                    } else {
+                        0L
+                    }
+                    val contactRef = existingDoc.reference
+                    val msgRef = if (isValidFirestoreId(doc.id)) {
+                        contactRef.collection("messages").document(doc.id)
+                    } else {
+                        contactRef.collection("messages").document()
+                    }
+                    val isActiveOpen = activeContactIdProvider() == targetContactId
+                    val msgPayload = mutableMapOf<String, Any>(
+                        "userId" to uid,
+                        "contactId" to targetContactId,
+                        "sender" to "them",
+                        "text" to text,
+                        "messageType" to messageType,
+                        "durationSec" to durationSec,
+                        "expiresAtMs" to expiresAtMs,
+                        "timeLabel" to timeLabel,
+                        "aiGenerated" to false,
+                        "createdAt" to FieldValue.serverTimestamp()
+                    )
+                    if (mediaData != null) {
+                        msgPayload["mediaData"] = mediaData
+                    }
+                    if (replyToText != null) {
+                        msgPayload["replyToText"] = replyToText
+                    }
+                    if (replyToSender != null) {
+                        msgPayload["replyToSender"] = replyToSender
+                    }
+                    if (replyToMessageId != null) {
+                        msgPayload["replyToMessageId"] = replyToMessageId
+                    }
+                    batch.set(msgRef, msgPayload)
+                    val existingContactUpdates = mutableMapOf<String, Any>(
+                        "username" to livePeerHandle,
+                        "peerUid" to fromUid,
+                        "isRegisteredPeer" to true,
+                        "bio" to peerBio,
+                        "lastMessageText" to text.take(1000),
+                        "lastMessageFromMe" to false,
+                        "lastMessageTimeLabel" to timeLabel,
+                        "unreadCount" to if (isActiveOpen) 0L else FieldValue.increment(1L),
+                        "typing" to false,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                    val oldPhone = existingDoc.getString("phone").orEmpty()
+                    if (oldPhone.isBlank() || oldPhone.startsWith("@")) {
+                        existingContactUpdates["phone"] = "@$livePeerHandle"
+                    }
+                    if (!isCustomRenamed) {
+                        existingContactUpdates["name"] = livePeerName
+                    }
+                    if (!visibleToMe) {
+                        existingContactUpdates["photoData"] = FieldValue.delete()
+                        existingContactUpdates["bannerData"] = FieldValue.delete()
+                    } else {
+                        if (!peerPhotoData.isNullOrBlank()) {
+                            existingContactUpdates["photoData"] = peerPhotoData
+                        }
+                        if (!peerBannerData.isNullOrBlank()) {
+                            existingContactUpdates["bannerData"] = peerBannerData
+                        }
+                    }
+                    batch.update(contactRef, existingContactUpdates)
+                }
+                batch.delete(doc.reference)
+                batch.commit().await()
+                if (!isBlockedContact && !isMutedContact) {
+                    _incomingAlerts.tryEmit(
+                        IncomingMessageAlert(
+                            contactId = targetContactId,
+                            senderName = fromDisplayName,
+                            senderHandle = fromUsername,
+                            text = text
+                        )
+                    )
+                }
+                true
+            }.onFailure { err ->
+                if (err is CancellationException) throw err
+                processedDocIds.remove(doc.id)
             }
-            .collect { snapshot ->
-                for (doc in snapshot.documents) {
-                    if (!processedDocIds.add(doc.id)) {
-                        continue
-                    }
-                    if (processedDocIds.size > 500) {
-                        val iter = processedDocIds.iterator()
-                        if (iter.hasNext()) {
-                            iter.next()
-                            iter.remove()
-                        }
-                    }
+            return delivered.getOrDefault(false)
+        }
 
-                    val fromUid = doc.getString("fromUid").orEmpty()
-                    val fromUsername = sanitizeHandle(doc.getString("fromUsername").orEmpty())
-                    val fromDisplayName = doc.getString("fromDisplayName").orEmpty().ifBlank { fromUsername }.take(60)
-                    val text = doc.getString("text").orEmpty().take(2000)
-                    val messageType = doc.getString("messageType")?.takeIf {
-                        it in listOf("text", "voice", "image", "file", "call")
-                    } ?: "text"
-                    val mediaData = doc.getString("mediaData")?.takeIf { it.isNotBlank() && it.length <= 240_000 }
-                    val durationSec = (doc.getLong("durationSec") ?: 0L).coerceIn(0L, 600L)
-                    val timeLabel = doc.getString("timeLabel").orEmpty().ifBlank { currentFormattedTime() }.take(30)
-                    val replyToText = doc.getString("replyToText")?.takeIf { it.isNotBlank() }?.take(200)
-                    val replyToSender = doc.getString("replyToSender")?.takeIf { it.isNotBlank() }?.take(60)
-                    val replyToMessageId = doc.getString("replyToMessageId")?.takeIf { it.isNotBlank() }?.take(128)
-                    if (fromUid.isBlank() || text.isBlank()) {
-                        runCatching { doc.reference.delete().await() }
-                        continue
-                    }
-
-                    val delivered = runCatching {
-                        val userRef = db.collection("users").document(uid)
-                        val existingByUid = userRef.collection("contacts")
-                            .whereEqualTo("peerUid", fromUid)
-                            .limit(1)
-                            .get()
-                            .await()
-                        val existingDoc = existingByUid.documents.firstOrNull() ?: userRef.collection("contacts")
-                            .whereEqualTo("username", fromUsername)
-                            .limit(1)
-                            .get()
-                            .await()
-                            .documents
-                            .firstOrNull()
-
-                        if (existingDoc != null && existingDoc.getBoolean("blocked") == true) {
-                            doc.reference.delete().await()
-                            return@runCatching true
+        coroutineScope {
+            // Retry sweep for any failed or missed direct_messages documents
+            launch {
+                retrySignals.collectLatest {
+                    var backoffMs = 1500L
+                    while (isActive && auth.currentUser?.uid == uid) {
+                        delay(backoffMs)
+                        val pendingDocs = runCatching {
+                            db.collection("direct_messages")
+                                .whereEqualTo("toUid", uid)
+                                .get(Source.SERVER)
+                                .await()
+                                .documents
+                        }.getOrNull() ?: break
+                        if (pendingDocs.isEmpty()) break
+                        var anyFailed = false
+                        for (doc in pendingDocs) {
+                            if (!processRelayDocument(doc)) {
+                                anyFailed = true
+                            }
                         }
-
-                        val peerPubSnap = runCatching {
-                            db.collection("public_profiles").document(fromUid).get().await()
-                        }.getOrNull()?.takeIf { it.exists() }
-                        val peerDirSnap = peerPubSnap ?: runCatching {
-                            db.collection("directory").document(fromUsername).get().await()
-                        }.getOrNull()
-                        val livePeerHandle = peerDirSnap?.getString("username")
-                            ?.trim()
-                            ?.takeIf { it.isNotBlank() }
-                            ?.let { sanitizeHandle(it) }
-                            ?: fromUsername
-                        val livePeerName = peerDirSnap?.getString("displayName")
-                            ?.trim()
-                            ?.takeIf { it.isNotBlank() }
-                            ?.take(60)
-                            ?: fromDisplayName
-                        @Suppress("UNCHECKED_CAST")
-                        val peerAllowedViewers = (peerDirSnap?.get("allowedViewerUids") as? List<*>)
-                            ?.mapNotNull { it as? String }
-                            ?: emptyList()
-                        val visibleToMe = if (peerDirSnap == null || !peerDirSnap.exists()) {
-                            true
-                        } else {
-                            canViewerSeeProfile(
-                                profileVisibility = peerDirSnap.getString("profileVisibility"),
-                                allowedViewerUids = peerAllowedViewers,
-                                maxProfileViewers = peerDirSnap.getLong("maxProfileViewers") ?: 0L,
-                                ownerUid = peerDirSnap.getString("ownerUid").orEmpty().ifBlank { fromUid },
-                                viewerUid = uid
-                            )
-                        }
-                        val peerBio = if (visibleToMe) {
-                            peerDirSnap?.getString("bio").orEmpty().take(200)
-                        } else ""
-                        val peerPhotoData = if (visibleToMe) {
-                            peerDirSnap?.getString("photoData")
-                                ?.takeIf { it.isNotBlank() && it.length <= 150000 }
-                        } else null
-                        val peerBannerData = if (visibleToMe) {
-                            peerDirSnap?.getString("bannerData")
-                                ?.takeIf { it.isNotBlank() && it.length <= 150000 }
-                        } else null
-
-                        val batch = db.batch()
-                        val targetContactId: String
-                        var isBlockedContact = false
-                        var isMutedContact = false
-                        if (existingDoc == null) {
-                            val newContactRef = userRef.collection("contacts").document()
-                            targetContactId = newContactRef.id
-                            val msgRef = newContactRef.collection("messages").document()
-                            val isActiveOpen = activeContactIdProvider() == targetContactId
-                            val newContactPayload = mutableMapOf<String, Any>(
-                                "userId" to uid,
-                                "name" to livePeerName,
-                                "username" to livePeerHandle,
-                                "phone" to "@$livePeerHandle",
-                                "threadType" to "chat",
-                                "bio" to peerBio,
-                                "online" to false,
-                                "typing" to false,
-                                "unreadCount" to if (isActiveOpen) 0L else 1L,
-                                "lastMessageText" to text.take(1000),
-                                "lastMessageFromMe" to false,
-                                "lastMessageTimeLabel" to timeLabel,
-                                "pinned" to false,
-                                "locked" to false,
-                                "blocked" to false,
-                                "archived" to false,
-                                "muted" to false,
-                                "disappearingSeconds" to 0L,
-                                "chatTheme" to "classic",
-                                "customRenamed" to false,
-                                "peerUid" to fromUid,
-                                "isRegisteredPeer" to true,
-                                "accountStatus" to "active",
-                                "reportCount" to 0L,
-                                "reportedBy" to emptyList<String>(),
-                                "createdAt" to FieldValue.serverTimestamp(),
-                                "updatedAt" to FieldValue.serverTimestamp()
-                            )
-                            if (!peerPhotoData.isNullOrBlank()) {
-                                newContactPayload["photoData"] = peerPhotoData
-                            }
-                            if (!peerBannerData.isNullOrBlank()) {
-                                newContactPayload["bannerData"] = peerBannerData
-                            }
-                            batch.set(newContactRef, newContactPayload)
-                            val msgPayload = mutableMapOf<String, Any>(
-                                "userId" to uid,
-                                "contactId" to targetContactId,
-                                "sender" to "them",
-                                "text" to text,
-                                "messageType" to messageType,
-                                "durationSec" to durationSec,
-                                "expiresAtMs" to 0L,
-                                "timeLabel" to timeLabel,
-                                "aiGenerated" to false,
-                                "createdAt" to FieldValue.serverTimestamp()
-                            )
-                            if (mediaData != null) {
-                                msgPayload["mediaData"] = mediaData
-                            }
-                            if (replyToText != null) {
-                                msgPayload["replyToText"] = replyToText
-                            }
-                            if (replyToSender != null) {
-                                msgPayload["replyToSender"] = replyToSender
-                            }
-                            if (replyToMessageId != null) {
-                                msgPayload["replyToMessageId"] = replyToMessageId
-                            }
-                            batch.set(msgRef, msgPayload)
-                        } else {
-                            targetContactId = existingDoc.id
-                            isBlockedContact = existingDoc.getBoolean("blocked") == true
-                            isMutedContact = existingDoc.getBoolean("muted") == true
-                            val isCustomRenamed = existingDoc.getBoolean("customRenamed") == true
-                            val disappearingSec = (existingDoc.getLong("disappearingSeconds") ?: 0L).coerceAtLeast(0L)
-                            val expiresAtMs = if (disappearingSec > 0L) {
-                                System.currentTimeMillis() + disappearingSec * 1000L
-                            } else {
-                                0L
-                            }
-                            val contactRef = existingDoc.reference
-                            val msgRef = contactRef.collection("messages").document()
-                            val isActiveOpen = activeContactIdProvider() == targetContactId
-                            val msgPayload = mutableMapOf<String, Any>(
-                                "userId" to uid,
-                                "contactId" to targetContactId,
-                                "sender" to "them",
-                                "text" to text,
-                                "messageType" to messageType,
-                                "durationSec" to durationSec,
-                                "expiresAtMs" to expiresAtMs,
-                                "timeLabel" to timeLabel,
-                                "aiGenerated" to false,
-                                "createdAt" to FieldValue.serverTimestamp()
-                            )
-                            if (mediaData != null) {
-                                msgPayload["mediaData"] = mediaData
-                            }
-                            if (replyToText != null) {
-                                msgPayload["replyToText"] = replyToText
-                            }
-                            if (replyToSender != null) {
-                                msgPayload["replyToSender"] = replyToSender
-                            }
-                            if (replyToMessageId != null) {
-                                msgPayload["replyToMessageId"] = replyToMessageId
-                            }
-                            batch.set(msgRef, msgPayload)
-                            val existingContactUpdates = mutableMapOf<String, Any>(
-                                "username" to livePeerHandle,
-                                "peerUid" to fromUid,
-                                "isRegisteredPeer" to true,
-                                "bio" to peerBio,
-                                "lastMessageText" to text.take(1000),
-                                "lastMessageFromMe" to false,
-                                "lastMessageTimeLabel" to timeLabel,
-                                "unreadCount" to if (isActiveOpen) 0L else FieldValue.increment(1L),
-                                "typing" to false,
-                                "updatedAt" to FieldValue.serverTimestamp()
-                            )
-                            val oldPhone = existingDoc.getString("phone").orEmpty()
-                            if (oldPhone.isBlank() || oldPhone.startsWith("@")) {
-                                existingContactUpdates["phone"] = "@$livePeerHandle"
-                            }
-                            if (!isCustomRenamed) {
-                                existingContactUpdates["name"] = livePeerName
-                            }
-                            if (!visibleToMe) {
-                                existingContactUpdates["photoData"] = FieldValue.delete()
-                                existingContactUpdates["bannerData"] = FieldValue.delete()
-                            } else {
-                                if (!peerPhotoData.isNullOrBlank()) {
-                                    existingContactUpdates["photoData"] = peerPhotoData
-                                }
-                                if (!peerBannerData.isNullOrBlank()) {
-                                    existingContactUpdates["bannerData"] = peerBannerData
-                                }
-                            }
-                            batch.update(contactRef, existingContactUpdates)
-                        }
-                        batch.delete(doc.reference)
-                        batch.commit().await()
-                        if (!isBlockedContact && !isMutedContact) {
-                            _incomingAlerts.tryEmit(
-                                IncomingMessageAlert(
-                                    contactId = targetContactId,
-                                    senderName = fromDisplayName,
-                                    senderHandle = fromUsername,
-                                    text = text
-                                )
-                            )
-                        }
-                        true
-                    }
-                    if (delivered.isFailure) {
-                        processedDocIds.remove(doc.id)
+                        if (!anyFailed) break
+                        backoffMs = minOf(12_000L, backoffMs * 2L)
                     }
                 }
             }
+
+            // Initial server catch-up sweep in case relay docs arrived while offline
+            launch {
+                val catchUpDocs = runCatching {
+                    db.collection("direct_messages")
+                        .whereEqualTo("toUid", uid)
+                        .get(Source.SERVER)
+                        .await()
+                        .documents
+                }.getOrDefault(emptyList())
+                var anyFailed = false
+                for (doc in catchUpDocs) {
+                    if (!processRelayDocument(doc)) {
+                        anyFailed = true
+                    }
+                }
+                if (anyFailed) {
+                    retrySignals.tryEmit(Unit)
+                }
+            }
+
+            db.collection("direct_messages")
+                .whereEqualTo("toUid", uid)
+                .snapshots()
+                .retryWhen { error, attempt ->
+                    val firestoreError = generateSequence(error) { it.cause }
+                        .filterIsInstance<FirebaseFirestoreException>()
+                        .firstOrNull()
+                    if (firestoreError == null && error is CancellationException) throw error
+                    val toLog = firestoreError ?: (error as? Exception)
+                    if (toLog != null && auth.currentUser?.uid == uid) {
+                        handleFirestoreError(toLog, OperationType.LIST, "direct_messages")
+                    }
+                    if (firestoreError?.code == FirebaseFirestoreException.Code.PERMISSION_DENIED) {
+                        false
+                    } else {
+                        delay(minOf(15_000L, 1_000L * (attempt + 1)))
+                        auth.currentUser?.uid == uid
+                    }
+                }
+                .collect { snapshot ->
+                    var anyFailed = false
+                    for (doc in snapshot.documents) {
+                        if (!processRelayDocument(doc)) {
+                            anyFailed = true
+                        }
+                    }
+                    if (anyFailed) {
+                        retrySignals.tryEmit(Unit)
+                    }
+                }
+        }
     }
 
     override suspend fun setUserPresence(userId: String, online: Boolean) {
@@ -2581,37 +3067,47 @@ class NomiChatRepository(
         if (uid != userId) return
         runCatching {
             val userRef = db.collection("users").document(uid)
-            val snap = userRef.get().await()
+            val snap = runCatching { userRef.get(Source.CACHE).await() }.getOrNull()
+                ?.takeIf { it.exists() }
+                ?: userRef.get().await()
             if (!snap.exists()) return
+            val isVerified = isVerifiedAdminSession()
             val showOnline = snap.getBoolean("showOnlineStatus") ?: true
             val effectiveOnline = online && showOnline
             userRef.update(
                 mapOf(
                     "online" to effectiveOnline,
+                    "verified" to isVerified,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()
             val handle = sanitizeHandle(snap.getString("username").orEmpty())
             if (handle.isNotBlank()) {
                 val dirRef = db.collection("directory").document(handle)
-                val dirSnap = dirRef.get().await()
+                val dirSnap = runCatching { dirRef.get(Source.CACHE).await() }.getOrNull()
+                    ?.takeIf { it.exists() }
+                    ?: dirRef.get().await()
                 if (dirSnap.exists() && dirSnap.getString("ownerUid") == uid) {
                     dirRef.update(
                         mapOf(
                             "online" to effectiveOnline,
                             "showOnlineStatus" to showOnline,
+                            "verified" to isVerified,
                             "updatedAt" to FieldValue.serverTimestamp()
                         )
                     ).await()
                 }
             }
             val pubRef = db.collection("public_profiles").document(uid)
-            val pubSnap = runCatching { pubRef.get().await() }.getOrNull()
+            val pubSnap = runCatching { pubRef.get(Source.CACHE).await() }.getOrNull()
+                ?.takeIf { it.exists() }
+                ?: runCatching { pubRef.get().await() }.getOrNull()
             if (pubSnap != null && pubSnap.exists()) {
                 pubRef.update(
                     mapOf(
                         "online" to effectiveOnline,
                         "showOnlineStatus" to showOnline,
+                        "verified" to isVerified,
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
                 ).await()
@@ -3418,6 +3914,7 @@ class NomiChatRepository(
             val syncedBio = if (visibleToMeSafe(visibleToViewer)) {
                 entry.bio.trim().ifBlank { thread.bio }
             } else ""
+            val syncedVerified = entry.verified && syncedStatus != "banned"
             val updatedMs = entry.updatedAt?.toDate()?.time
             val withinWindow = updatedMs == null || (nowMillis - updatedMs) <= PRESENCE_STALE_MS
             val realOnline = entry.showOnlineStatus && entry.online && syncedStatus != "banned" && withinWindow
@@ -3429,6 +3926,7 @@ class NomiChatRepository(
                 photoData = syncedPhoto,
                 bannerData = syncedBanner,
                 online = realOnline,
+                verified = syncedVerified,
                 accountStatus = syncedStatus,
                 peerUid = thread.peerUid.ifBlank { entry.ownerUid.orEmpty() },
                 isRegisteredPeer = thread.isRegisteredPeer || !entry.ownerUid.isNullOrBlank()

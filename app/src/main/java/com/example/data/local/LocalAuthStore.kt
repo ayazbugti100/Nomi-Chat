@@ -95,6 +95,17 @@ class LocalAuthStore(context: Context) {
         }
     }
 
+    private fun unretireUsernameUnlocked(username: String) {
+        val clean = NomiChatRepository.normalizeUsername(username).take(40)
+        if (clean.isBlank()) return
+        val retired = readRetiredUsernamesUnlocked()
+        if (retired.remove(clean)) {
+            val arr = JSONArray()
+            retired.forEach { arr.put(it) }
+            retiredUsernamesFile.writeText(arr.toString())
+        }
+    }
+
     suspend fun signUpUser(
         fullName: String,
         usernameInput: String,
@@ -118,10 +129,10 @@ class LocalAuthStore(context: Context) {
 
         mutex.withLock {
             val root = readRootUnlocked()
-            val retired = readRetiredUsernamesUnlocked()
-            if (retired.contains(user) || findAccountKeyByUsernameUnlocked(root, user) != null) {
+            if (findAccountKeyByUsernameUnlocked(root, user) != null) {
                 return@withContext LocalAuthOutcome.Error("This username is already taken / already added.")
             }
+            unretireUsernameUnlocked(user)
 
             val salt = PasswordHasher.generateSalt()
             val hash = PasswordHasher.hashPassword(password, salt)
@@ -835,14 +846,11 @@ class LocalAuthStore(context: Context) {
                     val nextUsername = NomiChatRepository.normalizeUsername(rawHandle).take(40)
                     require(nextUsername.isNotEmpty()) { "Invalid username." }
                     require(nextUsername.length in 2..40) { "Username must be between 2 and 40 characters." }
-                    val retired = readRetiredUsernamesUnlocked()
                     val isChanging = nextUsername != currentKey && nextUsername != previousStoredUsername
-                    if (isChanging && (retired.contains(nextUsername) || findAccountKeyByUsernameUnlocked(root, nextUsername) != null)) {
+                    if (isChanging && findAccountKeyByUsernameUnlocked(root, nextUsername) != null) {
                         throw IllegalStateException("This username is already taken / already added.")
                     }
-                    if (!isChanging && retired.contains(nextUsername)) {
-                        throw IllegalStateException("This username is already taken / already added.")
-                    }
+                    unretireUsernameUnlocked(nextUsername)
                     account.put("username", nextUsername)
                     account.put("userId", nextUsername)
                     if (nextUsername != currentKey) {
@@ -1943,7 +1951,7 @@ class LocalAuthStore(context: Context) {
             maxProfileViewers = obj.optLong("maxProfileViewers", 0L).coerceIn(0L, 500L),
             online = obj.optBoolean("online", false),
             showOnlineStatus = obj.optBoolean("showOnlineStatus", true),
-            verified = true,
+            verified = false,
             premiumUnlocked = true,
             accountStatus = obj.optString("accountStatus", "active"),
             reportCount = obj.optLong("reportCount", 0L),

@@ -77,7 +77,7 @@ test("Authenticated owner can create and update UserProfile; cannot self-alter r
       dob: "2000-01-01",
       provider: "google",
       online: true,
-      verified: true,
+      verified: false,
       premiumUnlocked: true,
       accountStatus: "active",
       reportCount: 0,
@@ -115,7 +115,7 @@ test("Cross-user isolation prevents Bob from reading or modifying Alice's profil
       dob: "2000-01-01",
       provider: "google",
       online: true,
-      verified: true,
+      verified: false,
       premiumUnlocked: true,
       accountStatus: "active",
       reportCount: 0,
@@ -946,7 +946,7 @@ test("User profile and directory enforce showOnlineStatus boolean privacy rules"
       provider: "google",
       online: true,
       showOnlineStatus: true,
-      verified: true,
+      verified: false,
       premiumUnlocked: true,
       accountStatus: "active",
       reportCount: 0,
@@ -1017,7 +1017,7 @@ test("User profile and directory enforce showOnlineStatus boolean privacy rules"
   );
 });
 
-test("Username reservations enforce uniqueness, permanent retirement lock, and deny reuse/deletion", async () => {
+test("Username reservations enforce uniqueness, allow reclaiming retired unowned handles (A -> B -> A), and deny active theft or deletion", async () => {
   const unauthDb = testEnv.unauthenticatedContext().firestore();
   const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
   const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
@@ -1038,7 +1038,7 @@ test("Username reservations enforce uniqueness, permanent retirement lock, and d
     })
   );
 
-  // Bob cannot steal or overwrite alice_old
+  // Bob cannot steal or overwrite active alice_old
   await assertFails(
     bobDb.collection("usernames").doc("alice_old").set({
       username: "alice_old",
@@ -1074,23 +1074,32 @@ test("Username reservations enforce uniqueness, permanent retirement lock, and d
     })
   );
 
-  // Neither Bob nor Alice can reuse or re-activate retired alice_old, nor delete it
-  await assertFails(
-    bobDb.collection("usernames").doc("alice_old").set({
-      username: "alice_old",
-      ownerUid: BOB_UID,
-      status: "active",
-      createdAt: new Date(Date.now() - 200),
-      updatedAt: new Date(Date.now() - 200),
-    })
-  );
-  await assertFails(
+  // Alice dislikes alice_new and smoothly switches back to her previous username alice_old
+  await assertSucceeds(
     aliceDb.collection("usernames").doc("alice_old").update({
       status: "active",
       ownerUid: ALICE_UID,
       updatedAt: new Date(Date.now() - 200),
     })
   );
+  await assertSucceeds(
+    aliceDb.collection("usernames").doc("alice_new").update({
+      status: "retired",
+      ownerUid: "",
+      updatedAt: new Date(Date.now() - 150),
+    })
+  );
+
+  // Now that alice_old is active again, Bob cannot claim or overwrite it
+  await assertFails(
+    bobDb.collection("usernames").doc("alice_old").update({
+      status: "active",
+      ownerUid: BOB_UID,
+      updatedAt: new Date(Date.now() - 100),
+    })
+  );
+
+  // Deletion of username reservation documents remains forbidden
   await assertFails(aliceDb.collection("usernames").doc("alice_old").delete());
 });
 
@@ -1348,5 +1357,208 @@ test("Admin Gmail lock restricts admin_config and moderation_alerts exclusively 
   });
   await assertSucceeds(adminBatchRecover.commit());
 });
+
+test("Verified blue badge (verified: true) is strictly bound to verified ayazbugti100@gmail.com across users, directory, and public_profiles", async () => {
+  const created = new Date(Date.now() - 5000);
+  const ADMIN_UID = "admin_ayaz_uid";
+  const NEW_USER_UID = "new_user_uid";
+
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID, {
+    email: "ayazbugti100@gmail.com",
+    email_verified: true,
+  }).firestore();
+
+  const unverifiedAdminDb = testEnv.authenticatedContext("unverified_admin_uid", {
+    email: "ayazbugti100@gmail.com",
+    email_verified: false,
+  }).firestore();
+
+  const otherDb = testEnv.authenticatedContext(BOB_UID, {
+    email: "bob@gmail.com",
+    email_verified: true,
+  }).firestore();
+
+  const newUserDb = testEnv.authenticatedContext(NEW_USER_UID).firestore();
+
+  // Verified ayazbugti100@gmail.com CAN create & maintain verified: true on users, directory, and public_profiles
+  await assertSucceeds(
+    adminDb.collection("users").doc(ADMIN_UID).set({
+      userId: ADMIN_UID,
+      displayName: "Ayaz Bugti",
+      username: "ayaz_bugti",
+      email: "ayazbugti100@gmail.com",
+      bio: "Admin",
+      dob: "1995-08-08",
+      provider: "google",
+      online: true,
+      verified: true,
+      premiumUnlocked: true,
+      accountStatus: "active",
+      reportCount: 0,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+  await assertSucceeds(
+    adminDb.collection("directory").doc("ayaz_bugti").set({
+      ownerUid: ADMIN_UID,
+      username: "ayaz_bugti",
+      displayName: "Ayaz Bugti",
+      provider: "google",
+      online: true,
+      verified: true,
+      accountStatus: "active",
+      reportCount: 0,
+      reportedByUids: [],
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+  await assertSucceeds(
+    adminDb.collection("public_profiles").doc(ADMIN_UID).set({
+      ownerUid: ADMIN_UID,
+      username: "ayaz_bugti",
+      displayName: "Ayaz Bugti",
+      online: true,
+      verified: true,
+      accountStatus: "active",
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  // Unverified ayazbugti100@gmail.com CANNOT set verified: true
+  await assertFails(
+    unverifiedAdminDb.collection("users").doc("unverified_admin_uid").set({
+      userId: "unverified_admin_uid",
+      displayName: "Fake",
+      username: "fake_ayaz",
+      bio: "No",
+      dob: "1995-08-08",
+      provider: "google",
+      online: true,
+      verified: true,
+      premiumUnlocked: false,
+      accountStatus: "active",
+      reportCount: 0,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  // Other verified Gmail (bob@gmail.com) CANNOT create verified: true on users, directory, or public_profiles
+  await assertFails(
+    otherDb.collection("users").doc(BOB_UID).set({
+      userId: BOB_UID,
+      displayName: "Bob",
+      username: "bob_verified_attempt",
+      email: "bob@gmail.com",
+      bio: "Bio",
+      dob: "2000-01-01",
+      provider: "google",
+      online: true,
+      verified: true,
+      premiumUnlocked: false,
+      accountStatus: "active",
+      reportCount: 0,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+  await assertFails(
+    otherDb.collection("directory").doc("bob_verified_attempt").set({
+      ownerUid: BOB_UID,
+      username: "bob_verified_attempt",
+      displayName: "Bob",
+      provider: "google",
+      online: true,
+      verified: true,
+      accountStatus: "active",
+      reportCount: 0,
+      reportedByUids: [],
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+  await assertFails(
+    otherDb.collection("public_profiles").doc(BOB_UID).set({
+      ownerUid: BOB_UID,
+      username: "bob_verified_attempt",
+      displayName: "Bob",
+      online: true,
+      verified: true,
+      accountStatus: "active",
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  // New regular user CAN create with verified: false, and CANNOT escalate to verified: true on update
+  await assertSucceeds(
+    newUserDb.collection("users").doc(NEW_USER_UID).set({
+      userId: NEW_USER_UID,
+      displayName: "New User",
+      username: "new_user_1",
+      bio: "Hi",
+      dob: "2002-02-02",
+      provider: "google",
+      online: true,
+      verified: false,
+      premiumUnlocked: false,
+      accountStatus: "active",
+      reportCount: 0,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+  await assertSucceeds(
+    newUserDb.collection("directory").doc("new_user_1").set({
+      ownerUid: NEW_USER_UID,
+      username: "new_user_1",
+      displayName: "New User",
+      provider: "google",
+      online: true,
+      verified: false,
+      accountStatus: "active",
+      reportCount: 0,
+      reportedByUids: [],
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+  await assertSucceeds(
+    newUserDb.collection("public_profiles").doc(NEW_USER_UID).set({
+      ownerUid: NEW_USER_UID,
+      username: "new_user_1",
+      displayName: "New User",
+      online: true,
+      verified: false,
+      accountStatus: "active",
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  // Escalation attempts MUST fail
+  await assertFails(
+    newUserDb.collection("users").doc(NEW_USER_UID).update({
+      verified: true,
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+  await assertFails(
+    newUserDb.collection("directory").doc("new_user_1").update({
+      verified: true,
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+  await assertFails(
+    newUserDb.collection("public_profiles").doc(NEW_USER_UID).update({
+      verified: true,
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+});
+
 
 

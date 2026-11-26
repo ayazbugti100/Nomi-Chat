@@ -49,11 +49,14 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import coil.request.CachePolicy
+import coil.request.ImageRequest
 import com.example.data.model.MainBottomTab
 import com.example.ui.theme.EmeraldBright
 import com.example.ui.theme.EmeraldDark
@@ -87,8 +90,17 @@ fun EmeraldWaveHeader(
         )
     ) {
         if (decodedBannerBytes != null) {
+            val bannerContext = LocalContext.current
+            val bannerRequest = remember(bannerData, decodedBannerBytes) {
+                ImageRequest.Builder(bannerContext)
+                    .data(decodedBannerBytes)
+                    .memoryCacheKey("header_banner_${bannerData?.length}_${bannerData?.hashCode()}")
+                    .diskCachePolicy(CachePolicy.DISABLED)
+                    .crossfade(false)
+                    .build()
+            }
             AsyncImage(
-                model = decodedBannerBytes,
+                model = bannerRequest,
                 contentDescription = "Profile banner background",
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.matchParentSize()
@@ -226,8 +238,17 @@ fun AvatarCircle(
             contentAlignment = Alignment.Center
         ) {
             if (decodedBytes != null) {
+                val avatarContext = LocalContext.current
+                val avatarRequest = remember(photoData, decodedBytes) {
+                    ImageRequest.Builder(avatarContext)
+                        .data(decodedBytes)
+                        .memoryCacheKey("avatar_${photoData?.length}_${photoData?.hashCode()}")
+                        .diskCachePolicy(CachePolicy.DISABLED)
+                        .crossfade(false)
+                        .build()
+                }
                 AsyncImage(
-                    model = decodedBytes,
+                    model = avatarRequest,
                     contentDescription = "$name avatar",
                     contentScale = imageContentScale,
                     modifier = Modifier

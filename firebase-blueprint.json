@@ -65,7 +65,7 @@
         },
         "verified": {
           "type": "boolean",
-          "description": "Whether the verified checkmark is shown."
+          "description": "Verified blue badge strictly locked to verified ayazbugti100@gmail.com."
         },
         "premiumUnlocked": {
           "type": "boolean",
@@ -165,6 +165,10 @@
         "showOnlineStatus": {
           "type": "boolean",
           "description": "Privacy preference controlling whether online presence is visible to others."
+        },
+        "verified": {
+          "type": "boolean",
+          "description": "Verified blue badge strictly locked to verified ayazbugti100@gmail.com."
         },
         "accountStatus": {
           "type": "string",
@@ -621,7 +625,7 @@
     },
     "UsernameReservation": {
       "title": "UsernameReservation",
-      "description": "Unique active or permanently retired/locked username reservation.",
+      "description": "Unique active or released username reservation allowing reuse once released.",
       "type": "object",
       "properties": {
         "username": {
@@ -630,12 +634,12 @@
         },
         "ownerUid": {
           "type": "string",
-          "description": "Firebase Auth UID of active owner, or empty string once retired."
+          "description": "Firebase Auth UID of active owner, or empty string when released."
         },
         "status": {
           "type": "string",
           "enum": ["active", "retired"],
-          "description": "Reservation status; retired usernames stay permanently locked against reuse."
+          "description": "Reservation status; retired/released usernames can be reclaimed once unowned."
         },
         "createdAt": {
           "type": "string",
@@ -673,6 +677,7 @@
         "maxProfileViewers": { "type": "integer" },
         "online": { "type": "boolean" },
         "showOnlineStatus": { "type": "boolean" },
+        "verified": { "type": "boolean" },
         "accountStatus": { "type": "string", "enum": ["active", "banned"] },
         "bannedByAdmin": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time" },
@@ -737,7 +742,7 @@
     },
     "/usernames/{username}": {
       "schema": { "$ref": "#/entities/UsernameReservation" },
-      "description": "Permanent unique username reservation and retired-handle lock registry."
+      "description": "Unique username reservation registry supporting release and reuse."
     },
     "/directory/{username}": {
       "schema": { "$ref": "#/entities/UserDirectoryEntry" },

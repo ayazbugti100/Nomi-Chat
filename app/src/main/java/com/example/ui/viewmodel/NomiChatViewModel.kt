@@ -3,6 +3,8 @@ package com.example.ui.viewmodel
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -607,16 +609,8 @@ class NomiChatViewModel(
         return !status.isConnected
     }
 
-    private suspend fun requireVerifiedOnlineConnection(): Boolean {
+    private fun requireVerifiedOnlineConnection(): Boolean {
         if (isTransportCurrentlyOffline()) {
-            showOfflinePopup()
-            return false
-        }
-        if (networkObserver != null && !networkObserver.verifyInternetAccess()) {
-            showOfflinePopup()
-            return false
-        }
-        if (!repository.verifyActiveFirebaseConnection()) {
             showOfflinePopup()
             return false
         }
@@ -625,7 +619,14 @@ class NomiChatViewModel(
 
     fun reconnectCloudSync() {
         viewModelScope.launch {
-            if (!requireVerifiedOnlineConnection()) {
+            if (isTransportCurrentlyOffline()) {
+                showOfflinePopup()
+                return@launch
+            }
+            val reachable = (networkObserver == null || networkObserver.verifyInternetAccess()) &&
+                repository.verifyActiveFirebaseConnection()
+            if (!reachable) {
+                showOfflinePopup()
                 return@launch
             }
             repository.onNetworkReconnected()
@@ -928,8 +929,7 @@ class NomiChatViewModel(
         _replyingToMessage.value = null
         _quickSuggestions.value = emptyList()
         viewModelScope.launch {
-            repository.onNetworkReconnected()
-            updateTypingStatus(false)
+            typingJob?.cancel()
             val result = repository.sendMessage(
                 userId = currentUserId,
                 contactId = contact.id,
@@ -964,7 +964,6 @@ class NomiChatViewModel(
         val safeDuration = durationSec.coerceIn(1L, 600L)
         _quickSuggestions.value = emptyList()
         viewModelScope.launch {
-            repository.onNetworkReconnected()
             repository.sendMessage(
                 userId = currentUserId,
                 contactId = contact.id,
@@ -995,7 +994,6 @@ class NomiChatViewModel(
             return
         }
         viewModelScope.launch {
-            repository.onNetworkReconnected()
             val encoded = withContext(Dispatchers.IO) {
                 encodeStoryMediaDataUri(context, uri)
             }
@@ -1033,7 +1031,6 @@ class NomiChatViewModel(
             return
         }
         viewModelScope.launch {
-            repository.onNetworkReconnected()
             val encoded = withContext(Dispatchers.IO) {
                 encodeBitmapToDataUri(bitmap)
             }
@@ -1071,7 +1068,6 @@ class NomiChatViewModel(
             return
         }
         viewModelScope.launch {
-            repository.onNetworkReconnected()
             val fileName = withContext(Dispatchers.IO) {
                 resolveDisplayFileName(context, uri)
             }
@@ -1097,7 +1093,6 @@ class NomiChatViewModel(
             return
         }
         viewModelScope.launch {
-            repository.onNetworkReconnected()
             repository.sendMessage(
                 userId = currentUserId,
                 contactId = contact.id,
@@ -1166,7 +1161,6 @@ class NomiChatViewModel(
             .ifBlank { currentUserId }
 
         viewModelScope.launch {
-            repository.onNetworkReconnected()
             repository.reportUserAccount(
                 userId = currentUserId,
                 contact = contact,
@@ -1824,17 +1818,67 @@ class NomiChatViewModel(
         _authRejectionMessage.value = null
     }
 
+    private fun decodeSampledBitmap(context: Context, uri: Uri, maxDim: Int): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(uri)?.use { stream ->
+            BitmapFactory.decodeStream(stream, null, bounds)
+        } ?: return null
+        val srcW = bounds.outWidth
+        val srcH = bounds.outHeight
+        if (srcW <= 0 || srcH <= 0) return null
+
+        var inSampleSize = 1
+        while ((srcW / (inSampleSize * 2)) >= maxDim || (srcH / (inSampleSize * 2)) >= maxDim) {
+            inSampleSize *= 2
+        }
+        val decodeOpts = BitmapFactory.Options().apply {
+            this.inSampleSize = inSampleSize
+            inPreferredConfig = Bitmap.Config.RGB_565
+        }
+        val decoded = context.contentResolver.openInputStream(uri)?.use { stream ->
+            BitmapFactory.decodeStream(stream, null, decodeOpts)
+        } ?: return null
+
+        val rotationDegrees = runCatching {
+            context.contentResolver.openInputStream(uri)?.use { exifStream ->
+                when (
+                    ExifInterface(exifStream).getAttributeInt(
+                        ExifInterface.TAG_ORIENTATION,
+                        ExifInterface.ORIENTATION_NORMAL
+                    )
+                ) {
+                    ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                    ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                    ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                    else -> 0f
+                }
+            } ?: 0f
+        }.getOrDefault(0f)
+
+        return if (rotationDegrees != 0f) {
+            val matrix = Matrix().apply { postRotate(rotationDegrees) }
+            val rotated = Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+            if (rotated !== decoded) decoded.recycle()
+            rotated
+        } else {
+            decoded
+        }
+    }
+
     private fun encodeAvatarDataUri(context: Context, uri: Uri): String? {
+        val original = decodeSampledBitmap(context, uri, maxDim = 320) ?: return null
         return try {
-            val input = context.contentResolver.openInputStream(uri) ?: return null
-            val original = input.use { BitmapFactory.decodeStream(it) } ?: return null
             var maxDim = 320
             var dataUri: String? = null
             while (maxDim >= 160 && dataUri == null) {
                 val scale = maxDim.toFloat() / max(original.width, original.height).toFloat()
                 val targetW = if (scale < 1f) (original.width * scale).toInt().coerceAtLeast(1) else original.width
                 val targetH = if (scale < 1f) (original.height * scale).toInt().coerceAtLeast(1) else original.height
-                val scaled = Bitmap.createScaledBitmap(original, targetW, targetH, true)
+                val scaled = if (targetW == original.width && targetH == original.height) {
+                    original
+                } else {
+                    Bitmap.createScaledBitmap(original, targetW, targetH, true)
+                }
                 var quality = 82
                 while (quality >= 50) {
                     val baos = ByteArrayOutputStream()
@@ -1846,23 +1890,27 @@ class NomiChatViewModel(
                     }
                     quality -= 10
                 }
+                if (scaled !== original) scaled.recycle()
                 maxDim = (maxDim * 3) / 4
             }
             dataUri
         } catch (e: Exception) {
             Log.e(TAG, "Failed to encode avatar image", e)
             null
+        } finally {
+            if (!original.isRecycled) original.recycle()
         }
     }
 
     private fun encodeStoryMediaDataUri(context: Context, uri: Uri): String? {
+        val original = decodeSampledBitmap(context, uri, maxDim = 720) ?: return null
         return try {
-            val input = context.contentResolver.openInputStream(uri) ?: return null
-            val original = input.use { BitmapFactory.decodeStream(it) } ?: return null
             encodeBitmapToDataUri(original)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to encode story media", e)
             null
+        } finally {
+            if (!original.isRecycled) original.recycle()
         }
     }
 
@@ -1981,7 +2029,11 @@ class NomiChatViewModel(
                 val scale = maxDim.toFloat() / max(original.width, original.height).toFloat()
                 val targetW = if (scale < 1f) (original.width * scale).toInt().coerceAtLeast(1) else original.width
                 val targetH = if (scale < 1f) (original.height * scale).toInt().coerceAtLeast(1) else original.height
-                val scaled = Bitmap.createScaledBitmap(original, targetW, targetH, true)
+                val scaled = if (targetW == original.width && targetH == original.height) {
+                    original
+                } else {
+                    Bitmap.createScaledBitmap(original, targetW, targetH, true)
+                }
                 while (quality >= 45) {
                     val baos = ByteArrayOutputStream()
                     scaled.compress(Bitmap.CompressFormat.JPEG, quality, baos)
@@ -1992,6 +2044,7 @@ class NomiChatViewModel(
                     }
                     quality -= 12
                 }
+                if (scaled !== original) scaled.recycle()
                 if (dataUri != null) break
                 maxDim = (maxDim * 3) / 4
                 quality = 68
@@ -2019,16 +2072,19 @@ class NomiChatViewModel(
     }
 
     private fun encodeBannerDataUri(context: Context, uri: Uri): String? {
+        val original = decodeSampledBitmap(context, uri, maxDim = 720) ?: return null
         return try {
-            val input = context.contentResolver.openInputStream(uri) ?: return null
-            val original = input.use { BitmapFactory.decodeStream(it) } ?: return null
             var maxDim = 720
             var dataUri: String? = null
             while (maxDim >= 280 && dataUri == null) {
                 val scale = maxDim.toFloat() / max(original.width, original.height).toFloat()
                 val targetW = if (scale < 1f) (original.width * scale).toInt().coerceAtLeast(1) else original.width
                 val targetH = if (scale < 1f) (original.height * scale).toInt().coerceAtLeast(1) else original.height
-                val scaled = Bitmap.createScaledBitmap(original, targetW, targetH, true)
+                val scaled = if (targetW == original.width && targetH == original.height) {
+                    original
+                } else {
+                    Bitmap.createScaledBitmap(original, targetW, targetH, true)
+                }
                 var quality = 80
                 while (quality >= 42) {
                     val baos = ByteArrayOutputStream()
@@ -2040,12 +2096,15 @@ class NomiChatViewModel(
                     }
                     quality -= 10
                 }
+                if (scaled !== original) scaled.recycle()
                 maxDim = (maxDim * 3) / 4
             }
             dataUri
         } catch (e: Exception) {
             Log.e(TAG, "Failed to encode banner image", e)
             null
+        } finally {
+            if (!original.isRecycled) original.recycle()
         }
     }
 
