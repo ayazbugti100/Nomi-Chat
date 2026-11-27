@@ -3,6 +3,7 @@ package com.example.data.repository
 import android.content.Context
 import com.example.R
 import com.example.data.model.ADMIN_GMAIL
+import com.example.data.model.AdminUserRecord
 import com.example.data.model.AuthFlowMode
 import com.example.data.model.BAN_REPORT_LIMIT
 import com.example.data.model.ChatMessage
@@ -34,6 +35,7 @@ import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.Source
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -2334,6 +2336,7 @@ class NomiChatRepository(
             var resolvedOnline = false
             var resolvedPhotoData: String? = null
             var resolvedBannerData: String? = null
+            var peerAccountStatus = "active"
             val finalName: String
 
             if (validType == "chat") {
@@ -2346,9 +2349,6 @@ class NomiChatRepository(
                 val dirSnap = db.collection("directory").document(cleanHandle).get(Source.SERVER).await()
                 if (!dirSnap.exists()) {
                     return Result.failure(IllegalStateException("Account Not Found"))
-                }
-                if (dirSnap.getString("accountStatus") == "banned") {
-                    return Result.failure(IllegalStateException("This account is banned, so it cannot be added here."))
                 }
                 val owner = dirSnap.getString("ownerUid").orEmpty()
                 val storedHandle = dirSnap.getString("username").orEmpty()
@@ -2366,11 +2366,11 @@ class NomiChatRepository(
                 }
                 val pubSnap = getFreshSnapshot(db.collection("public_profiles").document(owner), 2500L)
                     ?.takeIf { it.exists() }
-                if (pubSnap?.getString("accountStatus") == "banned") {
-                    return Result.failure(IllegalStateException("This account is banned, so it cannot be added here."))
-                }
                 val primarySnap = pickFresherDoc(pubSnap, dirSnap) ?: dirSnap
                 val secondarySnap = if (primarySnap == pubSnap) dirSnap else pubSnap
+                peerAccountStatus = primarySnap.getString("accountStatus")
+                    ?: dirSnap.getString("accountStatus")
+                    ?: "active"
                 resolvedPeerUid = owner
                 resolvedIsPeer = true
                 resolvedDirName = primarySnap.getString("displayName").orEmpty()
@@ -2438,7 +2438,8 @@ class NomiChatRepository(
                         "peerUid" to resolvedPeerUid,
                         "isRegisteredPeer" to resolvedIsPeer,
                         "bio" to resolvedBio,
-                        "online" to resolvedOnline,
+                        "online" to (resolvedOnline && peerAccountStatus != "banned"),
+                        "accountStatus" to peerAccountStatus,
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
                     if (existingDoc.getBoolean("customRenamed") != true) {
@@ -2481,7 +2482,7 @@ class NomiChatRepository(
                 "customRenamed" to false,
                 "peerUid" to resolvedPeerUid,
                 "isRegisteredPeer" to resolvedIsPeer,
-                "accountStatus" to "active",
+                "accountStatus" to peerAccountStatus,
                 "reportCount" to 0L,
                 "reportedBy" to emptyList<String>(),
                 "createdAt" to FieldValue.serverTimestamp(),
@@ -3807,6 +3808,237 @@ class NomiChatRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    override fun observeAdminUsers(): Flow<List<AdminUserRecord>> = channelFlow {
+        if (!isVerifiedAdminSession()) {
+            trySend(emptyList())
+            return@channelFlow
+        }
+        var usersMap = emptyMap<String, UserProfile>()
+        var directoryMap = emptyMap<String, UserDirectoryEntry>()
+
+        fun emitCombined() {
+            val allUids = (usersMap.keys + directoryMap.values.mapNotNull { it.ownerUid }).distinct()
+            val list = allUids.map { uid ->
+                val userProfile = usersMap[uid]
+                val directoryEntry = directoryMap.values.firstOrNull { it.ownerUid == uid }
+                val username = userProfile?.username.takeIf { !it.isNullOrBlank() } ?: directoryEntry?.username ?: ""
+                AdminUserRecord(
+                    uid = uid,
+                    username = username,
+                    displayName = userProfile?.displayName.takeIf { !it.isNullOrBlank() } ?: directoryEntry?.displayName ?: "User",
+                    email = userProfile?.email ?: "",
+                    bio = userProfile?.bio.takeIf { !it.isNullOrBlank() } ?: directoryEntry?.bio ?: "",
+                    photoData = userProfile?.photoData ?: directoryEntry?.photoData,
+                    online = userProfile?.online == true || directoryEntry?.online == true,
+                    verified = userProfile?.verified == true || directoryEntry?.verified == true,
+                    accountStatus = userProfile?.accountStatus ?: directoryEntry?.accountStatus ?: "active",
+                    reportCount = maxOf(userProfile?.reportCount ?: 0L, directoryEntry?.reportCount ?: 0L),
+                    bannedByAdmin = userProfile?.bannedByAdmin == true || directoryEntry?.bannedByAdmin == true,
+                    updatedAt = userProfile?.updatedAt ?: directoryEntry?.updatedAt
+                )
+            }.sortedByDescending { it.updatedAt?.seconds ?: 0L }
+            trySend(list)
+        }
+
+        val usersJob = launch {
+            db.collection("users").snapshots().collect { snapshot ->
+                usersMap = snapshot.documents.associate { doc ->
+                    val profile = doc.toObject(UserProfile::class.java) ?: UserProfile()
+                    doc.id to profile
+                }
+                emitCombined()
+            }
+        }
+
+        val directoryJob = launch {
+            db.collection("directory").snapshots().collect { snapshot ->
+                directoryMap = snapshot.documents.associate { doc ->
+                    val entry = doc.toObject(UserDirectoryEntry::class.java) ?: UserDirectoryEntry()
+                    doc.id to entry
+                }
+                emitCombined()
+            }
+        }
+
+        awaitClose {
+            usersJob.cancel()
+            directoryJob.cancel()
+        }
+    }
+
+    override suspend fun adminVerifyUser(uid: String, username: String, verified: Boolean): Result<Unit> {
+        return try {
+            requireVerifiedAdmin()
+            runCatching { db.enableNetwork().await() }
+            val batch = db.batch()
+            val userRef = db.collection("users").document(uid)
+            batch.update(userRef, mapOf("verified" to verified, "updatedAt" to FieldValue.serverTimestamp()))
+
+            val pubRef = db.collection("public_profiles").document(uid)
+            val pubSnap = runCatching { pubRef.get().await() }.getOrNull()
+            if (pubSnap != null && pubSnap.exists()) {
+                batch.update(pubRef, mapOf("verified" to verified, "updatedAt" to FieldValue.serverTimestamp()))
+            }
+
+            val cleanHandle = sanitizeHandle(username)
+            if (cleanHandle.isNotBlank()) {
+                val dirRef = db.collection("directory").document(cleanHandle)
+                val dirSnap = runCatching { dirRef.get().await() }.getOrNull()
+                if (dirSnap != null && dirSnap.exists()) {
+                    batch.update(dirRef, mapOf("verified" to verified, "updatedAt" to FieldValue.serverTimestamp()))
+                }
+            }
+
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun adminBanUser(uid: String, username: String): Result<Unit> {
+        return try {
+            requireVerifiedAdmin()
+            runCatching { db.enableNetwork().await() }
+            val batch = db.batch()
+            val nowTime = FieldValue.serverTimestamp()
+
+            batch.update(
+                db.collection("users").document(uid),
+                mapOf(
+                    "accountStatus" to "banned",
+                    "bannedByAdmin" to true,
+                    "updatedAt" to nowTime
+                )
+            )
+
+            val pubRef = db.collection("public_profiles").document(uid)
+            val pubSnap = runCatching { pubRef.get().await() }.getOrNull()
+            if (pubSnap != null && pubSnap.exists()) {
+                batch.update(
+                    pubRef,
+                    mapOf(
+                        "accountStatus" to "banned",
+                        "bannedByAdmin" to true,
+                        "updatedAt" to nowTime
+                    )
+                )
+            }
+
+            val cleanHandle = sanitizeHandle(username)
+            if (cleanHandle.isNotBlank()) {
+                val dirRef = db.collection("directory").document(cleanHandle)
+                val dirSnap = runCatching { dirRef.get().await() }.getOrNull()
+                if (dirSnap != null && dirSnap.exists()) {
+                    batch.update(
+                        dirRef,
+                        mapOf(
+                            "accountStatus" to "banned",
+                            "bannedByAdmin" to true,
+                            "updatedAt" to nowTime
+                        )
+                    )
+                }
+            }
+
+            val alertsSnap = runCatching {
+                db.collection("moderation_alerts")
+                    .whereEqualTo("reportedUid", uid)
+                    .get()
+                    .await()
+            }.getOrNull()
+            alertsSnap?.documents?.forEach { doc ->
+                batch.update(
+                    doc.reference,
+                    mapOf(
+                        "status" to "banned",
+                        "adminEmail" to ADMIN_GMAIL,
+                        "resolvedAtMs" to System.currentTimeMillis(),
+                        "updatedAt" to nowTime
+                    )
+                )
+            }
+
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun adminUnbanUser(uid: String, username: String): Result<Unit> {
+        return try {
+            requireVerifiedAdmin()
+            runCatching { db.enableNetwork().await() }
+            val batch = db.batch()
+            val nowTime = FieldValue.serverTimestamp()
+
+            batch.update(
+                db.collection("users").document(uid),
+                mapOf(
+                    "accountStatus" to "active",
+                    "bannedByAdmin" to false,
+                    "reportCount" to 0L,
+                    "updatedAt" to nowTime
+                )
+            )
+
+            val pubRef = db.collection("public_profiles").document(uid)
+            val pubSnap = runCatching { pubRef.get().await() }.getOrNull()
+            if (pubSnap != null && pubSnap.exists()) {
+                batch.update(
+                    pubRef,
+                    mapOf(
+                        "accountStatus" to "active",
+                        "bannedByAdmin" to false,
+                        "updatedAt" to nowTime
+                    )
+                )
+            }
+
+            val cleanHandle = sanitizeHandle(username)
+            if (cleanHandle.isNotBlank()) {
+                val dirRef = db.collection("directory").document(cleanHandle)
+                val dirSnap = runCatching { dirRef.get().await() }.getOrNull()
+                if (dirSnap != null && dirSnap.exists()) {
+                    batch.update(
+                        dirRef,
+                        mapOf(
+                            "accountStatus" to "active",
+                            "bannedByAdmin" to false,
+                            "reportCount" to 0L,
+                            "reportedByUids" to emptyList<String>(),
+                            "updatedAt" to nowTime
+                        )
+                    )
+                }
+            }
+
+            val alertsSnap = runCatching {
+                db.collection("moderation_alerts")
+                    .whereEqualTo("reportedUid", uid)
+                    .get()
+                    .await()
+            }.getOrNull()
+            alertsSnap?.documents?.forEach { doc ->
+                batch.update(
+                    doc.reference,
+                    mapOf(
+                        "status" to "recovered",
+                        "adminEmail" to ADMIN_GMAIL,
+                        "resolvedAtMs" to System.currentTimeMillis(),
+                        "updatedAt" to nowTime
+                    )
+                )
+            }
+
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: Exception) {
             Result.failure(e)
         }
     }

@@ -219,7 +219,7 @@ service cloud.firestore {
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                        isValidUserProfile(incoming());
 
-      allow update: if isValidId(userId) &&
+       allow update: if isValidId(userId) &&
                        isValidUserProfile(incoming()) &&
                        incoming().userId == existing().userId &&
                        incoming().provider == existing().provider &&
@@ -231,7 +231,7 @@ service cloud.firestore {
                           incoming().accountStatus == existing().accountStatus &&
                           incoming().reportCount == existing().reportCount &&
                           incoming().get('bannedByAdmin', false) == existing().get('bannedByAdmin', false) &&
-                          incoming().verified == isAdmin() &&
+                          (incoming().verified == existing().verified || (isAdmin() && incoming().verified == true)) &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'displayName', 'username', 'email', 'bio', 'dob', 'photoData', 'bannerData',
                             'profileVisibility', 'allowedViewerUids', 'maxProfileViewers',
@@ -239,7 +239,7 @@ service cloud.firestore {
                           ])) ||
                          (isAdmin() &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
-                            'accountStatus', 'reportCount', 'bannedByAdmin', 'updatedAt'
+                            'accountStatus', 'reportCount', 'bannedByAdmin', 'verified', 'updatedAt'
                           ]))
                        );
 
@@ -453,8 +453,7 @@ service cloud.firestore {
                          // Owner updating display name, bio, photo, banner, privacy rules, or presence without altering moderation state
                          ('ownerUid' in existing() &&
                           existing().ownerUid == request.auth.uid &&
-                          (!('verified' in incoming().diff(existing()).affectedKeys()) || incoming().verified == isAdmin()) &&
-                          (isAdmin() || incoming().get('verified', false) == false) &&
+                          (incoming().verified == existing().verified || (isAdmin() && incoming().verified == true)) &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'displayName', 'bio', 'photoData', 'bannerData',
                             'profileVisibility', 'allowedViewerUids', 'maxProfileViewers',
@@ -471,7 +470,7 @@ service cloud.firestore {
                          // Verified admin directly banning or recovering accounts
                          (isAdmin() &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
-                            'accountStatus', 'reportCount', 'reportedByUids', 'bannedByAdmin', 'updatedAt'
+                            'accountStatus', 'reportCount', 'reportedByUids', 'bannedByAdmin', 'verified', 'updatedAt'
                           ]))
                        );
 
@@ -514,8 +513,7 @@ service cloud.firestore {
                          (request.auth.uid == userId &&
                           incoming().accountStatus == existing().accountStatus &&
                           incoming().get('bannedByAdmin', false) == existing().get('bannedByAdmin', false) &&
-                          (!('verified' in incoming().diff(existing()).affectedKeys()) || incoming().verified == isAdmin()) &&
-                          (isAdmin() || incoming().get('verified', false) == false) &&
+                          (incoming().verified == existing().verified || (isAdmin() && incoming().verified == true)) &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'username', 'displayName', 'provider', 'bio', 'photoData', 'bannerData',
                             'profileVisibility', 'allowedViewerUids', 'maxProfileViewers',
@@ -523,7 +521,7 @@ service cloud.firestore {
                           ])) ||
                          (isAdmin() &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
-                            'accountStatus', 'bannedByAdmin', 'updatedAt'
+                            'accountStatus', 'bannedByAdmin', 'verified', 'updatedAt'
                           ]))
                        );
 

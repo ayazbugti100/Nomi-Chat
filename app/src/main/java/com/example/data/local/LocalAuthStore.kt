@@ -38,7 +38,7 @@ import java.util.UUID
 sealed interface LocalAuthOutcome {
     data class Success(val username: String) : LocalAuthOutcome
     data class Error(val message: String) : LocalAuthOutcome
-    data class Banned(val message: String = "Your account is banned.") : LocalAuthOutcome
+    data class Banned(val message: String = "Your ID is banned") : LocalAuthOutcome
 }
 
 data class LocalAccountSettings(
@@ -204,7 +204,7 @@ class LocalAuthStore(context: Context) {
                 return@withContext LocalAuthOutcome.Error("Invalid username or password.")
             }
             if (account.optString("accountStatus", "active") == "banned") {
-                return@withContext LocalAuthOutcome.Banned("Your account is banned.")
+                return@withContext LocalAuthOutcome.Banned("Your ID is banned")
             }
             LocalAuthOutcome.Success(accountKey)
         }
@@ -222,7 +222,7 @@ class LocalAuthStore(context: Context) {
             val account = root.optJSONObject(accountKey)
                 ?: return@withContext LocalAuthOutcome.Error("User not found.")
             if (account.optString("accountStatus", "active") == "banned") {
-                return@withContext LocalAuthOutcome.Banned("Your account is banned.")
+                return@withContext LocalAuthOutcome.Banned("Your ID is banned")
             }
             LocalAuthOutcome.Success(accountKey)
         }
@@ -1078,9 +1078,6 @@ class LocalAuthStore(context: Context) {
                 val root = readRootUnlocked()
                 val key = findAccountKeyByUsernameUnlocked(root, cleanHandle) ?: return@runCatching null
                 val obj = root.optJSONObject(key) ?: return@runCatching null
-                if (obj.optString("accountStatus", "active") == "banned") {
-                    throw IllegalStateException("This account is banned, so it cannot be added here.")
-                }
                 val storedUsername = obj.optString("username", key)
                 if (!storedUsername.equals(cleanHandle, ignoreCase = true)) return@runCatching null
                 val viewerAccount = if (viewerUserId.isNotBlank()) {
@@ -1101,7 +1098,8 @@ class LocalAuthStore(context: Context) {
                     ownerUid = key,
                     bio = rawBio,
                     photoData = rawPhoto,
-                    bannerData = rawBanner
+                    bannerData = rawBanner,
+                    accountStatus = obj.optString("accountStatus", "active")
                 )
             }
         }
@@ -1134,6 +1132,7 @@ class LocalAuthStore(context: Context) {
                 val peerPhotoData: String?
                 val peerBannerData: String?
                 val finalName: String
+                val peerAccountStatus: String
 
                 if (validType == "chat") {
                     cleanHandle = NomiChatRepository.exactUsernameOrNull(contactUsername)
@@ -1153,14 +1152,13 @@ class LocalAuthStore(context: Context) {
                     ) {
                         throw IllegalStateException("Account Not Found")
                     }
-                    if (candidateObj.optString("accountStatus", "active") == "banned") {
-                        throw IllegalStateException("This account is banned, so it cannot be added here.")
-                    }
                     resolvedPeerUid = foundKey
                     resolvedIsPeer = true
                     val registeredPeerDisplayName = candidateObj.optString("displayName").trim()
+                    peerAccountStatus = candidateObj.optString("accountStatus", "active")
                     peerOnline = candidateObj.optBoolean("showOnlineStatus", true) &&
-                        candidateObj.optBoolean("online", false)
+                        candidateObj.optBoolean("online", false) &&
+                        peerAccountStatus != "banned"
                     val viewerHandle = account.optString("username", usernameKey)
                     val visible = canAccountShowProfileTo(candidateObj, usernameKey, viewerHandle)
                     peerBio = if (visible) candidateObj.optString("bio", "").take(200) else ""
@@ -1176,6 +1174,7 @@ class LocalAuthStore(context: Context) {
                         .ifBlank { "nomigroup" }.take(40)
                     resolvedPeerUid = peerUid
                     resolvedIsPeer = isRegisteredPeer
+                    peerAccountStatus = "active"
                     peerOnline = false
                     peerBio = ""
                     peerPhotoData = null
@@ -1206,6 +1205,7 @@ class LocalAuthStore(context: Context) {
                         existingObj.put("peerUid", resolvedPeerUid)
                         existingObj.put("isRegisteredPeer", resolvedIsPeer)
                         existingObj.put("online", peerOnline)
+                        existingObj.put("accountStatus", peerAccountStatus)
                         existingObj.put("updatedAtSec", nowSec)
                         root.put(usernameKey, account)
                         writeRootUnlocked(root)
@@ -1237,7 +1237,7 @@ class LocalAuthStore(context: Context) {
                         put("archived", false)
                         put("peerUid", resolvedPeerUid)
                         put("isRegisteredPeer", resolvedIsPeer)
-                        put("accountStatus", "active")
+                        put("accountStatus", peerAccountStatus)
                         put("reportCount", 0L)
                         put("reportedBy", JSONArray())
                         put("createdAtSec", nowSec)

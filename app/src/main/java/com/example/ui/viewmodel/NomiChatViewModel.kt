@@ -18,6 +18,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.ai.SmartReplyRepository
 import com.example.data.model.ADMIN_GMAIL
+import com.example.data.model.AdminUserRecord
 import com.example.data.model.ChatMessage
 import com.example.data.model.ChatPillFilter
 import com.example.data.model.ChatThread
@@ -155,6 +156,28 @@ class NomiChatViewModel(
             started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
             initialValue = 0
         )
+
+    val adminUsersState: StateFlow<List<AdminUserRecord>> = isAdminSession
+        .flatMapLatest { isAdmin ->
+            if (isAdmin) {
+                repository.observeAdminUsers()
+                    .catch { err ->
+                        if (err is CancellationException) throw err
+                        Log.w(TAG, "Error observing admin users", err)
+                        emit(emptyList())
+                    }
+            } else {
+                flowOf(emptyList())
+            }
+        }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
+            initialValue = emptyList()
+        )
+
+    private val _isAdminActionLoading = MutableStateFlow(false)
+    val isAdminActionLoading: StateFlow<Boolean> = _isAdminActionLoading.asStateFlow()
 
     private val seenAdminAlertIds = mutableSetOf<String>()
 
@@ -716,6 +739,10 @@ class NomiChatViewModel(
 
     fun openConversation(contactId: String) {
         val target = (allContactsState.value as? UiState.Success)?.data?.firstOrNull { it.id == contactId }
+        // Do nothing if the user is banned so the chat never opens
+        if (target?.accountStatus == "banned") {
+            return
+        }
         if (target?.locked == true) {
             _popupMessage.value = "Chat is locked. Tap 'Unlock chat' to open."
             return
@@ -1216,6 +1243,48 @@ class NomiChatViewModel(
         }
     }
 
+    fun adminVerifyUser(user: AdminUserRecord, verified: Boolean) {
+        if (!isAdminSession.value) return
+        viewModelScope.launch {
+            _isAdminActionLoading.value = true
+            val res = runCatching { repository.adminVerifyUser(user.uid, user.username, verified) }
+            _isAdminActionLoading.value = false
+            res.onFailure {
+                _popupMessage.value = "Failed to update verified badge: ${it.localizedMessage}"
+            }.onSuccess {
+                _popupMessage.value = if (verified) "Granted blue tick to @${user.username}" else "Removed blue tick from @${user.username}"
+            }
+        }
+    }
+
+    fun adminBanUser(user: AdminUserRecord) {
+        if (!isAdminSession.value) return
+        viewModelScope.launch {
+            _isAdminActionLoading.value = true
+            val res = runCatching { repository.adminBanUser(user.uid, user.username) }
+            _isAdminActionLoading.value = false
+            res.onFailure {
+                _popupMessage.value = "Failed to ban user: ${it.localizedMessage}"
+            }.onSuccess {
+                _popupMessage.value = "Banned @${user.username} account"
+            }
+        }
+    }
+
+    fun adminUnbanUser(user: AdminUserRecord) {
+        if (!isAdminSession.value) return
+        viewModelScope.launch {
+            _isAdminActionLoading.value = true
+            val res = runCatching { repository.adminUnbanUser(user.uid, user.username) }
+            _isAdminActionLoading.value = false
+            res.onFailure {
+                _popupMessage.value = "Failed to restore user: ${it.localizedMessage}"
+            }.onSuccess {
+                _popupMessage.value = "Restored @${user.username} account"
+            }
+        }
+    }
+
     fun findUserByUsername(username: String) {
         val rawClean = username.trim().removePrefix("@").lowercase()
         if (rawClean.isEmpty()) {
@@ -1260,12 +1329,7 @@ class NomiChatViewModel(
                         _usernameSearchState.value = UsernameSearchState.NotFound("Internet connection is required to add a username.")
                         showOfflinePopup()
                     } else {
-                        val msg = err.localizedMessage?.trim().orEmpty()
-                        if (msg.contains("banned", ignoreCase = true)) {
-                            _usernameSearchState.value = UsernameSearchState.NotFound("This account is banned, so it cannot be added here.")
-                        } else {
-                            _usernameSearchState.value = UsernameSearchState.NotFound("Account Not Found")
-                        }
+                        _usernameSearchState.value = UsernameSearchState.NotFound("Account Not Found")
                     }
                 }
         }
@@ -1313,12 +1377,7 @@ class NomiChatViewModel(
                     _usernameSearchState.value = UsernameSearchState.NotFound("Internet connection is required to add a username.")
                     showOfflinePopup()
                 } else {
-                    val msg = lookupResult.exceptionOrNull()?.localizedMessage?.trim().orEmpty()
-                    if (msg.contains("banned", ignoreCase = true)) {
-                        _usernameSearchState.value = UsernameSearchState.NotFound("This account is banned, so it cannot be added here.")
-                    } else {
-                        _usernameSearchState.value = UsernameSearchState.NotFound("Account Not Found")
-                    }
+                    _usernameSearchState.value = UsernameSearchState.NotFound("Account Not Found")
                 }
                 return@launch
             }
@@ -1353,8 +1412,6 @@ class NomiChatViewModel(
                 } else {
                     val msg = err.localizedMessage?.trim().orEmpty()
                     val errorText = when {
-                        msg.contains("banned", ignoreCase = true) ->
-                            "This account is banned, so it cannot be added here."
                         msg.contains("already added", ignoreCase = true) || msg.contains("already taken", ignoreCase = true) ->
                             "This username is already added. You cannot add it again."
                         msg == "Account Not Found" ->

@@ -147,7 +147,9 @@ data class ChatThread(
     val reportedBy: List<String> = emptyList(),
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
-)
+) {
+    val isBanned: Boolean get() = accountStatus == "banned"
+}
 
 data class DirectoryLookupResult(
     val username: String,
@@ -156,8 +158,11 @@ data class DirectoryLookupResult(
     val bio: String = "",
     val photoData: String? = null,
     val bannerData: String? = null,
-    val verified: Boolean = false
-)
+    val verified: Boolean = false,
+    val accountStatus: String = "active"
+) {
+    val isBanned: Boolean get() = accountStatus == "banned"
+}
 
 enum class StoryFontStyle(
     val key: String,
@@ -398,6 +403,25 @@ data class AdminLockConfig(
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
+
+@Keep
+@IgnoreExtraProperties
+data class AdminUserRecord(
+    @DocumentId val uid: String = "",
+    val username: String = "",
+    val displayName: String = "",
+    val email: String = "",
+    val bio: String = "",
+    val photoData: String? = null,
+    val online: Boolean = false,
+    val verified: Boolean = false,
+    val accountStatus: String = "active",
+    val reportCount: Long = 0L,
+    val bannedByAdmin: Boolean = false,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    val isBanned: Boolean get() = accountStatus == "banned" || bannedByAdmin
+}
 
 enum class AuthFlowMode {
     SIGN_UP,

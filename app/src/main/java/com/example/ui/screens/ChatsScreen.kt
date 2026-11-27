@@ -737,15 +737,20 @@ fun ChatListRow(
     val isChannel = thread.name.contains("Channel", ignoreCase = true)
     val isGroup = thread.threadType == "group" && !isChannel
     var menuExpanded by remember { mutableStateOf(false) }
+    val isBanned = thread.accountStatus == "banned"
 
     Box(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .alpha(if (thread.blocked) 0.65f else 1f)
+                .alpha(if (thread.blocked || isBanned) 0.65f else 1f)
                 .clip(RoundedCornerShape(16.dp))
                 .combinedClickable(
-                    onClick = onOpenChat,
+                    onClick = {
+                        // Do nothing if the user is banned so the chat never opens
+                        if (isBanned) return@combinedClickable
+                        onOpenChat()
+                    },
                     onLongClick = { menuExpanded = true },
                     onDoubleClick = { menuExpanded = true }
                 )
@@ -765,8 +770,8 @@ fun ChatListRow(
                     photoData = thread.photoData,
                     isGroup = isGroup,
                     isChannel = isChannel,
-                    showOnlineDot = thread.online && !thread.blocked,
-                    hasStoryRing = hasActiveStory && !thread.blocked,
+                    showOnlineDot = thread.online && !thread.blocked && !isBanned,
+                    hasStoryRing = hasActiveStory && !thread.blocked && !isBanned,
                     storyRingSeen = storyRingSeen,
                     size = 52.dp
                 )
@@ -829,17 +834,18 @@ fun ChatListRow(
                                 )
                             }
                         }
-                        if (thread.accountStatus == "banned") {
+                        if (isBanned) {
                             Surface(
-                                shape = RoundedCornerShape(6.dp),
-                                color = ErrorRed.copy(alpha = 0.14f)
+                                shape = RoundedCornerShape(12.dp),
+                                color = ErrorRed,
+                                modifier = Modifier.testTag("chat_banned_badge_${thread.id}")
                             ) {
                                 Text(
-                                    text = stringResource(R.string.banned_account_badge),
+                                    text = "Banned",
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = ErrorRed,
+                                    color = Color.White,
                                     fontWeight = FontWeight.Bold,
-                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                                 )
                             }
                         }
@@ -884,7 +890,17 @@ fun ChatListRow(
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
-                            thread.typing && thread.accountStatus != "banned" -> {
+                            isBanned -> {
+                                Text(
+                                    text = "Account banned",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = ErrorRed,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            thread.typing && !isBanned -> {
                                 Text(
                                     text = stringResource(R.string.status_typing),
                                     style = MaterialTheme.typography.bodyMedium,

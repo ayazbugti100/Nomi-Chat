@@ -542,6 +542,8 @@ private fun NomiChatMainShell(
     val inAppAlertBanner by viewModel.inAppAlertBanner.collectAsStateWithLifecycle()
     val isAdminSession by viewModel.isAdminSession.collectAsStateWithLifecycle()
     val moderationAlerts by viewModel.moderationAlertsState.collectAsStateWithLifecycle()
+    val adminUsers by viewModel.adminUsersState.collectAsStateWithLifecycle()
+    val isAdminActionLoading by viewModel.isAdminActionLoading.collectAsStateWithLifecycle()
     val pendingModerationCount by viewModel.pendingModerationCount.collectAsStateWithLifecycle()
     val inAppAdminBanner by viewModel.inAppAdminBanner.collectAsStateWithLifecycle()
 
@@ -1243,10 +1245,15 @@ private fun NomiChatMainShell(
     if (isAdminSession && isAdminPanelOpen) {
         AdminModerationDialog(
             alerts = moderationAlerts,
+            users = adminUsers,
+            isLoading = isAdminActionLoading,
             onDismiss = { isAdminPanelOpen = false },
             onIgnore = viewModel::ignoreModerationAlert,
-            onBan = viewModel::banUserFromAlert,
-            onRecovery = viewModel::recoverUserFromAlert
+            onBanAlert = viewModel::banUserFromAlert,
+            onRecoveryAlert = viewModel::recoverUserFromAlert,
+            onVerifyUser = viewModel::adminVerifyUser,
+            onBanUser = viewModel::adminBanUser,
+            onUnbanUser = viewModel::adminUnbanUser
         )
     }
 

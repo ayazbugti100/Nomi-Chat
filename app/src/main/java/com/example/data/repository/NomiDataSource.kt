@@ -1,5 +1,6 @@
 package com.example.data.repository
 
+import com.example.data.model.AdminUserRecord
 import com.example.data.model.AuthFlowMode
 import com.example.data.model.ChatMessage
 import com.example.data.model.ChatThread
@@ -202,6 +203,8 @@ interface NomiDataSource {
 
     fun observeModerationAlerts(): Flow<List<ModerationAlert>> = emptyFlow()
 
+    fun observeAdminUsers(): Flow<List<AdminUserRecord>> = emptyFlow()
+
     suspend fun ensureAdminConfigLocked(uid: String, email: String): Result<Unit> = Result.success(Unit)
 
     suspend fun ignoreModerationAlert(alertId: String): Result<Unit> = Result.success(Unit)
@@ -209,5 +212,11 @@ interface NomiDataSource {
     suspend fun banUserFromAlert(alert: ModerationAlert): Result<Unit> = Result.success(Unit)
 
     suspend fun recoverUserFromAlert(alert: ModerationAlert): Result<Unit> = Result.success(Unit)
+
+    suspend fun adminVerifyUser(uid: String, username: String, verified: Boolean): Result<Unit> = Result.success(Unit)
+
+    suspend fun adminBanUser(uid: String, username: String): Result<Unit> = Result.success(Unit)
+
+    suspend fun adminUnbanUser(uid: String, username: String): Result<Unit> = Result.success(Unit)
 }
 
