@@ -56,6 +56,7 @@ import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -81,13 +82,15 @@ import androidx.credentials.CredentialManager
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.R
-import com.example.data.local.LocalAuthOutcome
-import com.example.data.local.LocalAuthStore
 import com.example.data.model.AuthFlowMode
 import com.example.data.network.NetworkStatus
 import com.example.data.repository.NomiChatRepository
 import com.example.data.security.PendingAuthCredentials
 import com.example.ui.components.EmeraldWaveHeader
+import com.example.ui.components.USERNAME_CHAR_REGEX
+import com.example.ui.components.USERNAME_FORMAT_REGEX
+import com.example.ui.components.UsernameValidationMessage
+import com.example.ui.components.sanitizeUsernameInput
 import com.example.ui.theme.EmeraldBright
 import com.example.ui.theme.EmeraldDark
 import com.example.ui.theme.EmeraldDeep
@@ -113,7 +116,6 @@ private enum class AuthTab {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AuthScreen(
-    localAuthStore: LocalAuthStore,
     initialErrorMessage: String? = null,
     initialIsLoginTab: Boolean = false,
     onDismissInitialError: () -> Unit = {},
@@ -124,7 +126,6 @@ fun AuthScreen(
         authFlowMode: AuthFlowMode,
         returningIdentifier: String
     ) -> Unit,
-    onLocalAuthSuccess: suspend (username: String) -> Unit,
     onAuthSuccess: () -> Unit,
     networkStatus: NetworkStatus = NetworkStatus()
 ) {
@@ -150,6 +151,10 @@ fun AuthScreen(
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember(initialErrorMessage) { mutableStateOf(initialErrorMessage) }
     var showDatePicker by remember { mutableStateOf(false) }
+    var signUpInvalidCharWarning by remember { mutableStateOf(false) }
+    var signUpShakeCount by remember { mutableIntStateOf(0) }
+    var loginInvalidCharWarning by remember { mutableStateOf(false) }
+    var loginShakeCount by remember { mutableIntStateOf(0) }
 
     fun clearError() {
         if (errorMessage != null) {
@@ -349,12 +354,12 @@ fun AuthScreen(
                                 .testTag("auth_display_name_input")
                         )
 
-                        val cleanSignUpUser = username.trim().removePrefix("@")
+                        val cleanSignUpUser = username.removePrefix("@")
                         val isSignUpUserLengthValid = cleanSignUpUser.length in 2..40
-                        val isSignUpUserFormatValid = cleanSignUpUser.matches(Regex("^[a-zA-Z0-9_.-]+$"))
+                        val isSignUpUserFormatValid = cleanSignUpUser.matches(USERNAME_CHAR_REGEX)
                         val hasSignUpUsernameError = errorMessage != null && (errorMessage!!.contains("username", ignoreCase = true) || errorMessage!!.contains("taken", ignoreCase = true))
-                        val isSignUpUserValid = cleanSignUpUser.isNotEmpty() && isSignUpUserLengthValid && isSignUpUserFormatValid && !hasSignUpUsernameError
-                        val isSignUpUserInvalid = hasSignUpUsernameError || (cleanSignUpUser.isNotEmpty() && (!isSignUpUserLengthValid || !isSignUpUserFormatValid))
+                        val isSignUpUserValid = cleanSignUpUser.isNotEmpty() && isSignUpUserLengthValid && isSignUpUserFormatValid && !hasSignUpUsernameError && !signUpInvalidCharWarning
+                        val isSignUpUserInvalid = hasSignUpUsernameError || signUpInvalidCharWarning || (cleanSignUpUser.isNotEmpty() && (!isSignUpUserLengthValid || !isSignUpUserFormatValid))
 
                         val signUpUserBorderColor = when {
                             isSignUpUserInvalid -> ErrorRed
@@ -365,8 +370,17 @@ fun AuthScreen(
                         OutlinedTextField(
                             value = username,
                             onValueChange = { raw ->
-                                val cleaned = raw.removePrefix("@").lowercase().filter { it.isLetterOrDigit() || it == '_' || it == '.' || it == '-' }
-                                username = cleaned.take(40)
+                                val sanitized = sanitizeUsernameInput(
+                                    raw = raw,
+                                    maxLength = 40,
+                                    allowLeadingAt = false,
+                                    forceLowercase = true
+                                )
+                                username = sanitized.value
+                                signUpInvalidCharWarning = sanitized.hadDisallowedInput
+                                if (sanitized.hadDisallowedInput) {
+                                    signUpShakeCount++
+                                }
                                 clearError()
                             },
                             label = { Text("Username (Unique)") },
@@ -382,7 +396,7 @@ fun AuthScreen(
                                         tint = Color(0xFF16A34A),
                                         modifier = Modifier.size(20.dp)
                                     )
-                                } else if (isSignUpUserInvalid && cleanSignUpUser.isNotEmpty()) {
+                                } else if (isSignUpUserInvalid && (cleanSignUpUser.isNotEmpty() || signUpInvalidCharWarning)) {
                                     Icon(
                                         imageVector = Icons.Default.Cancel,
                                         contentDescription = "Invalid username",
@@ -413,28 +427,45 @@ fun AuthScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            if (cleanSignUpUser.isNotEmpty() && !isSignUpUserLengthValid) {
-                                Text(
-                                    text = "Username must be 2–40 characters",
-                                    color = ErrorRed,
-                                    style = MaterialTheme.typography.labelSmall
-                                )
-                            } else if (cleanSignUpUser.isNotEmpty() && !isSignUpUserFormatValid) {
-                                Text(
-                                    text = "Letters, numbers, _, ., - only",
-                                    color = ErrorRed,
-                                    style = MaterialTheme.typography.labelSmall
-                                )
-                            } else if (isSignUpUserValid) {
-                                Text(
-                                    text = "Valid username format",
-                                    color = Color(0xFF16A34A),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.Medium
-                                )
-                            } else {
-                                Spacer(modifier = Modifier.weight(1f, fill = false))
+                            val signUpUserMsg: String?
+                            val signUpUserIsError: Boolean
+                            val signUpUserIsSuccess: Boolean
+                            when {
+                                signUpInvalidCharWarning -> {
+                                    signUpUserMsg = "No spaces or special characters allowed (letters, numbers, _, ., - only)"
+                                    signUpUserIsError = true
+                                    signUpUserIsSuccess = false
+                                }
+                                cleanSignUpUser.isNotEmpty() && !isSignUpUserLengthValid -> {
+                                    signUpUserMsg = "Username must be 2–40 characters"
+                                    signUpUserIsError = true
+                                    signUpUserIsSuccess = false
+                                }
+                                cleanSignUpUser.isNotEmpty() && !isSignUpUserFormatValid -> {
+                                    signUpUserMsg = "No spaces or special characters allowed (letters, numbers, _, ., - only)"
+                                    signUpUserIsError = true
+                                    signUpUserIsSuccess = false
+                                }
+                                isSignUpUserValid -> {
+                                    signUpUserMsg = "Valid username format"
+                                    signUpUserIsError = false
+                                    signUpUserIsSuccess = true
+                                }
+                                else -> {
+                                    signUpUserMsg = null
+                                    signUpUserIsError = false
+                                    signUpUserIsSuccess = false
+                                }
                             }
+
+                            UsernameValidationMessage(
+                                message = signUpUserMsg,
+                                isError = signUpUserIsError,
+                                isSuccess = signUpUserIsSuccess,
+                                shakeTrigger = signUpShakeCount,
+                                testTag = "username_message",
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
 
                             Text(
                                 text = "${cleanSignUpUser.length}/40",
@@ -445,7 +476,9 @@ fun AuthScreen(
                                     else -> MaterialTheme.colorScheme.onSurfaceVariant
                                 },
                                 fontWeight = if (cleanSignUpUser.length >= 40) FontWeight.Bold else FontWeight.Normal,
-                                modifier = Modifier.testTag("auth_username_char_count")
+                                modifier = Modifier
+                                    .padding(start = 8.dp)
+                                    .testTag("auth_username_char_count")
                             )
                         }
 
@@ -582,11 +615,12 @@ fun AuthScreen(
                                 modifier = Modifier.padding(bottom = 6.dp)
                             )
 
-                            val cleanLoginId = loginIdentifier.trim().removePrefix("@")
+                            val cleanLoginId = loginIdentifier.removePrefix("@")
                             val isLoginIdLengthValid = cleanLoginId.length in 2..40
+                            val isLoginIdFormatValid = cleanLoginId.matches(USERNAME_CHAR_REGEX)
                             val hasLoginError = errorMessage != null && (errorMessage!!.contains("user", ignoreCase = true) || errorMessage!!.contains("found", ignoreCase = true))
-                            val isLoginIdValid = cleanLoginId.isNotEmpty() && isLoginIdLengthValid && !hasLoginError
-                            val isLoginIdInvalid = hasLoginError || (cleanLoginId.isNotEmpty() && !isLoginIdLengthValid)
+                            val isLoginIdValid = cleanLoginId.isNotEmpty() && isLoginIdLengthValid && isLoginIdFormatValid && !hasLoginError && !loginInvalidCharWarning
+                            val isLoginIdInvalid = hasLoginError || loginInvalidCharWarning || (cleanLoginId.isNotEmpty() && (!isLoginIdLengthValid || !isLoginIdFormatValid))
 
                             val loginIdBorderColor = when {
                                 isLoginIdInvalid -> ErrorRed
@@ -597,7 +631,17 @@ fun AuthScreen(
                             OutlinedTextField(
                                 value = loginIdentifier,
                                 onValueChange = { raw ->
-                                    loginIdentifier = raw.take(40)
+                                    val sanitized = sanitizeUsernameInput(
+                                        raw = raw,
+                                        maxLength = 40,
+                                        allowLeadingAt = true,
+                                        forceLowercase = true
+                                    )
+                                    loginIdentifier = sanitized.value
+                                    loginInvalidCharWarning = sanitized.hadDisallowedInput
+                                    if (sanitized.hadDisallowedInput) {
+                                        loginShakeCount++
+                                    }
                                     clearError()
                                 },
                                 placeholder = { Text("Enter your username") },
@@ -616,7 +660,7 @@ fun AuthScreen(
                                             tint = Color(0xFF16A34A),
                                             modifier = Modifier.size(20.dp)
                                         )
-                                    } else if (isLoginIdInvalid && cleanLoginId.isNotEmpty()) {
+                                    } else if (isLoginIdInvalid && (cleanLoginId.isNotEmpty() || loginInvalidCharWarning)) {
                                         Icon(
                                             imageVector = Icons.Default.Cancel,
                                             contentDescription = "Invalid identifier",
@@ -647,22 +691,45 @@ fun AuthScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                if (cleanLoginId.isNotEmpty() && !isLoginIdLengthValid) {
-                                    Text(
-                                        text = "Username must be 2–40 characters",
-                                        color = ErrorRed,
-                                        style = MaterialTheme.typography.labelSmall
-                                    )
-                                } else if (isLoginIdValid) {
-                                    Text(
-                                        text = "Valid format",
-                                        color = Color(0xFF16A34A),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.Medium
-                                    )
-                                } else {
-                                    Spacer(modifier = Modifier.weight(1f, fill = false))
+                                val loginUserMsg: String?
+                                val loginUserIsError: Boolean
+                                val loginUserIsSuccess: Boolean
+                                when {
+                                    loginInvalidCharWarning -> {
+                                        loginUserMsg = "No spaces or special characters allowed (letters, numbers, _, ., - only)"
+                                        loginUserIsError = true
+                                        loginUserIsSuccess = false
+                                    }
+                                    cleanLoginId.isNotEmpty() && !isLoginIdLengthValid -> {
+                                        loginUserMsg = "Username must be 2–40 characters"
+                                        loginUserIsError = true
+                                        loginUserIsSuccess = false
+                                    }
+                                    cleanLoginId.isNotEmpty() && !isLoginIdFormatValid -> {
+                                        loginUserMsg = "No spaces or special characters allowed (letters, numbers, _, ., - only)"
+                                        loginUserIsError = true
+                                        loginUserIsSuccess = false
+                                    }
+                                    isLoginIdValid -> {
+                                        loginUserMsg = "Valid format"
+                                        loginUserIsError = false
+                                        loginUserIsSuccess = true
+                                    }
+                                    else -> {
+                                        loginUserMsg = null
+                                        loginUserIsError = false
+                                        loginUserIsSuccess = false
+                                    }
                                 }
+
+                                UsernameValidationMessage(
+                                    message = loginUserMsg,
+                                    isError = loginUserIsError,
+                                    isSuccess = loginUserIsSuccess,
+                                    shakeTrigger = loginShakeCount,
+                                    testTag = "username_message",
+                                    modifier = Modifier.weight(1f, fill = false)
+                                )
 
                                 Text(
                                     text = "${cleanLoginId.length}/40",
@@ -673,7 +740,9 @@ fun AuthScreen(
                                         else -> MaterialTheme.colorScheme.onSurfaceVariant
                                     },
                                     fontWeight = if (cleanLoginId.length >= 40) FontWeight.Bold else FontWeight.Normal,
-                                    modifier = Modifier.testTag("auth_login_identifier_char_count")
+                                    modifier = Modifier
+                                        .padding(start = 8.dp)
+                                        .testTag("auth_login_identifier_char_count")
                                 )
                             }
 
@@ -790,64 +859,41 @@ fun AuthScreen(
                                 }
                                 if (cleanUser.length < 2) {
                                     errorMessage = "Username must be at least 2 characters."
+                                    signUpShakeCount++
                                     return@Button
                                 }
-                                isLoading = true
-                                clearError()
-                                scope.launch {
-                                    when (
-                                        val outcome = localAuthStore.signUpUser(
-                                            fullName = cleanName,
-                                            usernameInput = cleanUser,
-                                            dob = cleanDob,
-                                            password = signupPassword,
-                                            rePassword = signupRePassword
-                                        )
-                                    ) {
-                                        is LocalAuthOutcome.Success -> {
-                                            onLocalAuthSuccess(outcome.username)
-                                            isLoading = false
-                                        }
-                                        is LocalAuthOutcome.Error -> {
-                                            isLoading = false
-                                            errorMessage = outcome.message
-                                        }
-                                        is LocalAuthOutcome.Banned -> {
-                                            isLoading = false
-                                            errorMessage = outcome.message
-                                        }
-                                    }
+                                if (!USERNAME_FORMAT_REGEX.matches(cleanUser)) {
+                                    errorMessage = "Username cannot contain spaces or special characters."
+                                    signUpShakeCount++
+                                    return@Button
                                 }
+                                PendingAuthCredentials.setPassword(signupPassword)
+                                launchGoogleAuth(
+                                    targetName = cleanName,
+                                    targetUsername = cleanUser,
+                                    targetDob = cleanDob,
+                                    mode = AuthFlowMode.SIGN_UP,
+                                    returningId = ""
+                                )
                             } else {
-                                // Strictly handles Returning Login directly without calling Google Sign-In
                                 val cleanUser = NomiChatRepository.normalizeUsername(loginIdentifier)
                                 if (cleanUser.isEmpty() || loginPassword.isEmpty()) {
                                     errorMessage = "Please enter both username and password."
                                     return@Button
                                 }
-                                isLoading = true
-                                clearError()
-                                scope.launch {
-                                    when (
-                                        val outcome = localAuthStore.returningLogin(
-                                            usernameInput = cleanUser,
-                                            password = loginPassword
-                                        )
-                                    ) {
-                                        is LocalAuthOutcome.Success -> {
-                                            onLocalAuthSuccess(outcome.username)
-                                            isLoading = false
-                                        }
-                                        is LocalAuthOutcome.Error -> {
-                                            isLoading = false
-                                            errorMessage = outcome.message
-                                        }
-                                        is LocalAuthOutcome.Banned -> {
-                                            isLoading = false
-                                            errorMessage = outcome.message
-                                        }
-                                    }
+                                if (!USERNAME_FORMAT_REGEX.matches(cleanUser)) {
+                                    errorMessage = "Username cannot contain spaces or special characters."
+                                    loginShakeCount++
+                                    return@Button
                                 }
+                                PendingAuthCredentials.setPassword(loginPassword)
+                                launchGoogleAuth(
+                                    targetName = "",
+                                    targetUsername = "",
+                                    targetDob = "",
+                                    mode = AuthFlowMode.RETURNING_LOGIN,
+                                    returningId = cleanUser
+                                )
                             }
                         },
                         enabled = !isLoading,

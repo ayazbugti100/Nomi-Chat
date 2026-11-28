@@ -762,7 +762,7 @@ fun ChatListRow(
             Box(
                 modifier = Modifier
                     .clip(CircleShape)
-                    .clickable(onClick = onAvatarClick)
+                    .clickable(enabled = !isBanned, onClick = onAvatarClick)
                     .testTag("chat_avatar_${thread.id}")
             ) {
                 AvatarCircle(
@@ -1005,28 +1005,30 @@ fun ChatListRow(
                 },
                 modifier = Modifier.testTag("popup_rename_chat_${thread.id}")
             )
-            DropdownMenuItem(
-                text = {
-                    Text(
-                        text = "View Contact",
-                        color = LightOnSurface,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                },
-                leadingIcon = {
-                    Icon(
-                        imageVector = Icons.Default.Person,
-                        contentDescription = null,
-                        tint = LightOnSurface,
-                        modifier = Modifier.size(18.dp)
-                    )
-                },
-                onClick = {
-                    menuExpanded = false
-                    onViewContact()
-                },
-                modifier = Modifier.testTag("popup_view_contact_${thread.id}")
-            )
+            if (!isBanned) {
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            text = "View Contact",
+                            color = LightOnSurface,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Default.Person,
+                            contentDescription = null,
+                            tint = LightOnSurface,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    },
+                    onClick = {
+                        menuExpanded = false
+                        onViewContact()
+                    },
+                    modifier = Modifier.testTag("popup_view_contact_${thread.id}")
+                )
+            }
             DropdownMenuItem(
                 text = {
                     Text(
@@ -1233,7 +1235,7 @@ private fun StatusOverviewList(
             .values
             .toList()
     }
-    val activeStatuses = contacts.filter { it.online }
+    val activeStatuses = contacts.filter { it.online && !it.isBanned && !it.blocked }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -1420,11 +1422,13 @@ private fun CallsOverviewList(
             )
         }
         items(callEntries, key = { it.id }) { thread ->
+            val isBanned = thread.isBanned
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .alpha(if (isBanned || thread.blocked) 0.65f else 1f)
                     .clip(RoundedCornerShape(14.dp))
-                    .clickable { onOpenChat(thread.id) }
+                    .clickable(enabled = !isBanned) { onOpenChat(thread.id) }
                     .padding(vertical = 8.dp, horizontal = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -1432,17 +1436,36 @@ private fun CallsOverviewList(
                 AvatarCircle(
                     name = thread.name,
                     photoData = thread.photoData,
-                    hasStoryRing = threadHasStory(thread),
+                    hasStoryRing = threadHasStory(thread) && !isBanned,
                     storyRingSeen = threadStorySeen(thread),
-                    showOnlineDot = thread.online,
+                    showOnlineDot = thread.online && !isBanned && !thread.blocked,
                     size = 48.dp
                 )
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = thread.name,
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = thread.name,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        if (isBanned) {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = ErrorRed
+                            ) {
+                                Text(
+                                    text = "Banned",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -1454,21 +1477,24 @@ private fun CallsOverviewList(
                                 Icons.AutoMirrored.Filled.CallMade
                             },
                             contentDescription = null,
-                            tint = EmeraldMid,
+                            tint = if (isBanned) ErrorRed else EmeraldMid,
                             modifier = Modifier.size(14.dp)
                         )
                         Text(
-                            text = "${thread.phone} • ${thread.lastMessageTimeLabel}",
+                            text = if (isBanned) "Account banned" else "${thread.phone} • ${thread.lastMessageTimeLabel}",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = if (isBanned) ErrorRed else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
-                IconButton(onClick = { onOpenChat(thread.id) }) {
+                IconButton(
+                    onClick = { if (!isBanned) onOpenChat(thread.id) },
+                    enabled = !isBanned
+                ) {
                     Icon(
-                        imageVector = if (thread.online) Icons.Default.Videocam else Icons.Default.Call,
-                        contentDescription = "Open chat with ${thread.name}",
-                        tint = EmeraldDark
+                        imageVector = if (thread.online && !isBanned) Icons.Default.Videocam else Icons.Default.Call,
+                        contentDescription = if (isBanned) "Banned account" else "Open chat with ${thread.name}",
+                        tint = if (isBanned) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f) else EmeraldDark
                     )
                 }
             }

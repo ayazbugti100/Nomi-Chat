@@ -74,9 +74,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.example.data.ai.SmartReplyRepository
-import com.example.data.local.LocalAuthOutcome
-import com.example.data.local.LocalAuthStore
-import com.example.data.local.LocalNomiRepository
 import com.example.data.model.AuthFlowMode
 import com.example.data.model.ChatPillFilter
 import com.example.data.model.IncomingMessageAlert
@@ -96,7 +93,7 @@ import com.example.ui.auth.signOutUser
 import com.example.ui.components.NomiBottomBar
 import com.example.ui.components.SmallFloatingPopup
 import com.example.ui.screens.AddContactDialog
-import com.example.ui.screens.AdminModerationDialog
+import com.example.ui.screens.AdminModerationScreen
 import com.example.ui.screens.AppLockOverlay
 import com.example.ui.screens.AppLockSetupDialog
 import com.example.ui.screens.AppearanceDialog
@@ -124,9 +121,13 @@ import com.example.ui.theme.NomiChatTheme
 import com.example.ui.viewmodel.NomiChatViewModel
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
+import com.example.data.security.PendingAuthCredentials
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreSettings
 import com.google.firebase.firestore.PersistentCacheSettings
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -203,9 +204,6 @@ fun AppNavigation(
     onConsumedOpenAdminAlerts: () -> Unit = {}
 ) {
     val appContext = LocalContext.current.applicationContext
-    val localAuthStore = remember(appContext) {
-        runCatching { LocalAuthStore(appContext) }.getOrElse { LocalAuthStore(appContext) }
-    }
     val networkObserver = remember(appContext) { NetworkConnectivityObserver(appContext) }
     val networkStatus by remember(networkObserver) {
         networkObserver.observe()
@@ -220,8 +218,6 @@ fun AppNavigation(
     var suppressRootPopup by remember { mutableStateOf(false) }
     var globalAuthError by remember { mutableStateOf<String?>(null) }
     var bottomTab by remember { mutableStateOf(MainBottomTab.CHATS) }
-    var validatedLocalUser by remember { mutableStateOf<String?>(null) }
-    var lastValidatedKey by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(globalPopupMessage) {
         if (!globalPopupMessage.isNullOrBlank()) {
@@ -232,59 +228,10 @@ fun AppNavigation(
 
     val prefs = prefsOrNull
     val user = currentUser
-    val activeUsernameRaw = prefs?.activeUsername?.trim().orEmpty()
-
-    LaunchedEffect(prefs, user, activeUsernameRaw) {
-        if (prefs == null || user != null) {
-            validatedLocalUser = ""
-            lastValidatedKey = ""
-            return@LaunchedEffect
-        }
-        if (activeUsernameRaw.isEmpty()) {
-            validatedLocalUser = ""
-            lastValidatedKey = ""
-            return@LaunchedEffect
-        }
-        if (lastValidatedKey == activeUsernameRaw && !validatedLocalUser.isNullOrEmpty()) {
-            return@LaunchedEffect
-        }
-        when (val outcome = localAuthStore.validateActiveSession(activeUsernameRaw)) {
-            is LocalAuthOutcome.Success -> {
-                localAuthStore.getAccountSettings(outcome.username)?.let { saved ->
-                    if (saved.themeMode != prefs.themeMode ||
-                        saved.notificationsEnabled != prefs.notificationsEnabled ||
-                        saved.smartAiEnabled != prefs.smartAiEnabled ||
-                        saved.appLockPinHash != prefs.appLockPinHash
-                    ) {
-                        preferencesRepository.applyAccountSettings(
-                            themeMode = saved.themeMode,
-                            notificationsEnabled = saved.notificationsEnabled,
-                            smartAiEnabled = saved.smartAiEnabled,
-                            appLockPinHash = saved.appLockPinHash
-                        )
-                    }
-                }
-                validatedLocalUser = outcome.username
-                lastValidatedKey = activeUsernameRaw
-            }
-            is LocalAuthOutcome.Banned -> {
-                globalPopupMessage = outcome.message
-                globalAuthError = outcome.message
-                preferencesRepository.saveActiveUsername("")
-                validatedLocalUser = ""
-                lastValidatedKey = ""
-            }
-            is LocalAuthOutcome.Error -> {
-                preferencesRepository.saveActiveUsername("")
-                validatedLocalUser = ""
-                lastValidatedKey = ""
-            }
-        }
-    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         when {
-            prefs == null || (user == null && activeUsernameRaw.isNotEmpty() && lastValidatedKey != activeUsernameRaw) -> {
+            prefs == null -> {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -338,45 +285,8 @@ fun AppNavigation(
                     )
                 }
             }
-            !validatedLocalUser.isNullOrEmpty() -> {
-                val localUser = validatedLocalUser.orEmpty()
-                key("local_$localUser") {
-                    val viewModel: NomiChatViewModel = viewModel(
-                        key = "local_$localUser",
-                        factory = viewModelFactory {
-                            initializer {
-                                val app = checkNotNull(this[APPLICATION_KEY])
-                                NomiChatViewModel(
-                                    repository = LocalNomiRepository(localAuthStore),
-                                    smartReplyRepository = SmartReplyRepository(),
-                                    preferencesRepository = UserPreferencesRepository(app),
-                                    currentUserId = localUser,
-                                    networkObserver = networkObserver
-                                )
-                            }
-                        }
-                    )
-                    NomiChatMainShell(
-                        viewModel = viewModel,
-                        preferencesRepository = preferencesRepository,
-                        currentThemeMode = themeMode,
-                        bottomTab = bottomTab,
-                        pendingNotificationContactId = pendingNotificationContactId,
-                        onConsumedNotificationContactId = onConsumedNotificationContactId,
-                        pendingOpenAdminAlerts = pendingOpenAdminAlerts,
-                        onConsumedOpenAdminAlerts = onConsumedOpenAdminAlerts,
-                        onSelectBottomTab = { bottomTab = it },
-                        onResetToAuth = { bottomTab = MainBottomTab.CHATS },
-                        onShowGlobalPopup = { message -> globalPopupMessage = message },
-                        onAuthRejected = { reason -> globalAuthError = reason },
-                        activeGlobalPopupMessage = globalPopupMessage,
-                        onDialogShowsPopup = { suppressRootPopup = it }
-                    )
-                }
-            }
             else -> {
                 AuthScreen(
-                    localAuthStore = localAuthStore,
                     initialErrorMessage = globalAuthError,
                     initialIsLoginTab = globalAuthError != null && prefs.authFlowMode == AuthFlowMode.RETURNING_LOGIN,
                     onDismissInitialError = { globalAuthError = null },
@@ -388,22 +298,6 @@ fun AppNavigation(
                             authFlowMode = mode,
                             returningIdentifier = returningId
                         )
-                    },
-                    onLocalAuthSuccess = { loggedInUsername ->
-                        globalAuthError = null
-                        bottomTab = MainBottomTab.CHATS
-                        localAuthStore.getAccountSettings(loggedInUsername)?.let { saved ->
-                            preferencesRepository.applyAccountSettings(
-                                themeMode = saved.themeMode,
-                                notificationsEnabled = saved.notificationsEnabled,
-                                smartAiEnabled = saved.smartAiEnabled,
-                                appLockPinHash = saved.appLockPinHash
-                            )
-                        }
-                        preferencesRepository.clearPendingSignInFlow()
-                        preferencesRepository.saveActiveUsername(loggedInUsername)
-                        validatedLocalUser = loggedInUsername
-                        lastValidatedKey = loggedInUsername
                     },
                     onAuthSuccess = {
                         globalAuthError = null
@@ -606,10 +500,29 @@ private fun NomiChatMainShell(
         val key = activeStoryAuthorKey ?: return@remember emptyList()
         activeStories.filter { it.userId.ifBlank { it.authorUsername } == key }
     }
-    val avatarPreviewThread = avatarPreviewThreadId?.let { id -> lookupThreads.firstOrNull { it.id == id } }
-    val viewContactThread = viewContactThreadId?.let { id -> lookupThreads.firstOrNull { it.id == id } }
+    val avatarPreviewThread = avatarPreviewThreadId?.let { id ->
+        lookupThreads.firstOrNull { it.id == id }?.takeIf { !it.isBanned }
+    }
+    val viewContactThread = viewContactThreadId?.let { id ->
+        lookupThreads.firstOrNull { it.id == id }?.takeIf { !it.isBanned }
+    }
     val renameThread = renameThreadId?.let { id -> lookupThreads.firstOrNull { it.id == id } }
     val reportThread = reportThreadId?.let { id -> lookupThreads.firstOrNull { it.id == id } }
+
+    LaunchedEffect(lookupThreads, avatarPreviewThreadId, viewContactThreadId) {
+        avatarPreviewThreadId?.let { id ->
+            if (lookupThreads.firstOrNull { it.id == id }?.isBanned == true) {
+                avatarPreviewThreadId = null
+                onShowGlobalPopup("This account is banned.")
+            }
+        }
+        viewContactThreadId?.let { id ->
+            if (lookupThreads.firstOrNull { it.id == id }?.isBanned == true) {
+                viewContactThreadId = null
+                onShowGlobalPopup("This account is banned.")
+            }
+        }
+    }
 
     LaunchedEffect(activeStoryAuthorKey, activeStoryGroup) {
         if (activeStoryAuthorKey != null && activeStoryGroup.isEmpty()) {
@@ -642,7 +555,8 @@ private fun NomiChatMainShell(
 
     LaunchedEffect(isBannedAccount) {
         if (isBannedAccount) {
-            onShowGlobalPopup("Your account is banned.")
+            onAuthRejected("Your ID is banned")
+            onShowGlobalPopup("Your ID is banned")
             onResetToAuth()
             preferencesRepository.saveActiveUsername("")
             if (Firebase.auth.currentUser != null) {
@@ -772,6 +686,10 @@ private fun NomiChatMainShell(
                         seenStoryIds = seenStoryIds,
                         onOpenChat = viewModel::openConversation,
                         onAvatarClick = { thread ->
+                            if (thread.isBanned) {
+                                onShowGlobalPopup("This account is banned.")
+                                return@ArchivedChatsScreen
+                            }
                             val threadStories = activeStories.filter { story ->
                                 (thread.peerUid.isNotBlank() && story.userId == thread.peerUid) ||
                                     (thread.username.isNotBlank() && story.authorUsername.equals(thread.username, ignoreCase = true))
@@ -783,7 +701,13 @@ private fun NomiChatMainShell(
                             }
                         },
                         onRenameChat = { thread -> renameThreadId = thread.id },
-                        onViewContact = { thread -> viewContactThreadId = thread.id },
+                        onViewContact = { thread ->
+                            if (thread.isBanned) {
+                                onShowGlobalPopup("This account is banned.")
+                            } else {
+                                viewContactThreadId = thread.id
+                            }
+                        },
                         onUnarchiveChat = viewModel::toggleArchiveChat,
                         onToggleBlockChat = viewModel::toggleBlockChat,
                         onDeleteChat = viewModel::deleteChatPermanently,
@@ -836,18 +760,17 @@ private fun NomiChatMainShell(
                             activeModal = ActiveModal.ADD_CONTACT
                         },
                         onLogoutClick = {
-                            scope.launch {
-                                viewModel.setOfflineBeforeLogout()
-                                onResetToAuth()
-                                preferencesRepository.clearPendingSignInFlow()
-                                preferencesRepository.saveActiveUsername("")
-                                if (Firebase.auth.currentUser != null) {
-                                    signOutUser(
-                                        credentialManager = credentialManager,
-                                        scope = scope
-                                    )
-                                }
+                            viewModel.prepareImmediateLogout()
+                            PendingAuthCredentials.clear()
+                            onResetToAuth()
+                            CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+                                runCatching { preferencesRepository.clearPendingSignInFlow() }
+                                runCatching { preferencesRepository.saveActiveUsername("") }
                             }
+                            signOutUser(
+                                credentialManager = credentialManager,
+                                scope = scope
+                            )
                         },
                         networkStatus = networkStatus,
                         isCloudSession = viewModel.isCloudSession,
@@ -916,6 +839,10 @@ private fun NomiChatMainShell(
                         onOpenPremium = { activeModal = ActiveModal.PREMIUM },
                         onOpenChat = viewModel::openConversation,
                         onAvatarClick = { thread ->
+                            if (thread.isBanned) {
+                                onShowGlobalPopup("This account is banned.")
+                                return@ChatsScreen
+                            }
                             val threadStories = activeStories.filter { story ->
                                 (thread.peerUid.isNotBlank() && story.userId == thread.peerUid) ||
                                     (thread.username.isNotBlank() && story.authorUsername.equals(thread.username, ignoreCase = true))
@@ -927,7 +854,13 @@ private fun NomiChatMainShell(
                             }
                         },
                         onRenameChat = { thread -> renameThreadId = thread.id },
-                        onViewContact = { thread -> viewContactThreadId = thread.id },
+                        onViewContact = { thread ->
+                            if (thread.isBanned) {
+                                onShowGlobalPopup("This account is banned.")
+                            } else {
+                                viewContactThreadId = thread.id
+                            }
+                        },
                         onToggleLockChat = viewModel::toggleLockChat,
                         onToggleBlockChat = viewModel::toggleBlockChat,
                         onToggleArchiveChat = viewModel::toggleArchiveChat,
@@ -996,8 +929,23 @@ private fun NomiChatMainShell(
             )
         }
 
+        if (isAdminSession && isAdminPanelOpen) {
+            AdminModerationScreen(
+                alerts = moderationAlerts,
+                users = adminUsers,
+                isLoading = isAdminActionLoading,
+                onDismiss = { isAdminPanelOpen = false },
+                onIgnore = viewModel::ignoreModerationAlert,
+                onBanAlert = viewModel::banUserFromAlert,
+                onRecoveryAlert = viewModel::recoverUserFromAlert,
+                onVerifyUser = viewModel::adminVerifyUser,
+                onBanUser = viewModel::adminBanUser,
+                onUnbanUser = viewModel::adminUnbanUser
+            )
+        }
+
         AnimatedVisibility(
-            visible = (isAdminSession && inAppAdminBanner != null) || inAppAlertBanner != null,
+            visible = (isAdminSession && inAppAdminBanner != null && !isAdminPanelOpen) || inAppAlertBanner != null,
             enter = fadeIn() + slideInVertically { -it },
             exit = fadeOut() + slideOutVertically { -it },
             modifier = Modifier
@@ -1006,10 +954,17 @@ private fun NomiChatMainShell(
                 .padding(horizontal = 14.dp, vertical = 10.dp)
                 .widthIn(max = 560.dp)
         ) {
-            val adminAlert = if (isAdminSession) inAppAdminBanner else null
+            val adminAlert = if (isAdminSession && !isAdminPanelOpen) inAppAdminBanner else null
             if (adminAlert != null) {
+                val reportedPhotoData = remember(adminAlert, adminUsers) {
+                    adminUsers.firstOrNull {
+                        (adminAlert.reportedUid.isNotBlank() && it.uid == adminAlert.reportedUid) ||
+                            (adminAlert.reportedUsername.isNotBlank() && it.username.equals(adminAlert.reportedUsername, ignoreCase = true))
+                    }?.photoData
+                }
                 InAppAdminAlertBanner(
                     alert = adminAlert,
+                    reportedPhotoData = reportedPhotoData,
                     onOpenAdminPanel = {
                         viewModel.dismissInAppAdminBanner()
                         isAdminPanelOpen = true
@@ -1239,21 +1194,6 @@ private fun NomiChatMainShell(
                 reportThreadId = null
                 viewModel.reportContact(thread, reason)
             }
-        )
-    }
-
-    if (isAdminSession && isAdminPanelOpen) {
-        AdminModerationDialog(
-            alerts = moderationAlerts,
-            users = adminUsers,
-            isLoading = isAdminActionLoading,
-            onDismiss = { isAdminPanelOpen = false },
-            onIgnore = viewModel::ignoreModerationAlert,
-            onBanAlert = viewModel::banUserFromAlert,
-            onRecoveryAlert = viewModel::recoverUserFromAlert,
-            onVerifyUser = viewModel::adminVerifyUser,
-            onBanUser = viewModel::adminBanUser,
-            onUnbanUser = viewModel::adminUnbanUser
         )
     }
 

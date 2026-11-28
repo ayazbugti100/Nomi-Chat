@@ -21,13 +21,14 @@ import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.auth
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 private const val TAG = "Auth"
 
@@ -140,15 +141,15 @@ fun signOutUser(
     scope: CoroutineScope,
     onSignOutComplete: () -> Unit = {}
 ) {
-    scope.launch {
-        withContext(NonCancellable) {
+    // Sign out of Firebase Auth immediately on the user tap so authStateFlow transitions without waiting on network or CredentialManager
+    Firebase.auth.signOut()
+    onSignOutComplete()
+    CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+        withTimeoutOrNull(1500L) {
             try {
                 credentialManager.clearCredentialState(ClearCredentialStateRequest())
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to clear credential state: ${e.message}")
-            } finally {
-                Firebase.auth.signOut()
-                onSignOutComplete()
             }
         }
     }

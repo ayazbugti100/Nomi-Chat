@@ -116,7 +116,7 @@ class NetworkAndUsernameRobolectricTest {
         assertTrue(wifiObserver.verifyInternetAccess())
         assertFalse(probeCalled)
 
-        // Mobile SIM Data connected (unvalidated locally -> falls back to reachability probe)
+        // Mobile SIM Data connected -> non-blocking transport check succeeds
         configureActiveNetwork(NetworkCapabilities.TRANSPORT_CELLULAR, validated = false)
         val simObserver = NetworkConnectivityObserver(context) {
             probeCalled = true
@@ -128,7 +128,6 @@ class NetworkAndUsernameRobolectricTest {
         assertFalse(simStatus.wifiConnected)
         assertEquals("Mobile Data", simStatus.transportLabel)
         assertTrue(simObserver.verifyInternetAccess())
-        assertTrue(probeCalled)
 
         // Neither Wi-Fi nor Mobile Data connected -> Offline
         val offlineObserver = object : NetworkConnectivityObserver(context) {
@@ -145,15 +144,13 @@ class NetworkAndUsernameRobolectricTest {
     }
 
     @Test
-    fun sendMessage_hiBlockedWhenOfflineOrFirebaseDisconnected_andWorksWhenVerifiedOnline() = runTest(testDispatcher) {
+    fun sendMessage_hiQueuesOfflineWithoutPreFlightBlock_andDeliversOnline() = runTest(testDispatcher) {
         val store = LocalAuthStore(context)
         store.signUpUser("Alice One", "alice_net", "2000-01-01", "pass123", "pass123")
         store.signUpUser("Bob Two", "bob_net", "2000-01-01", "pass123", "pass123")
         val contactId = store.addContact("alice_net", "", "@bob_net", "", "chat").getOrThrow()
 
         var transportOnline = false
-        var internetReachable = false
-        var firebaseActive = false
 
         val fakeObserver = object : NetworkConnectivityObserver(context) {
             override fun currentStatus(): NetworkStatus = NetworkStatus(
@@ -161,21 +158,15 @@ class NetworkAndUsernameRobolectricTest {
                 transportLabel = if (transportOnline) "Wi-Fi" else "Offline",
                 wifiConnected = transportOnline,
                 mobileDataConnected = false,
-                hasValidatedInternet = false
+                hasValidatedInternet = transportOnline
             )
 
-            override suspend fun verifyInternetAccess(): Boolean {
-                return transportOnline && internetReachable
-            }
+            override suspend fun verifyInternetAccess(): Boolean = transportOnline
         }
 
         val innerRepo = LocalNomiRepository(store)
-        val repoWithFirebaseGate = object : NomiDataSource by innerRepo {
-            override suspend fun verifyActiveFirebaseConnection(): Boolean = firebaseActive
-        }
-
         val vm = NomiChatViewModel(
-            repository = repoWithFirebaseGate,
+            repository = innerRepo,
             smartReplyRepository = SmartReplyRepository(),
             preferencesRepository = UserPreferencesRepository(context),
             currentUserId = "alice_net",
@@ -186,36 +177,20 @@ class NetworkAndUsernameRobolectricTest {
         vm.openConversation(contactId)
         vm.activeContact.first { it?.id == contactId }
 
-        // 1. Offline: sending "Hi" is blocked immediately and triggers the exact pop-up
+        // 1. Offline: sending "Hi" is no longer blocked by pre-flight network checks
         vm.sendMessage("Hi")
         advanceUntilIdle()
-        assertEquals(
-            NetworkConnectivityObserver.NO_INTERNET_POPUP_MESSAGE,
-            vm.popupMessage.value
-        )
-        assertTrue(store.observeMessages("alice_net", contactId).first().isEmpty())
-        vm.clearPopup()
+        val offlineQueued = store.observeMessages("alice_net", contactId).first()
+        assertEquals(1, offlineQueued.size)
+        assertEquals("Hi", offlineQueued.first().text)
 
-        // 2. Wi-Fi connected + internet OK, but Firebase not actively connected -> still blocked with pop-up
+        // 2. Online: subsequent messages continue delivering cleanly
         transportOnline = true
-        internetReachable = true
-        firebaseActive = false
-        vm.sendMessage("Hi")
-        advanceUntilIdle()
-        assertEquals(
-            NetworkConnectivityObserver.NO_INTERNET_POPUP_MESSAGE,
-            vm.popupMessage.value
-        )
-        assertTrue(store.observeMessages("alice_net", contactId).first().isEmpty())
-        vm.clearPopup()
-
-        // 3. Real internet + active Firebase verified -> sending "Hi" succeeds cleanly
-        firebaseActive = true
-        vm.sendMessage("Hi")
+        vm.sendMessage("Hello again")
         advanceUntilIdle()
         val delivered = store.observeMessages("alice_net", contactId).first()
-        assertEquals(1, delivered.size)
-        assertEquals("Hi", delivered.first().text)
+        assertEquals(2, delivered.size)
+        assertEquals("Hello again", delivered.last().text)
     }
 
     @Test
@@ -353,73 +328,39 @@ class NetworkAndUsernameRobolectricTest {
     }
 
     @Test
-    fun addChat_blocksWhenOfflineOrFirebaseDisconnected_rejectsChangedUsername_andAcceptsActiveUsername() = runTest(testDispatcher) {
+    fun addChat_rejectsChangedUsername_andAcceptsActiveUsername() = runTest(testDispatcher) {
         val store = LocalAuthStore(context)
         store.signUpUser("Target User", "target_old", "2000-01-01", "pass123", "pass123")
         store.signUpUser("Searcher User", "searcher_net", "2000-01-01", "pass123", "pass123")
 
-        var transportOnline = false
-        var internetReachable = false
-        var firebaseActive = false
-
-        val gatedObserver = object : NetworkConnectivityObserver(context) {
+        val observer = object : NetworkConnectivityObserver(context) {
             override fun currentStatus(): NetworkStatus = NetworkStatus(
-                isConnected = transportOnline,
-                transportLabel = if (transportOnline) "Wi-Fi" else "Offline",
-                wifiConnected = transportOnline,
+                isConnected = true,
+                transportLabel = "Wi-Fi",
+                wifiConnected = true,
                 mobileDataConnected = false,
-                hasValidatedInternet = transportOnline && internetReachable
+                hasValidatedInternet = true
             )
 
-            override suspend fun verifyInternetAccess(): Boolean {
-                return transportOnline && internetReachable
-            }
+            override suspend fun verifyInternetAccess(): Boolean = true
         }
 
         val innerRepo = LocalNomiRepository(store)
-        val repoWithFirebaseGate = object : NomiDataSource by innerRepo {
-            override suspend fun verifyActiveFirebaseConnection(): Boolean = firebaseActive
-        }
-
         val vm = NomiChatViewModel(
-            repository = repoWithFirebaseGate,
+            repository = innerRepo,
             smartReplyRepository = SmartReplyRepository(),
             preferencesRepository = UserPreferencesRepository(context),
             currentUserId = "searcher_net",
-            networkObserver = gatedObserver
+            networkObserver = observer
         )
         advanceUntilIdle()
 
-        // 1. Offline: searching or adding a chat immediately blocks and shows offline pop-up
         var addSucceeded = false
-        vm.findUserByUsername("@target_old")
-        advanceUntilIdle()
-        assertEquals(NetworkConnectivityObserver.NO_INTERNET_POPUP_MESSAGE, vm.popupMessage.value)
-        vm.clearPopup()
 
-        vm.addDirectChatByUsername("@target_old", onSuccess = { addSucceeded = true })
-        advanceUntilIdle()
-        assertFalse(addSucceeded)
-        assertEquals(NetworkConnectivityObserver.NO_INTERNET_POPUP_MESSAGE, vm.popupMessage.value)
-        assertTrue(store.observeContacts("searcher_net").first().isEmpty())
-        vm.clearPopup()
-
-        // 2. Wi-Fi & internet reachable, but Firebase live check returns false -> still blocks and adds nothing
-        transportOnline = true
-        internetReachable = true
-        firebaseActive = false
-        vm.addDirectChatByUsername("@target_old", onSuccess = { addSucceeded = true })
-        advanceUntilIdle()
-        assertFalse(addSucceeded)
-        assertEquals(NetworkConnectivityObserver.NO_INTERNET_POPUP_MESSAGE, vm.popupMessage.value)
-        assertTrue(store.observeContacts("searcher_net").first().isEmpty())
-        vm.clearPopup()
-
-        // 3. Target user changes username from target_old -> target_active
+        // 1. Target user changes username from target_old -> target_active
         store.updateProfile(usernameKey = "target_old", newUsername = "target_active").getOrThrow()
 
-        // 4. Online + Firebase active, searching or adding changed/previous username -> "Account Not Found", zero chats added
-        firebaseActive = true
+        // 2. Searching or adding changed/previous username -> "Account Not Found", zero chats added
         vm.findUserByUsername("@target_old")
         advanceUntilIdle()
         assertTrue(vm.usernameSearchState.value is UsernameSearchState.NotFound)
@@ -432,7 +373,7 @@ class NetworkAndUsernameRobolectricTest {
         assertEquals("Account Not Found", (vm.usernameSearchState.value as UsernameSearchState.NotFound).message)
         assertTrue(store.observeContacts("searcher_net").first().isEmpty())
 
-        // 5. Online + Firebase active + valid active username -> accepted and chat added
+        // 3. Valid active username -> accepted and chat added
         vm.addDirectChatByUsername("@target_active", onSuccess = { addSucceeded = true })
         advanceUntilIdle()
         assertTrue(addSucceeded)
@@ -458,17 +399,29 @@ class NetworkAndUsernameRobolectricTest {
         vm.addDirectChatByUsername("", onSuccess = {})
         assertEquals("Please enter a username.", (vm.usernameSearchState.value as UsernameSearchState.NotFound).message)
 
-        // 8. Banned account -> "This account is banned, so it cannot be added here."
+        // 8. Banned account -> can still appear/be added by username, but opening chat remains blocked
         store.signUpUser("Banned User", "banned_user", "2000-01-01", "pass123", "pass123")
         val usersFile = File(context.filesDir, "nomi_auth_users.json")
         usersFile.writeText(usersFile.readText().replace("\"username\":\"banned_user\",\"accountStatus\":\"active\"", "\"username\":\"banned_user\",\"accountStatus\":\"banned\""))
         vm.findUserByUsername("@banned_user")
         advanceUntilIdle()
-        assertTrue(vm.usernameSearchState.value is UsernameSearchState.NotFound)
-        assertEquals(
-            "This account is banned, so it cannot be added here.",
-            (vm.usernameSearchState.value as UsernameSearchState.NotFound).message
-        )
+        assertTrue(vm.usernameSearchState.value is UsernameSearchState.Found)
+        val foundBanned = (vm.usernameSearchState.value as UsernameSearchState.Found).result
+        assertTrue(foundBanned.isBanned)
+
+        var addedBanned = false
+        vm.addDirectChatByUsername("@banned_user", onSuccess = { addedBanned = true })
+        advanceUntilIdle()
+        assertTrue(addedBanned)
+
+        val updatedContacts = store.observeContacts("searcher_net").first()
+        val bannedThread = updatedContacts.firstOrNull { it.username == "banned_user" }
+        assertTrue(bannedThread != null && bannedThread.isBanned)
+
+        vm.openConversation(bannedThread!!.id)
+        advanceUntilIdle()
+        assertEquals(null, vm.activeContact.value)
+        assertEquals("This account is banned.", vm.popupMessage.value)
     }
 
     @Test
@@ -506,5 +459,42 @@ class NetworkAndUsernameRobolectricTest {
 
         composeTestRule.onNodeWithTag("username_checking_card").assertIsDisplayed()
         composeTestRule.onNodeWithText("Checking username...").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("add_contact_confirm_button").assertIsDisplayed()
+    }
+
+    @Test
+    fun addContactDialog_blocksSpacesAndSpecialCharsWithUsernameMessageWarning() {
+        composeTestRule.setContent {
+            MaterialTheme {
+                AddContactDialog(
+                    usernameSearchState = UsernameSearchState.Idle,
+                    onDismiss = {},
+                    onAddDirectChat = {},
+                    onAddGroup = { _, _ -> }
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithTag("add_contact_username_input").performTextInput("alice !#1")
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("add_contact_username_input").assertTextContains("alice1")
+        composeTestRule.onNodeWithTag("username_message").assertIsDisplayed()
+        composeTestRule.onNodeWithText("No spaces or special characters allowed (letters, numbers, _, ., - only)").assertIsDisplayed()
+    }
+
+    @Test
+    fun prepareImmediateLogout_executesSynchronouslyWithoutBlocking() = runTest(testDispatcher) {
+        val store = LocalAuthStore(context)
+        store.signUpUser("Logout User", "logout_u", "2000-01-01", "pass123", "pass123")
+        val vm = NomiChatViewModel(
+            repository = LocalNomiRepository(store),
+            smartReplyRepository = SmartReplyRepository(),
+            preferencesRepository = UserPreferencesRepository(context),
+            currentUserId = "logout_u"
+        )
+        advanceUntilIdle()
+        vm.setAppForeground(true)
+        vm.prepareImmediateLogout()
+        assertFalse(vm.isCloudSession)
     }
 }

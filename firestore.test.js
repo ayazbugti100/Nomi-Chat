@@ -411,7 +411,7 @@ test("Owner can set/update bannerData on profile, directory, and contacts while 
   const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
   const created = new Date(Date.now() - 5000);
   const validBanner = "data:image/jpeg;base64,BANNER_VALID";
-  const oversizedBanner = "x".repeat(150001);
+  const oversizedBanner = "x".repeat(250001);
 
   await assertSucceeds(
     aliceDb.collection("users").doc(ALICE_UID).set({
@@ -1328,6 +1328,31 @@ test("Admin Gmail lock restricts admin_config and moderation_alerts exclusively 
   });
   await assertSucceeds(adminBatchBan.commit());
 
+  // Other users can still add an admin-banned user to their contact list (with accountStatus: "banned")
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).collection("contacts").doc("c_banned_bob").set({
+      userId: ALICE_UID,
+      name: "Bob Target",
+      username: "bob_target",
+      phone: "@bob_target",
+      threadType: "chat",
+      online: false,
+      typing: false,
+      unreadCount: 0,
+      lastMessageText: "",
+      lastMessageFromMe: false,
+      lastMessageTimeLabel: "",
+      pinned: false,
+      peerUid: BOB_UID,
+      isRegisteredPeer: true,
+      accountStatus: "banned",
+      reportCount: 0,
+      reportedBy: [],
+      createdAt: banTime,
+      updatedAt: banTime,
+    })
+  );
+
   // 3) Recovery / Unban action restoring Bob cleanly
   const adminBatchRecover = adminDb.batch();
   const recoverTime = new Date(Date.now() - 100);
@@ -1559,6 +1584,128 @@ test("Verified blue badge (verified: true) is strictly bound to verified ayazbug
     })
   );
 });
+
+test("Bounded chunked queries (limit <= 30) work on public_profiles and directory while unbounded list fails; 200KB photo/banner and admin-verified updates succeed", async () => {
+  const created = new Date(Date.now() - 5000);
+  const ADMIN_UID = "admin_ayaz_uid";
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID, {
+    email: "ayazbugti100@gmail.com",
+    email_verified: true,
+  }).firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+
+  const largePhoto = "data:image/jpeg;base64," + "A".repeat(180000);
+  const largeBanner = "data:image/jpeg;base64," + "B".repeat(190000);
+
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).set({
+      userId: ALICE_UID,
+      displayName: "Alice",
+      username: "alice_chunk",
+      bio: "Bio",
+      dob: "2000-01-01",
+      provider: "google",
+      photoData: largePhoto,
+      bannerData: largeBanner,
+      online: true,
+      verified: false,
+      premiumUnlocked: false,
+      accountStatus: "active",
+      reportCount: 0,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("directory").doc("alice_chunk").set({
+      ownerUid: ALICE_UID,
+      username: "alice_chunk",
+      displayName: "Alice",
+      provider: "google",
+      photoData: largePhoto,
+      bannerData: largeBanner,
+      online: true,
+      verified: false,
+      accountStatus: "active",
+      reportCount: 0,
+      reportedByUids: [],
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("public_profiles").doc(ALICE_UID).set({
+      ownerUid: ALICE_UID,
+      username: "alice_chunk",
+      displayName: "Alice",
+      photoData: largePhoto,
+      bannerData: largeBanner,
+      online: true,
+      verified: false,
+      accountStatus: "active",
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  // Admin grants blue verified badge to Alice
+  await assertSucceeds(
+    adminDb.collection("users").doc(ALICE_UID).update({
+      verified: true,
+      updatedAt: new Date(Date.now() - 2000),
+    })
+  );
+  await assertSucceeds(
+    adminDb.collection("directory").doc("alice_chunk").update({
+      verified: true,
+      updatedAt: new Date(Date.now() - 2000),
+    })
+  );
+  await assertSucceeds(
+    adminDb.collection("public_profiles").doc(ALICE_UID).update({
+      verified: true,
+      updatedAt: new Date(Date.now() - 2000),
+    })
+  );
+
+  // Admin-verified Alice can still update her banner, photo, and online presence cleanly
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      bannerData: "data:image/jpeg;base64," + "C".repeat(160000),
+      verified: true,
+      online: false,
+      updatedAt: new Date(Date.now() - 1000),
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("directory").doc("alice_chunk").update({
+      bannerData: "data:image/jpeg;base64," + "C".repeat(160000),
+      verified: true,
+      online: false,
+      updatedAt: new Date(Date.now() - 1000),
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("public_profiles").doc(ALICE_UID).update({
+      bannerData: "data:image/jpeg;base64," + "C".repeat(160000),
+      verified: true,
+      online: false,
+      updatedAt: new Date(Date.now() - 1000),
+    })
+  );
+
+  // Bounded chunk query (limit <= 30) succeeds; unbounded list or limit > 30 fails
+  await assertSucceeds(
+    bobDb.collection("public_profiles").where("ownerUid", "==", ALICE_UID).limit(30).get()
+  );
+  await assertSucceeds(
+    bobDb.collection("directory").where("username", "==", "alice_chunk").limit(30).get()
+  );
+  await assertFails(bobDb.collection("public_profiles").limit(31).get());
+  await assertFails(bobDb.collection("directory").limit(31).get());
+});
+
 
 
 

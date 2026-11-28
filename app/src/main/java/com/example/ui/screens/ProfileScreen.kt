@@ -100,6 +100,7 @@ import com.example.data.model.ThemeMode
 import com.example.data.model.UserProfile
 import com.example.data.network.NetworkStatus
 import com.example.ui.components.AvatarCircle
+import com.example.ui.components.resolveImageModel
 import com.example.ui.theme.EmeraldBright
 import com.example.ui.theme.EmeraldDark
 import com.example.ui.theme.EmeraldDeep
@@ -827,12 +828,7 @@ private fun ProfileBannerCard(
     isUploading: Boolean,
     onClick: () -> Unit
 ) {
-    val decodedBannerBytes = remember(bannerData) {
-        if (!bannerData.isNullOrBlank() && bannerData.startsWith("data:image")) {
-            val b64 = bannerData.substringAfter("base64,", "")
-            runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull()
-        } else null
-    }
+    val bannerModel = remember(bannerData) { resolveImageModel(bannerData) }
     val wavePath = remember { Path() }
 
     Surface(
@@ -855,13 +851,13 @@ private fun ProfileBannerCard(
                     )
                 )
         ) {
-            if (decodedBannerBytes != null) {
+            if (bannerModel != null) {
                 val bannerContext = LocalContext.current
-                val bannerRequest = remember(bannerData, decodedBannerBytes) {
+                val bannerRequest = remember(bannerData, bannerModel) {
                     ImageRequest.Builder(bannerContext)
-                        .data(decodedBannerBytes)
+                        .data(bannerModel)
                         .memoryCacheKey("profile_banner_${bannerData?.length}_${bannerData?.hashCode()}")
-                        .diskCachePolicy(CachePolicy.DISABLED)
+                        .diskCachePolicy(if (bannerModel is ByteArray) CachePolicy.DISABLED else CachePolicy.ENABLED)
                         .crossfade(false)
                         .build()
                 }

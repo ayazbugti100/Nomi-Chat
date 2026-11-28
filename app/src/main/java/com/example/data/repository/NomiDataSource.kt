@@ -164,6 +164,8 @@ interface NomiDataSource {
 
     suspend fun setUserPresence(userId: String, online: Boolean) {}
 
+    fun queueOfflinePresence(userId: String) {}
+
     suspend fun onNetworkReconnected() {}
 
     suspend fun verifyActiveFirebaseConnection(): Boolean = true

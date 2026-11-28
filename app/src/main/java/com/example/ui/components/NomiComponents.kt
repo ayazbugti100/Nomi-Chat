@@ -52,6 +52,11 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
@@ -63,9 +68,34 @@ import com.example.ui.theme.EmeraldDark
 import com.example.ui.theme.EmeraldDeep
 import com.example.ui.theme.EmeraldMid
 import com.example.ui.theme.EmeraldVibrant
+import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.GoldCrown
 import com.example.ui.theme.LoginGreenStart
 import com.example.ui.theme.MintLight
+
+fun resolveImageModel(raw: String?): Any? {
+    val trimmed = raw?.trim().orEmpty()
+    if (trimmed.isEmpty()) return null
+    if (trimmed.startsWith("http://", ignoreCase = true) ||
+        trimmed.startsWith("https://", ignoreCase = true)
+    ) {
+        return trimmed
+    }
+    if (trimmed.startsWith("data:image", ignoreCase = true)) {
+        val b64 = trimmed.substringAfter("base64,", "")
+        if (b64.isEmpty()) return null
+        return runCatching { Base64.decode(b64, Base64.DEFAULT) }
+            .getOrNull()
+            ?.takeIf { it.isNotEmpty() }
+    }
+    if (trimmed.length > 64 && !trimmed.contains(" ") && !trimmed.startsWith("text_card:")) {
+        return runCatching {
+            val bytes = Base64.decode(trimmed, Base64.DEFAULT)
+            if (bytes.size > 16) bytes else null
+        }.getOrNull()
+    }
+    return null
+}
 
 @Composable
 fun EmeraldWaveHeader(
@@ -75,12 +105,7 @@ fun EmeraldWaveHeader(
 ) {
     val wave1 = remember { Path() }
     val wave2 = remember { Path() }
-    val decodedBannerBytes = remember(bannerData) {
-        if (!bannerData.isNullOrBlank() && bannerData.startsWith("data:image")) {
-            val b64 = bannerData.substringAfter("base64,", "")
-            runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull()
-        } else null
-    }
+    val bannerModel = remember(bannerData) { resolveImageModel(bannerData) }
 
     Box(
         modifier = modifier.background(
@@ -89,13 +114,13 @@ fun EmeraldWaveHeader(
             )
         )
     ) {
-        if (decodedBannerBytes != null) {
+        if (bannerModel != null) {
             val bannerContext = LocalContext.current
-            val bannerRequest = remember(bannerData, decodedBannerBytes) {
+            val bannerRequest = remember(bannerData, bannerModel) {
                 ImageRequest.Builder(bannerContext)
-                    .data(decodedBannerBytes)
+                    .data(bannerModel)
                     .memoryCacheKey("header_banner_${bannerData?.length}_${bannerData?.hashCode()}")
-                    .diskCachePolicy(CachePolicy.DISABLED)
+                    .diskCachePolicy(if (bannerModel is ByteArray) CachePolicy.DISABLED else CachePolicy.ENABLED)
                     .crossfade(false)
                     .build()
             }
@@ -171,15 +196,10 @@ fun AvatarCircle(
     imageBackgroundColor: Color? = null,
     modifier: Modifier = Modifier
 ) {
-    val decodedBytes = remember(photoData) {
-        if (!photoData.isNullOrBlank() && photoData.startsWith("data:image")) {
-            val b64 = photoData.substringAfter("base64,", "")
-            runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull()
-        } else null
-    }
+    val avatarModel = remember(photoData) { resolveImageModel(photoData) }
 
     val containerColor = when {
-        decodedBytes != null && imageBackgroundColor != null -> imageBackgroundColor
+        avatarModel != null && imageBackgroundColor != null -> imageBackgroundColor
         isChannel -> Color(0xFF1A84F5)
         isGroup -> EmeraldMid
         else -> MintLight
@@ -237,13 +257,13 @@ fun AvatarCircle(
                 .background(containerColor),
             contentAlignment = Alignment.Center
         ) {
-            if (decodedBytes != null) {
+            if (avatarModel != null) {
                 val avatarContext = LocalContext.current
-                val avatarRequest = remember(photoData, decodedBytes) {
+                val avatarRequest = remember(photoData, avatarModel) {
                     ImageRequest.Builder(avatarContext)
-                        .data(decodedBytes)
+                        .data(avatarModel)
                         .memoryCacheKey("avatar_${photoData?.length}_${photoData?.hashCode()}")
-                        .diskCachePolicy(CachePolicy.DISABLED)
+                        .diskCachePolicy(if (avatarModel is ByteArray) CachePolicy.DISABLED else CachePolicy.ENABLED)
                         .crossfade(false)
                         .build()
                 }
@@ -535,4 +555,91 @@ fun SmallFloatingPopup(
         }
     }
 }
+
+val USERNAME_FORMAT_REGEX = Regex("^[a-zA-Z0-9_.-]{2,40}$")
+val USERNAME_CHAR_REGEX = Regex("^[a-zA-Z0-9_.-]+$")
+
+data class UsernameSanitizationResult(
+    val value: String,
+    val hadDisallowedInput: Boolean
+)
+
+fun sanitizeUsernameInput(
+    raw: String,
+    maxLength: Int = 40,
+    allowLeadingAt: Boolean = false,
+    forceLowercase: Boolean = true
+): UsernameSanitizationResult {
+    var disallowed = false
+    val sb = StringBuilder(raw.length)
+    raw.forEachIndexed { index, ch ->
+        if (allowLeadingAt && index == 0 && ch == '@') {
+            sb.append(ch)
+        } else if (ch in 'a'..'z' || ch in 'A'..'Z' || ch in '0'..'9' || ch == '_' || ch == '.' || ch == '-') {
+            sb.append(if (forceLowercase) ch.lowercaseChar() else ch)
+        } else {
+            disallowed = true
+        }
+    }
+    val hasLeadingAt = allowLeadingAt && sb.isNotEmpty() && sb[0] == '@'
+    val cap = if (hasLeadingAt) maxLength + 1 else maxLength
+    val trimmedToCap = if (sb.length > cap) sb.substring(0, cap) else sb.toString()
+    return UsernameSanitizationResult(
+        value = trimmedToCap,
+        hadDisallowedInput = disallowed
+    )
+}
+
+@Composable
+fun UsernameValidationMessage(
+    message: String?,
+    isError: Boolean,
+    isSuccess: Boolean = false,
+    shakeTrigger: Int = 0,
+    testTag: String = "username_message",
+    innerTextTestTag: String? = null,
+    modifier: Modifier = Modifier
+) {
+    val shakeOffset = remember { Animatable(0f) }
+    LaunchedEffect(shakeTrigger, isError, message) {
+        if (isError && !message.isNullOrBlank()) {
+            shakeOffset.snapTo(0f)
+            val keyframes = listOf(-8f, 8f, -6f, 6f, -3f, 3f, 0f)
+            for (target in keyframes) {
+                shakeOffset.animateTo(
+                    targetValue = target,
+                    animationSpec = tween(durationMillis = 42, easing = LinearEasing)
+                )
+            }
+        } else {
+            shakeOffset.snapTo(0f)
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .graphicsLayer { translationX = shakeOffset.value }
+            .testTag(testTag)
+    ) {
+        if (!message.isNullOrBlank()) {
+            val textModifier = if (innerTextTestTag != null) {
+                Modifier.testTag(innerTextTestTag)
+            } else {
+                Modifier
+            }
+            Text(
+                text = message,
+                color = when {
+                    isError -> ErrorRed
+                    isSuccess -> Color(0xFF16A34A)
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = if (isError || isSuccess) FontWeight.Medium else FontWeight.Normal,
+                modifier = textModifier
+            )
+        }
+    }
+}
+
 

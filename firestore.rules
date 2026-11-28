@@ -38,8 +38,8 @@ service cloud.firestore {
              data.bio is string && data.bio.size() <= 200 &&
              data.dob is string && data.dob.size() >= 4 && data.dob.size() <= 20 &&
              data.provider in ['google', 'username'] &&
-             (!('photoData' in data) || (data.photoData is string && data.photoData.size() <= 150000)) &&
-             (!('bannerData' in data) || (data.bannerData is string && data.bannerData.size() <= 150000)) &&
+             (!('photoData' in data) || (data.photoData is string && data.photoData.size() <= 250000)) &&
+             (!('bannerData' in data) || (data.bannerData is string && data.bannerData.size() <= 250000)) &&
              (!('profileVisibility' in data) || data.profileVisibility in ['everyone', 'selected', 'nobody']) &&
              (!('allowedViewerUids' in data) || (data.allowedViewerUids is list && data.allowedViewerUids.size() <= 500 && (data.allowedViewerUids.size() == 0 || data.allowedViewerUids[0] is string))) &&
              (!('maxProfileViewers' in data) || (data.maxProfileViewers is int && data.maxProfileViewers >= 0 && data.maxProfileViewers <= 500)) &&
@@ -59,8 +59,8 @@ service cloud.firestore {
              data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60 &&
              (!('provider' in data) || data.provider in ['google', 'username']) &&
              (!('bio' in data) || (data.bio is string && data.bio.size() <= 200)) &&
-             (!('photoData' in data) || (data.photoData is string && data.photoData.size() <= 150000)) &&
-             (!('bannerData' in data) || (data.bannerData is string && data.bannerData.size() <= 150000)) &&
+             (!('photoData' in data) || (data.photoData is string && data.photoData.size() <= 250000)) &&
+             (!('bannerData' in data) || (data.bannerData is string && data.bannerData.size() <= 250000)) &&
              (!('profileVisibility' in data) || data.profileVisibility in ['everyone', 'selected', 'nobody']) &&
              (!('allowedViewerUids' in data) || (data.allowedViewerUids is list && data.allowedViewerUids.size() <= 500 && (data.allowedViewerUids.size() == 0 || data.allowedViewerUids[0] is string))) &&
              (!('maxProfileViewers' in data) || (data.maxProfileViewers is int && data.maxProfileViewers >= 0 && data.maxProfileViewers <= 500)) &&
@@ -87,8 +87,8 @@ service cloud.firestore {
              data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60 &&
              (!('provider' in data) || data.provider in ['google', 'username']) &&
              (!('bio' in data) || (data.bio is string && data.bio.size() <= 200)) &&
-             (!('photoData' in data) || (data.photoData is string && data.photoData.size() <= 150000)) &&
-             (!('bannerData' in data) || (data.bannerData is string && data.bannerData.size() <= 150000)) &&
+             (!('photoData' in data) || (data.photoData is string && data.photoData.size() <= 250000)) &&
+             (!('bannerData' in data) || (data.bannerData is string && data.bannerData.size() <= 250000)) &&
              (!('profileVisibility' in data) || data.profileVisibility in ['everyone', 'selected', 'nobody']) &&
              (!('allowedViewerUids' in data) || (data.allowedViewerUids is list && data.allowedViewerUids.size() <= 500 && (data.allowedViewerUids.size() == 0 || data.allowedViewerUids[0] is string))) &&
              (!('maxProfileViewers' in data) || (data.maxProfileViewers is int && data.maxProfileViewers >= 0 && data.maxProfileViewers <= 500)) &&
@@ -106,8 +106,8 @@ service cloud.firestore {
              data.phone is string && data.phone.size() <= 30 &&
              data.threadType in ['chat', 'group'] &&
              (!('bio' in data) || (data.bio is string && data.bio.size() <= 200)) &&
-             (!('photoData' in data) || (data.photoData is string && data.photoData.size() <= 150000)) &&
-             (!('bannerData' in data) || (data.bannerData is string && data.bannerData.size() <= 150000)) &&
+             (!('photoData' in data) || (data.photoData is string && data.photoData.size() <= 250000)) &&
+             (!('bannerData' in data) || (data.bannerData is string && data.bannerData.size() <= 250000)) &&
              data.online is bool &&
              data.typing is bool &&
              data.unreadCount is int && data.unreadCount >= 0 && data.unreadCount <= 99999 &&
@@ -129,8 +129,7 @@ service cloud.firestore {
              data.reportedBy is list && data.reportedBy.size() <= 50 &&
              (data.reportedBy.size() == 0 || data.reportedBy[0] is string) &&
              data.reportCount == data.reportedBy.size() &&
-             ((data.reportCount >= 10 && data.accountStatus == 'banned') ||
-              (data.reportCount < 10 && data.accountStatus == 'active'));
+             (data.reportCount < 10 || data.accountStatus == 'banned');
     }
 
     function isValidMessage(data) {
@@ -153,7 +152,7 @@ service cloud.firestore {
       return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
              data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 60 &&
              data.authorUsername is string && data.authorUsername.size() >= 1 && data.authorUsername.size() <= 40 &&
-             (!('authorPhotoData' in data) || (data.authorPhotoData is string && data.authorPhotoData.size() <= 150000)) &&
+             (!('authorPhotoData' in data) || (data.authorPhotoData is string && data.authorPhotoData.size() <= 250000)) &&
              data.mediaData is string && data.mediaData.size() >= 1 && data.mediaData.size() <= 920000 &&
              (!('mediaType' in data) || data.mediaType in ['image', 'video', 'text']) &&
              data.caption is string && data.caption.size() <= 140 &&
@@ -177,7 +176,7 @@ service cloud.firestore {
       return data.viewerUid is string && data.viewerUid.size() >= 1 && data.viewerUid.size() <= 128 &&
              data.viewerName is string && data.viewerName.size() >= 1 && data.viewerName.size() <= 60 &&
              data.viewerUsername is string && data.viewerUsername.size() >= 1 && data.viewerUsername.size() <= 40 &&
-             (!('viewerPhotoData' in data) || (data.viewerPhotoData is string && data.viewerPhotoData.size() <= 150000)) &&
+             (!('viewerPhotoData' in data) || (data.viewerPhotoData is string && data.viewerPhotoData.size() <= 250000)) &&
              data.liked is bool &&
              data.reactionEmoji is string && data.reactionEmoji.size() <= 16 &&
              data.viewedAtMs is int && data.viewedAtMs > 0;
@@ -231,7 +230,7 @@ service cloud.firestore {
                           incoming().accountStatus == existing().accountStatus &&
                           incoming().reportCount == existing().reportCount &&
                           incoming().get('bannedByAdmin', false) == existing().get('bannedByAdmin', false) &&
-                          (incoming().verified == existing().verified || (isAdmin() && incoming().verified == true)) &&
+                          (incoming().get('verified', false) == existing().get('verified', false) || (isAdmin() && incoming().get('verified', false) == true)) &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'displayName', 'username', 'email', 'bio', 'dob', 'photoData', 'bannerData',
                             'profileVisibility', 'allowedViewerUids', 'maxProfileViewers',
@@ -419,7 +418,7 @@ service cloud.firestore {
 
     match /directory/{username} {
       allow get: if isSignedIn() && isValidId(username);
-      allow list: if isAdmin();
+      allow list: if isAdmin() || (isSignedIn() && request.query.limit != null && request.query.limit <= 30);
 
       allow create: if isSignedIn() &&
                        isValidId(username) &&
@@ -453,7 +452,7 @@ service cloud.firestore {
                          // Owner updating display name, bio, photo, banner, privacy rules, or presence without altering moderation state
                          ('ownerUid' in existing() &&
                           existing().ownerUid == request.auth.uid &&
-                          (incoming().verified == existing().verified || (isAdmin() && incoming().verified == true)) &&
+                          (incoming().get('verified', false) == existing().get('verified', false) || (isAdmin() && incoming().get('verified', false) == true)) &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'displayName', 'bio', 'photoData', 'bannerData',
                             'profileVisibility', 'allowedViewerUids', 'maxProfileViewers',
@@ -482,7 +481,7 @@ service cloud.firestore {
 
     match /public_profiles/{userId} {
       allow get: if isSignedIn() && isValidId(userId);
-      allow list: if false;
+      allow list: if isSignedIn() && request.query.limit != null && request.query.limit <= 30;
 
       allow create: if isSignedIn() &&
                        isValidId(userId) &&
@@ -513,7 +512,7 @@ service cloud.firestore {
                          (request.auth.uid == userId &&
                           incoming().accountStatus == existing().accountStatus &&
                           incoming().get('bannedByAdmin', false) == existing().get('bannedByAdmin', false) &&
-                          (incoming().verified == existing().verified || (isAdmin() && incoming().verified == true)) &&
+                          (incoming().get('verified', false) == existing().get('verified', false) || (isAdmin() && incoming().get('verified', false) == true)) &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'username', 'displayName', 'provider', 'bio', 'photoData', 'bannerData',
                             'profileVisibility', 'allowedViewerUids', 'maxProfileViewers',

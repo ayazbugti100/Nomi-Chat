@@ -1,5 +1,11 @@
 package com.example.ui.screens
 
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -50,7 +56,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -59,6 +67,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -75,6 +84,10 @@ import com.example.data.model.ChatThread
 import com.example.data.model.ThemeMode
 import com.example.ui.components.AvatarCircle
 import com.example.ui.components.EmeraldWaveHeader
+import com.example.ui.components.USERNAME_CHAR_REGEX
+import com.example.ui.components.USERNAME_FORMAT_REGEX
+import com.example.ui.components.UsernameValidationMessage
+import com.example.ui.components.sanitizeUsernameInput
 import com.example.ui.theme.EmeraldBright
 import com.example.ui.theme.EmeraldDark
 import com.example.ui.theme.EmeraldDeep
@@ -100,13 +113,21 @@ fun EditSingleFieldDialog(
     onSave: (String) -> Unit
 ) {
     var value by remember(initialValue) { mutableStateOf(initialValue) }
+    var invalidCharWarning by remember(initialValue) { mutableStateOf(false) }
+    var errorShakeCount by remember { mutableIntStateOf(0) }
 
-    val cleanVal = if (sanitizeUsername) value.trim().removePrefix("@") else value.trim()
+    LaunchedEffect(errorText) {
+        if (!errorText.isNullOrBlank()) {
+            errorShakeCount++
+        }
+    }
+
+    val cleanVal = if (sanitizeUsername) value.removePrefix("@") else value.trim()
     val isLengthValid = if (sanitizeUsername) cleanVal.length in 2..maxLength else cleanVal.isNotEmpty() && cleanVal.length <= maxLength
-    val isFormatValid = if (sanitizeUsername) cleanVal.matches(Regex("^[a-zA-Z0-9_.-]+$")) else true
+    val isFormatValid = if (sanitizeUsername) cleanVal.matches(USERNAME_CHAR_REGEX) else true
     val hasError = !errorText.isNullOrBlank()
     val isValid = cleanVal.isNotEmpty() && isLengthValid && isFormatValid && !hasError
-    val isInvalid = hasError || (cleanVal.isNotEmpty() && (!isLengthValid || !isFormatValid))
+    val isInvalid = hasError || invalidCharWarning || (cleanVal.isNotEmpty() && (!isLengthValid || !isFormatValid))
 
     val borderColor = when {
         isInvalid -> ErrorRed
@@ -123,10 +144,21 @@ fun EditSingleFieldDialog(
                     value = value,
                     onValueChange = { raw ->
                         onClearError()
-                        val cleaned = if (sanitizeUsername) {
-                            raw.lowercase().filter { it.isLetterOrDigit() || it == '_' || it == '.' || it == '-' }
-                        } else raw
-                        value = cleaned.take(maxLength)
+                        if (sanitizeUsername) {
+                            val sanitized = sanitizeUsernameInput(
+                                raw = raw,
+                                maxLength = maxLength,
+                                allowLeadingAt = false,
+                                forceLowercase = true
+                            )
+                            value = sanitized.value
+                            invalidCharWarning = sanitized.hadDisallowedInput
+                            if (sanitized.hadDisallowedInput) {
+                                errorShakeCount++
+                            }
+                        } else {
+                            value = raw.take(maxLength)
+                        }
                     },
                     label = { Text(label) },
                     singleLine = true,
@@ -147,7 +179,7 @@ fun EditSingleFieldDialog(
                                 tint = Color(0xFF16A34A),
                                 modifier = Modifier.size(20.dp)
                             )
-                        } else if (isInvalid && (cleanVal.isNotEmpty() || hasError)) {
+                        } else if (isInvalid && (cleanVal.isNotEmpty() || hasError || invalidCharWarning)) {
                             Icon(
                                 imageVector = Icons.Default.Cancel,
                                 contentDescription = "Invalid input",
@@ -169,38 +201,51 @@ fun EditSingleFieldDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Box(modifier = Modifier.weight(1f, fill = false)) {
-                        if (hasError) {
-                            Text(
-                                text = errorText.orEmpty(),
-                                color = ErrorRed,
-                                style = MaterialTheme.typography.bodySmall,
-                                fontWeight = FontWeight.SemiBold,
-                                modifier = Modifier.testTag("edit_field_error")
-                            )
-                        } else if (cleanVal.isNotEmpty()) {
-                            if (!isLengthValid && sanitizeUsername) {
-                                Text(
-                                    text = "Minimum 2 characters",
-                                    color = ErrorRed,
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                            } else if (!isFormatValid && sanitizeUsername) {
-                                Text(
-                                    text = "Letters, numbers, _, ., - only",
-                                    color = ErrorRed,
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                            } else if (isValid && sanitizeUsername) {
-                                Text(
-                                    text = "Valid username",
-                                    color = Color(0xFF16A34A),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    fontWeight = FontWeight.Medium
-                                )
-                            }
+                    val fieldMessageText: String?
+                    val fieldMessageIsError: Boolean
+                    val fieldMessageIsSuccess: Boolean
+                    when {
+                        hasError -> {
+                            fieldMessageText = errorText.orEmpty()
+                            fieldMessageIsError = true
+                            fieldMessageIsSuccess = false
+                        }
+                        sanitizeUsername && invalidCharWarning -> {
+                            fieldMessageText = "No spaces or special characters allowed (letters, numbers, _, ., - only)"
+                            fieldMessageIsError = true
+                            fieldMessageIsSuccess = false
+                        }
+                        cleanVal.isNotEmpty() && !isLengthValid && sanitizeUsername -> {
+                            fieldMessageText = "Minimum 2 characters"
+                            fieldMessageIsError = true
+                            fieldMessageIsSuccess = false
+                        }
+                        cleanVal.isNotEmpty() && !isFormatValid && sanitizeUsername -> {
+                            fieldMessageText = "No spaces or special characters allowed (letters, numbers, _, ., - only)"
+                            fieldMessageIsError = true
+                            fieldMessageIsSuccess = false
+                        }
+                        isValid && sanitizeUsername -> {
+                            fieldMessageText = "Valid username"
+                            fieldMessageIsError = false
+                            fieldMessageIsSuccess = true
+                        }
+                        else -> {
+                            fieldMessageText = null
+                            fieldMessageIsError = false
+                            fieldMessageIsSuccess = false
                         }
                     }
+
+                    UsernameValidationMessage(
+                        message = fieldMessageText,
+                        isError = fieldMessageIsError,
+                        isSuccess = fieldMessageIsSuccess,
+                        shakeTrigger = errorShakeCount,
+                        testTag = if (sanitizeUsername) "username_message" else "edit_field_message",
+                        innerTextTestTag = if (hasError) "edit_field_error" else null,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
 
                     Text(
                         text = "${cleanVal.length}/$maxLength",
@@ -257,8 +302,16 @@ fun AddContactDialog(
     var name by remember { mutableStateOf("") }
     var username by remember { mutableStateOf("") }
     var isGroup by remember { mutableStateOf(false) }
+    var invalidCharWarning by remember { mutableStateOf(false) }
+    var errorShakeCount by remember { mutableIntStateOf(0) }
 
-    val cleanUsername = username.trim().removePrefix("@")
+    LaunchedEffect(usernameSearchState) {
+        if (usernameSearchState is UsernameSearchState.NotFound) {
+            errorShakeCount++
+        }
+    }
+
+    val cleanUsername = username.removePrefix("@")
 
     AlertDialog(
         onDismissRequest = {
@@ -277,7 +330,10 @@ fun AddContactDialog(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(
                         selected = !isGroup,
-                        onClick = { isGroup = false },
+                        onClick = {
+                            isGroup = false
+                            invalidCharWarning = false
+                        },
                         label = { Text("Direct Chat") },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = MintLight,
@@ -288,6 +344,7 @@ fun AddContactDialog(
                         selected = isGroup,
                         onClick = {
                             isGroup = true
+                            invalidCharWarning = false
                             onResetSearch()
                         },
                         label = { Text("Group") },
@@ -299,12 +356,12 @@ fun AddContactDialog(
                 }
 
                 if (!isGroup) {
-                    val cleanInputUsername = username.trim().removePrefix("@")
+                    val cleanInputUsername = username.removePrefix("@")
                     val isInputUsernameLengthValid = cleanInputUsername.length in 2..40
-                    val isInputUsernameFormatValid = cleanInputUsername.matches(Regex("^[a-zA-Z0-9_.-]+$"))
+                    val isInputUsernameFormatValid = cleanInputUsername.matches(USERNAME_CHAR_REGEX)
                     val isSearchNotFound = usernameSearchState is UsernameSearchState.NotFound
-                    val isInputUsernameValid = cleanInputUsername.isNotEmpty() && isInputUsernameLengthValid && isInputUsernameFormatValid && !isSearchNotFound
-                    val isInputUsernameInvalid = isSearchNotFound || (cleanInputUsername.isNotEmpty() && (!isInputUsernameLengthValid || !isInputUsernameFormatValid))
+                    val isInputUsernameValid = cleanInputUsername.isNotEmpty() && isInputUsernameLengthValid && isInputUsernameFormatValid && !isSearchNotFound && !invalidCharWarning
+                    val isInputUsernameInvalid = isSearchNotFound || invalidCharWarning || (cleanInputUsername.isNotEmpty() && (!isInputUsernameLengthValid || !isInputUsernameFormatValid))
 
                     val usernameBorderColor = when {
                         isInputUsernameInvalid -> ErrorRed
@@ -320,8 +377,17 @@ fun AddContactDialog(
                         OutlinedTextField(
                             value = username,
                             onValueChange = { raw ->
-                                val clean = raw.replace("\n", "").take(40)
-                                username = clean
+                                val sanitized = sanitizeUsernameInput(
+                                    raw = raw,
+                                    maxLength = 40,
+                                    allowLeadingAt = true,
+                                    forceLowercase = false
+                                )
+                                username = sanitized.value
+                                invalidCharWarning = sanitized.hadDisallowedInput
+                                if (sanitized.hadDisallowedInput) {
+                                    errorShakeCount++
+                                }
                                 if (usernameSearchState != UsernameSearchState.Idle) {
                                     onResetSearch()
                                 }
@@ -345,7 +411,7 @@ fun AddContactDialog(
                                         tint = Color(0xFF16A34A),
                                         modifier = Modifier.size(20.dp)
                                     )
-                                } else if (isInputUsernameInvalid && cleanInputUsername.isNotEmpty()) {
+                                } else if (isInputUsernameInvalid && (cleanInputUsername.isNotEmpty() || invalidCharWarning)) {
                                     Icon(
                                         imageVector = Icons.Default.Cancel,
                                         contentDescription = "Invalid username",
@@ -362,7 +428,9 @@ fun AddContactDialog(
 
                         Button(
                             onClick = { onSearchUsername(username) },
-                            enabled = usernameSearchState !is UsernameSearchState.Loading && cleanInputUsername.length in 2..40,
+                            enabled = usernameSearchState !is UsernameSearchState.Loading &&
+                                isInputUsernameLengthValid &&
+                                isInputUsernameFormatValid,
                             colors = ButtonDefaults.buttonColors(containerColor = EmeraldMid),
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.testTag("find_username_button")
@@ -386,28 +454,45 @@ fun AddContactDialog(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        if (cleanInputUsername.isNotEmpty() && !isInputUsernameLengthValid) {
-                            Text(
-                                text = "Username must be 2–40 characters",
-                                color = ErrorRed,
-                                style = MaterialTheme.typography.labelSmall
-                            )
-                        } else if (cleanInputUsername.isNotEmpty() && !isInputUsernameFormatValid) {
-                            Text(
-                                text = "Letters, numbers, _, ., - only",
-                                color = ErrorRed,
-                                style = MaterialTheme.typography.labelSmall
-                            )
-                        } else if (isInputUsernameValid) {
-                            Text(
-                                text = "Valid format",
-                                color = Color(0xFF16A34A),
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Medium
-                            )
-                        } else {
-                            Spacer(modifier = Modifier.weight(1f, fill = false))
+                        val helperText: String?
+                        val helperIsError: Boolean
+                        val helperIsSuccess: Boolean
+                        when {
+                            invalidCharWarning -> {
+                                helperText = "No spaces or special characters allowed (letters, numbers, _, ., - only)"
+                                helperIsError = true
+                                helperIsSuccess = false
+                            }
+                            cleanInputUsername.isNotEmpty() && !isInputUsernameLengthValid -> {
+                                helperText = "Username must be 2–40 characters"
+                                helperIsError = true
+                                helperIsSuccess = false
+                            }
+                            cleanInputUsername.isNotEmpty() && !isInputUsernameFormatValid -> {
+                                helperText = "No spaces or special characters allowed (letters, numbers, _, ., - only)"
+                                helperIsError = true
+                                helperIsSuccess = false
+                            }
+                            isInputUsernameValid -> {
+                                helperText = "Valid format"
+                                helperIsError = false
+                                helperIsSuccess = true
+                            }
+                            else -> {
+                                helperText = null
+                                helperIsError = false
+                                helperIsSuccess = false
+                            }
                         }
+
+                        UsernameValidationMessage(
+                            message = helperText,
+                            isError = helperIsError,
+                            isSuccess = helperIsSuccess,
+                            shakeTrigger = errorShakeCount,
+                            testTag = "username_message",
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
 
                         Text(
                             text = "${cleanInputUsername.length}/40",
@@ -418,7 +503,9 @@ fun AddContactDialog(
                                 else -> MaterialTheme.colorScheme.onSurfaceVariant
                             },
                             fontWeight = if (cleanInputUsername.length >= 40) FontWeight.Bold else FontWeight.Normal,
-                            modifier = Modifier.testTag("add_contact_char_count")
+                            modifier = Modifier
+                                .padding(start = 8.dp)
+                                .testTag("add_contact_char_count")
                         )
                     }
 
@@ -451,13 +538,17 @@ fun AddContactDialog(
                             }
                         }
                         is UsernameSearchState.Found -> {
+                            val isFoundBanned = usernameSearchState.result.isBanned
                             Surface(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .testTag("found_user_card"),
                                 shape = RoundedCornerShape(12.dp),
-                                color = MintLight,
-                                border = BorderStroke(1.dp, EmeraldMid.copy(alpha = 0.45f))
+                                color = if (isFoundBanned) ErrorContainerLight.copy(alpha = 0.7f) else MintLight,
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isFoundBanned) ErrorRed.copy(alpha = 0.45f) else EmeraldMid.copy(alpha = 0.45f)
+                                )
                             ) {
                                 Column(modifier = Modifier.fillMaxWidth()) {
                                     if (!usernameSearchState.result.bannerData.isNullOrBlank()) {
@@ -488,13 +579,13 @@ fun AddContactDialog(
                                                 Text(
                                                     text = usernameSearchState.result.displayName,
                                                     style = MaterialTheme.typography.titleSmall,
-                                                    color = EmeraldDeep,
+                                                    color = if (isFoundBanned) ErrorRed else EmeraldDeep,
                                                     fontWeight = FontWeight.Bold,
                                                     maxLines = 1,
                                                     overflow = TextOverflow.Ellipsis,
                                                     modifier = Modifier.weight(1f, fill = false)
                                                 )
-                                                if (usernameSearchState.result.verified) {
+                                                if (usernameSearchState.result.verified && !isFoundBanned) {
                                                     Icon(
                                                         imageVector = Icons.Default.Verified,
                                                         contentDescription = "Verified account",
@@ -502,31 +593,55 @@ fun AddContactDialog(
                                                         modifier = Modifier.size(16.dp)
                                                     )
                                                 }
+                                                if (isFoundBanned) {
+                                                    Surface(
+                                                        shape = RoundedCornerShape(999.dp),
+                                                        color = ErrorRed,
+                                                        modifier = Modifier.testTag("found_user_banned_badge")
+                                                    ) {
+                                                        Text(
+                                                            text = "Banned",
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            color = Color.White,
+                                                            fontWeight = FontWeight.Bold,
+                                                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                                                        )
+                                                    }
+                                                }
                                             }
-                                        Text(
-                                            text = "@${usernameSearchState.result.username}",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                        if (usernameSearchState.result.bio.isNotBlank()) {
                                             Text(
-                                                text = usernameSearchState.result.bio,
+                                                text = "@${usernameSearchState.result.username}",
                                                 style = MaterialTheme.typography.labelSmall,
-                                                color = EmeraldDark,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
+                                            if (isFoundBanned) {
+                                                Text(
+                                                    text = "Account banned — chat locked until recovered",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = ErrorRed,
+                                                    fontWeight = FontWeight.Medium,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            } else if (usernameSearchState.result.bio.isNotBlank()) {
+                                                Text(
+                                                    text = usernameSearchState.result.bio,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = EmeraldDark,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
                                         }
-                                    }
-                                    Button(
-                                        onClick = {
-                                            onAddDirectChat(usernameSearchState.result.username)
-                                        },
-                                        colors = ButtonDefaults.buttonColors(containerColor = EmeraldDark),
-                                        modifier = Modifier.testTag("add_found_user_button")
-                                    ) {
-                                        Text("Add", color = Color.White)
-                                    }
+                                        Button(
+                                            onClick = {
+                                                onAddDirectChat(usernameSearchState.result.username)
+                                            },
+                                            colors = ButtonDefaults.buttonColors(containerColor = EmeraldDark),
+                                            modifier = Modifier.testTag("add_found_user_button")
+                                        ) {
+                                            Text("Add", color = Color.White)
+                                        }
                                     }
                                 }
                             }
@@ -671,6 +786,34 @@ fun AddContactDialog(
             }
         },
         confirmButton = {
+            val isProcessingRequest = !isGroup && usernameSearchState is UsernameSearchState.Loading
+            val pulseAlpha: Float
+            val pulseScale: Float
+            if (isProcessingRequest) {
+                val pulseTransition = rememberInfiniteTransition(label = "username_add_btn_pulse")
+                pulseAlpha = pulseTransition.animateFloat(
+                    initialValue = 0.56f,
+                    targetValue = 0.94f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(durationMillis = 700, easing = FastOutSlowInEasing),
+                        repeatMode = RepeatMode.Reverse
+                    ),
+                    label = "username_add_btn_alpha"
+                ).value
+                pulseScale = pulseTransition.animateFloat(
+                    initialValue = 0.96f,
+                    targetValue = 1.03f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(durationMillis = 700, easing = FastOutSlowInEasing),
+                        repeatMode = RepeatMode.Reverse
+                    ),
+                    label = "username_add_btn_scale"
+                ).value
+            } else {
+                pulseAlpha = 1f
+                pulseScale = 1f
+            }
+
             Button(
                 onClick = {
                     if (isGroup) {
@@ -683,11 +826,27 @@ fun AddContactDialog(
                 enabled = if (isGroup) {
                     name.trim().isNotEmpty()
                 } else {
+                    val cleanCheck = username.removePrefix("@")
                     usernameSearchState !is UsernameSearchState.Loading &&
-                        usernameSearchState !is UsernameSearchState.NotFound
+                        usernameSearchState !is UsernameSearchState.NotFound &&
+                        (cleanCheck.isEmpty() || USERNAME_FORMAT_REGEX.matches(cleanCheck))
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = EmeraldMid),
-                modifier = Modifier.testTag("add_contact_confirm_button")
+                colors = if (isProcessingRequest) {
+                    ButtonDefaults.buttonColors(
+                        containerColor = EmeraldMid,
+                        disabledContainerColor = EmeraldMid.copy(alpha = 0.8f),
+                        disabledContentColor = Color.White
+                    )
+                } else {
+                    ButtonDefaults.buttonColors(containerColor = EmeraldMid)
+                },
+                modifier = Modifier
+                    .graphicsLayer {
+                        scaleX = pulseScale
+                        scaleY = pulseScale
+                        alpha = pulseAlpha
+                    }
+                    .testTag("add_contact_confirm_button")
             ) {
                 Text("Add", color = Color.White)
             }
@@ -1074,23 +1233,25 @@ fun AvatarPreviewDialog(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     IconButton(
-                        onClick = onOpenChat,
+                        onClick = { if (!thread.isBanned) onOpenChat() },
+                        enabled = !thread.isBanned,
                         modifier = Modifier.testTag("avatar_preview_open_chat")
                     ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.Chat,
                             contentDescription = "Open chat",
-                            tint = EmeraldDark
+                            tint = if (thread.isBanned) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f) else EmeraldDark
                         )
                     }
                     IconButton(
-                        onClick = onViewContact,
+                        onClick = { if (!thread.isBanned) onViewContact() },
+                        enabled = !thread.isBanned,
                         modifier = Modifier.testTag("avatar_preview_view_contact")
                     ) {
                         Icon(
                             imageVector = Icons.Default.Info,
                             contentDescription = "View contact",
-                            tint = EmeraldDark
+                            tint = if (thread.isBanned) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f) else EmeraldDark
                         )
                     }
                     if (hasActiveStory) {
@@ -1385,7 +1546,15 @@ fun EditProfileDialog(
     var username by remember(initialUsername) { mutableStateOf(initialUsername) }
     var dob by remember(initialDob) { mutableStateOf(initialDob) }
     var validationError by remember { mutableStateOf<String?>(null) }
+    var invalidCharWarning by remember(initialUsername) { mutableStateOf(false) }
+    var errorShakeCount by remember { mutableIntStateOf(0) }
     val shownError = validationError ?: errorText
+
+    LaunchedEffect(shownError) {
+        if (!shownError.isNullOrBlank()) {
+            errorShakeCount++
+        }
+    }
 
     AlertDialog(
         onDismissRequest = { if (!isSaving) onDismiss() },
@@ -1406,12 +1575,12 @@ fun EditProfileDialog(
                         .fillMaxWidth()
                         .testTag("edit_profile_name_input")
                 )
-                val cleanProfileUser = username.trim().removePrefix("@")
+                val cleanProfileUser = username.removePrefix("@")
                 val isProfileUserLengthValid = cleanProfileUser.length in 2..40
-                val isProfileUserFormatValid = cleanProfileUser.matches(Regex("^[a-zA-Z0-9_.-]+$"))
+                val isProfileUserFormatValid = cleanProfileUser.matches(USERNAME_CHAR_REGEX)
                 val hasProfileUserError = !shownError.isNullOrBlank() && (shownError.contains("username", ignoreCase = true) || shownError.contains("taken", ignoreCase = true))
-                val isProfileUserValid = cleanProfileUser.isNotEmpty() && isProfileUserLengthValid && isProfileUserFormatValid && !hasProfileUserError
-                val isProfileUserInvalid = hasProfileUserError || (cleanProfileUser.isNotEmpty() && (!isProfileUserLengthValid || !isProfileUserFormatValid))
+                val isProfileUserValid = cleanProfileUser.isNotEmpty() && isProfileUserLengthValid && isProfileUserFormatValid && !hasProfileUserError && !invalidCharWarning
+                val isProfileUserInvalid = hasProfileUserError || invalidCharWarning || (cleanProfileUser.isNotEmpty() && (!isProfileUserLengthValid || !isProfileUserFormatValid))
 
                 val profileUserBorderColor = when {
                     isProfileUserInvalid -> ErrorRed
@@ -1422,8 +1591,17 @@ fun EditProfileDialog(
                 OutlinedTextField(
                     value = username,
                     onValueChange = { raw ->
-                        val cleaned = raw.removePrefix("@").lowercase().filter { it.isLetterOrDigit() || it == '_' || it == '.' || it == '-' }
-                        username = cleaned.take(40)
+                        val sanitized = sanitizeUsernameInput(
+                            raw = raw,
+                            maxLength = 40,
+                            allowLeadingAt = false,
+                            forceLowercase = true
+                        )
+                        username = sanitized.value
+                        invalidCharWarning = sanitized.hadDisallowedInput
+                        if (sanitized.hadDisallowedInput) {
+                            errorShakeCount++
+                        }
                         validationError = null
                         onClearError()
                     },
@@ -1447,7 +1625,7 @@ fun EditProfileDialog(
                                 tint = Color(0xFF16A34A),
                                 modifier = Modifier.size(20.dp)
                             )
-                        } else if (isProfileUserInvalid && cleanProfileUser.isNotEmpty()) {
+                        } else if (isProfileUserInvalid && (cleanProfileUser.isNotEmpty() || invalidCharWarning)) {
                             Icon(
                                 imageVector = Icons.Default.Cancel,
                                 contentDescription = "Invalid username",
@@ -1469,28 +1647,45 @@ fun EditProfileDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    if (cleanProfileUser.isNotEmpty() && !isProfileUserLengthValid) {
-                        Text(
-                            text = "Username must be 2–40 characters",
-                            color = ErrorRed,
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    } else if (cleanProfileUser.isNotEmpty() && !isProfileUserFormatValid) {
-                        Text(
-                            text = "Letters, numbers, _, ., - only",
-                            color = ErrorRed,
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    } else if (isProfileUserValid) {
-                        Text(
-                            text = "Valid username",
-                            color = Color(0xFF16A34A),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Medium
-                        )
-                    } else {
-                        Spacer(modifier = Modifier.weight(1f, fill = false))
+                    val profileUserMsg: String?
+                    val profileUserIsError: Boolean
+                    val profileUserIsSuccess: Boolean
+                    when {
+                        invalidCharWarning -> {
+                            profileUserMsg = "No spaces or special characters allowed (letters, numbers, _, ., - only)"
+                            profileUserIsError = true
+                            profileUserIsSuccess = false
+                        }
+                        cleanProfileUser.isNotEmpty() && !isProfileUserLengthValid -> {
+                            profileUserMsg = "Username must be 2–40 characters"
+                            profileUserIsError = true
+                            profileUserIsSuccess = false
+                        }
+                        cleanProfileUser.isNotEmpty() && !isProfileUserFormatValid -> {
+                            profileUserMsg = "No spaces or special characters allowed (letters, numbers, _, ., - only)"
+                            profileUserIsError = true
+                            profileUserIsSuccess = false
+                        }
+                        isProfileUserValid -> {
+                            profileUserMsg = "Valid username"
+                            profileUserIsError = false
+                            profileUserIsSuccess = true
+                        }
+                        else -> {
+                            profileUserMsg = null
+                            profileUserIsError = false
+                            profileUserIsSuccess = false
+                        }
                     }
+
+                    UsernameValidationMessage(
+                        message = profileUserMsg,
+                        isError = profileUserIsError,
+                        isSuccess = profileUserIsSuccess,
+                        shakeTrigger = errorShakeCount,
+                        testTag = "username_message",
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
 
                     Text(
                         text = "${cleanProfileUser.length}/40",
@@ -1501,7 +1696,9 @@ fun EditProfileDialog(
                             else -> MaterialTheme.colorScheme.onSurfaceVariant
                         },
                         fontWeight = if (cleanProfileUser.length >= 40) FontWeight.Bold else FontWeight.Normal,
-                        modifier = Modifier.testTag("edit_profile_username_char_count")
+                        modifier = Modifier
+                            .padding(start = 8.dp)
+                            .testTag("edit_profile_username_char_count")
                     )
                 }
                 OutlinedTextField(
@@ -1553,6 +1750,8 @@ fun EditProfileDialog(
                     when {
                         cleanName.isEmpty() -> validationError = "Display name cannot be empty."
                         cleanUser.length < 2 -> validationError = "Username must be at least 2 characters."
+                        !USERNAME_FORMAT_REGEX.matches(cleanUser) ->
+                            validationError = "Username may only contain letters, numbers, _, ., and -."
                         cleanDob.length < 4 -> validationError = "Enter a valid date of birth."
                         else -> onSave(cleanName, bio.trim(), cleanUser, cleanDob)
                     }

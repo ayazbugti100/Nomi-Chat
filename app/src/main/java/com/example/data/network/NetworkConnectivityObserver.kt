@@ -6,17 +6,10 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.os.Build
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.net.InetSocketAddress
-import java.net.Socket
 
 data class NetworkStatus(
     val isConnected: Boolean = true,
@@ -110,7 +103,7 @@ open class NetworkConnectivityObserver(
                 transportLabel = label,
                 wifiConnected = wifiUp,
                 mobileDataConnected = mobileUp,
-                hasValidatedInternet = validated
+                hasValidatedInternet = validated || anyTransport
             )
         } catch (_: SecurityException) {
             NetworkStatus(isConnected = true, transportLabel = "Online", hasValidatedInternet = true)
@@ -128,15 +121,11 @@ open class NetworkConnectivityObserver(
     open suspend fun verifyInternetAccess(): Boolean {
         val status = currentStatus()
         if (!status.isConnected) return false
-        if (status.hasValidatedInternet) return true
         val probe = internetReachabilityProbe
         if (probe != null) {
             return runCatching { probe() }.getOrDefault(false)
         }
-        return withContext(Dispatchers.IO) {
-            probeSocketReachability("firestore.googleapis.com", 443, 1500) ||
-                probeSocketReachability("8.8.8.8", 53, 1500)
-        }
+        return true
     }
 
     open fun observe(): Flow<NetworkStatus> = callbackFlow {
@@ -227,15 +216,7 @@ open class NetworkConnectivityObserver(
             true
         }.getOrDefault(false)
 
-        val pollingJob = launch {
-            while (isActive) {
-                delay(2500L)
-                trySend(currentStatus())
-            }
-        }
-
         awaitClose {
-            pollingJob.cancel()
             if (defaultRegistered) runCatching { cm.unregisterNetworkCallback(defaultCallback) }
             if (wifiRegistered) runCatching { cm.unregisterNetworkCallback(wifiCallback) }
             if (cellularRegistered) runCatching { cm.unregisterNetworkCallback(cellularCallback) }
@@ -254,17 +235,6 @@ open class NetworkConnectivityObserver(
 
     private fun isValidatedCapability(caps: NetworkCapabilities): Boolean {
         return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-    }
-
-    private fun probeSocketReachability(host: String, port: Int, timeoutMs: Int): Boolean {
-        return try {
-            Socket().use { socket ->
-                socket.connect(InetSocketAddress(host, port), timeoutMs)
-                true
-            }
-        } catch (_: Exception) {
-            false
-        }
     }
 
     companion object {

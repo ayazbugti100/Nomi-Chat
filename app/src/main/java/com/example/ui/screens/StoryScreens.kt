@@ -129,6 +129,7 @@ import com.example.data.model.StoryOverlayCodec
 import com.example.data.model.StoryStickerOverlay
 import com.example.data.model.StoryViewRecord
 import com.example.ui.components.AvatarCircle
+import com.example.ui.components.resolveImageModel
 import com.example.ui.theme.EmeraldBright
 import com.example.ui.theme.EmeraldDark
 import com.example.ui.theme.EmeraldDeep
@@ -204,10 +205,9 @@ fun StoryMediaRenderer(
     val resolvedFontFamily = remember(storyFont) { StoryFontStyle.fromKey(storyFont).toFontFamily() }
     val contentScale = if (cropMode == "fit") ContentScale.Fit else ContentScale.Crop
 
-    val decodedImageBytes = remember(mediaData) {
-        if (localUri == null && mediaData.startsWith("data:image")) {
-            val b64 = mediaData.substringAfter("base64,", "")
-            runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull()
+    val imageModel = remember(localUri, mediaData, mediaType) {
+        if (localUri == null && mediaType != "video" && !mediaData.startsWith("data:video")) {
+            resolveImageModel(mediaData)
         } else null
     }
 
@@ -263,9 +263,9 @@ fun StoryMediaRenderer(
                         }
                 )
             }
-            decodedImageBytes != null -> {
+            imageModel != null -> {
                 AsyncImage(
-                    model = decodedImageBytes,
+                    model = imageModel,
                     contentDescription = "Story media",
                     contentScale = contentScale,
                     modifier = Modifier

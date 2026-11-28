@@ -3,6 +3,7 @@ package com.example.ui.viewmodel
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
 import android.graphics.Matrix
 import android.media.ExifInterface
 import android.media.MediaCodec
@@ -11,6 +12,7 @@ import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import android.net.Uri
+import android.os.Build
 import android.provider.OpenableColumns
 import android.util.Base64
 import android.util.Log
@@ -264,7 +266,9 @@ class NomiChatViewModel(
         .map<UserProfile?, UiState<UserProfile?>> { profile ->
             if (profile?.accountStatus == "banned" || profile?.bannedByAdmin == true) {
                 _isBannedAccount.value = true
-                _popupMessage.value = "Your account is banned."
+                _popupMessage.value = "Your ID is banned"
+            } else if (profile != null) {
+                _isBannedAccount.value = false
             }
             UiState.Success(profile)
         }
@@ -374,7 +378,7 @@ class NomiChatViewModel(
         .map { state ->
             when (state) {
                 is UiState.Success -> state.data
-                    .filter { !it.blocked && !it.archived }
+                    .filter { !it.blocked && !it.archived && !it.isBanned }
                     .sumOf { it.unreadCount.coerceAtLeast(0L) }
                     .toInt()
                 else -> 0
@@ -391,7 +395,7 @@ class NomiChatViewModel(
         _activeContactId
     ) { state, activeId ->
         if (state is UiState.Success && activeId != null) {
-            state.data.firstOrNull { it.id == activeId }
+            state.data.firstOrNull { it.id == activeId }?.takeIf { !it.isBanned }
         } else null
     }.stateIn(
         scope = viewModelScope,
@@ -495,8 +499,28 @@ class NomiChatViewModel(
         startIncomingSyncLoop()
         observeIncomingMessageAlerts()
         observeAdminLockAndAlerts()
+        observeActiveBannedGuard()
         observeNetworkRecovery()
         startStoryExpiryLoop()
+    }
+
+    private fun observeActiveBannedGuard() {
+        viewModelScope.launch {
+            combine(allContactsState, _activeContactId) { state, activeId ->
+                if (state is UiState.Success && activeId != null) {
+                    state.data.firstOrNull { it.id == activeId }
+                } else null
+            }.collect { openThread ->
+                if (openThread != null && openThread.isBanned) {
+                    _activeContactId.value = null
+                    _isContactTyping.value = false
+                    _replyingToMessage.value = null
+                    _quickSuggestions.value = emptyList()
+                    lastSuggestedMessageId = null
+                    _popupMessage.value = "This account is banned."
+                }
+            }
+        }
     }
 
     private fun observeAdminLockAndAlerts() {
@@ -598,6 +622,12 @@ class NomiChatViewModel(
         }
     }
 
+    fun prepareImmediateLogout() {
+        presenceHeartbeatJob?.cancel()
+        incomingSyncJob?.cancel()
+        repository.queueOfflinePresence(currentUserId)
+    }
+
     suspend fun setOfflineBeforeLogout() {
         presenceHeartbeatJob?.cancel()
         repository.setUserPresence(currentUserId, false)
@@ -632,13 +662,7 @@ class NomiChatViewModel(
         return !status.isConnected
     }
 
-    private fun requireVerifiedOnlineConnection(): Boolean {
-        if (isTransportCurrentlyOffline()) {
-            showOfflinePopup()
-            return false
-        }
-        return true
-    }
+    private fun requireVerifiedOnlineConnection(): Boolean = true
 
     fun reconnectCloudSync() {
         viewModelScope.launch {
@@ -683,7 +707,7 @@ class NomiChatViewModel(
                     }
                     is UserSetupOutcome.Banned -> {
                         _isBannedAccount.value = true
-                        _popupMessage.value = "Your account is banned."
+                        _popupMessage.value = "Your ID is banned"
                     }
                     is UserSetupOutcome.Rejected -> {
                         _authRejectionMessage.value = outcome.message
@@ -739,8 +763,9 @@ class NomiChatViewModel(
 
     fun openConversation(contactId: String) {
         val target = (allContactsState.value as? UiState.Success)?.data?.firstOrNull { it.id == contactId }
-        // Do nothing if the user is banned so the chat never opens
-        if (target?.accountStatus == "banned") {
+        // Completely block opening chat if the account is banned until recovered
+        if (target?.isBanned == true) {
+            _popupMessage.value = "This account is banned."
             return
         }
         if (target?.locked == true) {
@@ -947,10 +972,6 @@ class NomiChatViewModel(
         }
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
-        if (isTransportCurrentlyOffline()) {
-            showOfflinePopup()
-            return
-        }
 
         val replying = _replyingToMessage.value
         _replyingToMessage.value = null
@@ -984,10 +1005,6 @@ class NomiChatViewModel(
             return
         }
         if (mediaData.isBlank()) return
-        if (isTransportCurrentlyOffline()) {
-            showOfflinePopup()
-            return
-        }
         val safeDuration = durationSec.coerceIn(1L, 600L)
         _quickSuggestions.value = emptyList()
         viewModelScope.launch {
@@ -1014,10 +1031,6 @@ class NomiChatViewModel(
         }
         if (contact.blocked) {
             _popupMessage.value = "This user is blocked. Unblock to send photos."
-            return
-        }
-        if (isTransportCurrentlyOffline()) {
-            showOfflinePopup()
             return
         }
         viewModelScope.launch {
@@ -1053,10 +1066,6 @@ class NomiChatViewModel(
             _popupMessage.value = "This user is blocked. Unblock to send photos."
             return
         }
-        if (isTransportCurrentlyOffline()) {
-            showOfflinePopup()
-            return
-        }
         viewModelScope.launch {
             val encoded = withContext(Dispatchers.IO) {
                 encodeBitmapToDataUri(bitmap)
@@ -1090,10 +1099,6 @@ class NomiChatViewModel(
             _popupMessage.value = "This user is blocked. Unblock to send attachments."
             return
         }
-        if (isTransportCurrentlyOffline()) {
-            showOfflinePopup()
-            return
-        }
         viewModelScope.launch {
             val fileName = withContext(Dispatchers.IO) {
                 resolveDisplayFileName(context, uri)
@@ -1115,10 +1120,6 @@ class NomiChatViewModel(
     fun logVoiceCallAction() {
         val contact = activeContact.value ?: return
         if (contact.accountStatus == "banned" || contact.blocked) return
-        if (isTransportCurrentlyOffline()) {
-            showOfflinePopup()
-            return
-        }
         viewModelScope.launch {
             repository.sendMessage(
                 userId = currentUserId,
@@ -1205,13 +1206,18 @@ class NomiChatViewModel(
         if (!isAdminSession.value) return
         _inAppAdminBanner.value = null
         viewModelScope.launch {
-            repository.ignoreModerationAlert(alertId)
-                .onSuccess {
-                    _popupMessage.value = "Alert ignored."
-                }
-                .onFailure { err ->
-                    _popupMessage.value = err.localizedMessage ?: "Unable to ignore alert."
-                }
+            _isAdminActionLoading.value = true
+            try {
+                repository.ignoreModerationAlert(alertId)
+                    .onSuccess {
+                        _popupMessage.value = "Alert ignored."
+                    }
+                    .onFailure { err ->
+                        _popupMessage.value = err.localizedMessage ?: "Unable to ignore alert."
+                    }
+            } finally {
+                _isAdminActionLoading.value = false
+            }
         }
     }
 
@@ -1219,13 +1225,18 @@ class NomiChatViewModel(
         if (!isAdminSession.value) return
         _inAppAdminBanner.value = null
         viewModelScope.launch {
-            repository.banUserFromAlert(alert)
-                .onSuccess {
-                    _popupMessage.value = "@${alert.reportedUsername} banned permanently."
-                }
-                .onFailure { err ->
-                    _popupMessage.value = err.localizedMessage ?: "Unable to ban user."
-                }
+            _isAdminActionLoading.value = true
+            try {
+                repository.banUserFromAlert(alert)
+                    .onSuccess {
+                        _popupMessage.value = "@${alert.reportedUsername} banned across sync."
+                    }
+                    .onFailure { err ->
+                        _popupMessage.value = err.localizedMessage ?: "Unable to ban user."
+                    }
+            } finally {
+                _isAdminActionLoading.value = false
+            }
         }
     }
 
@@ -1233,13 +1244,19 @@ class NomiChatViewModel(
         if (!isAdminSession.value) return
         _inAppAdminBanner.value = null
         viewModelScope.launch {
-            repository.recoverUserFromAlert(alert)
-                .onSuccess {
-                    _popupMessage.value = "@${alert.reportedUsername} recovered."
-                }
-                .onFailure { err ->
-                    _popupMessage.value = err.localizedMessage ?: "Unable to recover user."
-                }
+            _isAdminActionLoading.value = true
+            try {
+                repository.recoverUserFromAlert(alert)
+                    .onSuccess {
+                        val handleLabel = alert.reportedUsername.ifBlank { alert.reportedDisplayName.ifBlank { "Account" } }
+                        _popupMessage.value = "@$handleLabel recovered and removed from banned list."
+                    }
+                    .onFailure { err ->
+                        _popupMessage.value = err.localizedMessage ?: "Unable to recover user."
+                    }
+            } finally {
+                _isAdminActionLoading.value = false
+            }
         }
     }
 
@@ -1247,12 +1264,16 @@ class NomiChatViewModel(
         if (!isAdminSession.value) return
         viewModelScope.launch {
             _isAdminActionLoading.value = true
-            val res = runCatching { repository.adminVerifyUser(user.uid, user.username, verified) }
-            _isAdminActionLoading.value = false
-            res.onFailure {
-                _popupMessage.value = "Failed to update verified badge: ${it.localizedMessage}"
-            }.onSuccess {
-                _popupMessage.value = if (verified) "Granted blue tick to @${user.username}" else "Removed blue tick from @${user.username}"
+            try {
+                repository.adminVerifyUser(user.uid, user.username, verified)
+                    .onFailure {
+                        _popupMessage.value = "Failed to update verified badge: ${it.localizedMessage ?: "Sync error"}"
+                    }
+                    .onSuccess {
+                        _popupMessage.value = if (verified) "Granted blue tick to @${user.username}" else "Removed blue tick from @${user.username}"
+                    }
+            } finally {
+                _isAdminActionLoading.value = false
             }
         }
     }
@@ -1261,12 +1282,16 @@ class NomiChatViewModel(
         if (!isAdminSession.value) return
         viewModelScope.launch {
             _isAdminActionLoading.value = true
-            val res = runCatching { repository.adminBanUser(user.uid, user.username) }
-            _isAdminActionLoading.value = false
-            res.onFailure {
-                _popupMessage.value = "Failed to ban user: ${it.localizedMessage}"
-            }.onSuccess {
-                _popupMessage.value = "Banned @${user.username} account"
+            try {
+                repository.adminBanUser(user.uid, user.username)
+                    .onFailure {
+                        _popupMessage.value = "Failed to ban user: ${it.localizedMessage ?: "Sync error"}"
+                    }
+                    .onSuccess {
+                        _popupMessage.value = "Banned @${user.username} account"
+                    }
+            } finally {
+                _isAdminActionLoading.value = false
             }
         }
     }
@@ -1275,12 +1300,17 @@ class NomiChatViewModel(
         if (!isAdminSession.value) return
         viewModelScope.launch {
             _isAdminActionLoading.value = true
-            val res = runCatching { repository.adminUnbanUser(user.uid, user.username) }
-            _isAdminActionLoading.value = false
-            res.onFailure {
-                _popupMessage.value = "Failed to restore user: ${it.localizedMessage}"
-            }.onSuccess {
-                _popupMessage.value = "Restored @${user.username} account"
+            try {
+                repository.adminUnbanUser(user.uid, user.username)
+                    .onFailure {
+                        _popupMessage.value = "Failed to restore user: ${it.localizedMessage ?: "Sync error"}"
+                    }
+                    .onSuccess {
+                        val handleLabel = user.username.ifBlank { user.displayName.ifBlank { "Account" } }
+                        _popupMessage.value = "@$handleLabel recovered and removed from banned list."
+                    }
+            } finally {
+                _isAdminActionLoading.value = false
             }
         }
     }
@@ -1291,9 +1321,10 @@ class NomiChatViewModel(
             _usernameSearchState.value = UsernameSearchState.NotFound("Please enter a username.")
             return
         }
-        if (isTransportCurrentlyOffline()) {
-            _usernameSearchState.value = UsernameSearchState.NotFound("Internet connection is required to add a username.")
-            showOfflinePopup()
+        if (!rawClean.matches(USERNAME_FORMAT_REGEX)) {
+            _usernameSearchState.value = UsernameSearchState.NotFound(
+                "No spaces or special characters allowed (use letters, numbers, _, ., -)."
+            )
             return
         }
         val clean = com.example.data.repository.NomiChatRepository.exactUsernameOrNull(username)
@@ -1304,13 +1335,14 @@ class NomiChatViewModel(
         val myHandle = (profileState.value as? UiState.Success)?.data?.username.orEmpty()
         viewModelScope.launch {
             _usernameSearchState.value = UsernameSearchState.Loading
-            if (!requireVerifiedOnlineConnection()) {
-                _usernameSearchState.value = UsernameSearchState.NotFound("Internet connection is required to add a username.")
-                return@launch
-            }
             val existingContacts = (allContactsState.value as? UiState.Success)?.data.orEmpty()
-            if (existingContacts.any { c -> c.threadType == "chat" && c.username.equals(clean, ignoreCase = true) }) {
-                _usernameSearchState.value = UsernameSearchState.NotFound("This username is already added. You cannot add it again.")
+            val existingThread = existingContacts.firstOrNull { c ->
+                c.threadType == "chat" && c.username.equals(clean, ignoreCase = true)
+            }
+            if (existingThread != null) {
+                _usernameSearchState.value = UsernameSearchState.NotFound(
+                    "This username is already added. You cannot add it again."
+                )
                 return@launch
             }
             repository.lookupUserByUsername(clean, viewerUserId = currentUserId)
@@ -1324,13 +1356,8 @@ class NomiChatViewModel(
                         else -> UsernameSearchState.Found(found)
                     }
                 }
-                .onFailure { err ->
-                    if (isTransportCurrentlyOffline() || !repository.verifyActiveFirebaseConnection()) {
-                        _usernameSearchState.value = UsernameSearchState.NotFound("Internet connection is required to add a username.")
-                        showOfflinePopup()
-                    } else {
-                        _usernameSearchState.value = UsernameSearchState.NotFound("Account Not Found")
-                    }
+                .onFailure { _ ->
+                    _usernameSearchState.value = UsernameSearchState.NotFound("Account Not Found")
                 }
         }
     }
@@ -1348,9 +1375,10 @@ class NomiChatViewModel(
             _usernameSearchState.value = UsernameSearchState.NotFound("Please enter a username.")
             return
         }
-        if (isTransportCurrentlyOffline()) {
-            _usernameSearchState.value = UsernameSearchState.NotFound("Internet connection is required to add a username.")
-            showOfflinePopup()
+        if (!rawClean.matches(USERNAME_FORMAT_REGEX)) {
+            _usernameSearchState.value = UsernameSearchState.NotFound(
+                "No spaces or special characters allowed (use letters, numbers, _, ., -)."
+            )
             return
         }
         val clean = com.example.data.repository.NomiChatRepository.exactUsernameOrNull(username)
@@ -1358,28 +1386,33 @@ class NomiChatViewModel(
             _usernameSearchState.value = UsernameSearchState.NotFound("Account Not Found")
             return
         }
+        val cachedFound = (_usernameSearchState.value as? UsernameSearchState.Found)?.result
+            ?.takeIf { it.username.equals(clean, ignoreCase = true) }
         val myHandle = (profileState.value as? UiState.Success)?.data?.username.orEmpty()
         viewModelScope.launch {
             _usernameSearchState.value = UsernameSearchState.Loading
-            if (!requireVerifiedOnlineConnection()) {
-                _usernameSearchState.value = UsernameSearchState.NotFound("Internet connection is required to add a username.")
-                return@launch
-            }
             val existingContacts = (allContactsState.value as? UiState.Success)?.data.orEmpty()
-            if (existingContacts.any { c -> c.threadType == "chat" && c.username.equals(clean, ignoreCase = true) }) {
-                _usernameSearchState.value = UsernameSearchState.NotFound("This username is already added. You cannot add it again.")
+            val existingThread = existingContacts.firstOrNull { c ->
+                c.threadType == "chat" && c.username.equals(clean, ignoreCase = true)
+            }
+            if (existingThread != null) {
+                _usernameSearchState.value = UsernameSearchState.NotFound(
+                    "This username is already added. You cannot add it again."
+                )
                 return@launch
             }
-            val lookupResult = repository.lookupUserByUsername(clean, viewerUserId = currentUserId)
-            val found = lookupResult.getOrNull()
-            if (lookupResult.isFailure) {
-                if (isTransportCurrentlyOffline() || !repository.verifyActiveFirebaseConnection()) {
-                    _usernameSearchState.value = UsernameSearchState.NotFound("Internet connection is required to add a username.")
-                    showOfflinePopup()
-                } else {
-                    _usernameSearchState.value = UsernameSearchState.NotFound("Account Not Found")
+            val found = if (cachedFound != null) {
+                cachedFound
+            } else {
+                val lookupResult = repository.lookupUserByUsername(clean, viewerUserId = currentUserId)
+                if (lookupResult.isFailure) {
+                    val errMsg = lookupResult.exceptionOrNull()?.localizedMessage?.trim().orEmpty()
+                    _usernameSearchState.value = UsernameSearchState.NotFound(
+                        errMsg.ifBlank { "Could not verify username right now. Please try again." }
+                    )
+                    return@launch
                 }
-                return@launch
+                lookupResult.getOrNull()
             }
             if (found == null || !found.username.equals(clean, ignoreCase = true)) {
                 _usernameSearchState.value = UsernameSearchState.NotFound("Account Not Found")
@@ -1403,26 +1436,25 @@ class NomiChatViewModel(
             ).onSuccess {
                 _usernameSearchState.value = UsernameSearchState.Idle
                 _selectedFilter.value = ChatPillFilter.CHATS
-                _popupMessage.value = "Username added successfully."
+                _popupMessage.value = if (found.isBanned) {
+                    "Added @${found.username} (Banned — chat locked until recovered)."
+                } else {
+                    "Username added successfully."
+                }
                 onSuccess()
             }.onFailure { err ->
-                if (isTransportCurrentlyOffline() || !repository.verifyActiveFirebaseConnection()) {
-                    _usernameSearchState.value = UsernameSearchState.NotFound("Internet connection is required to add a username.")
-                    showOfflinePopup()
-                } else {
-                    val msg = err.localizedMessage?.trim().orEmpty()
-                    val errorText = when {
-                        msg.contains("already added", ignoreCase = true) || msg.contains("already taken", ignoreCase = true) ->
-                            "This username is already added. You cannot add it again."
-                        msg == "Account Not Found" ->
-                            "Account Not Found"
-                        msg.isNotBlank() ->
-                            msg
-                        else ->
-                            "Could not add username. Please try again."
-                    }
-                    _usernameSearchState.value = UsernameSearchState.NotFound(errorText)
+                val msg = err.localizedMessage?.trim().orEmpty()
+                val errorText = when {
+                    msg.contains("already added", ignoreCase = true) || msg.contains("already taken", ignoreCase = true) ->
+                        "This username is already added. You cannot add it again."
+                    msg == "Account Not Found" ->
+                        "Account Not Found"
+                    msg.isNotBlank() ->
+                        msg
+                    else ->
+                        "Could not add username. Please try again."
                 }
+                _usernameSearchState.value = UsernameSearchState.NotFound(errorText)
             }
         }
     }
@@ -1437,12 +1469,7 @@ class NomiChatViewModel(
             _snackbarMessage.value = "Group name cannot be empty."
             return
         }
-        if (isTransportCurrentlyOffline()) {
-            showOfflinePopup()
-            return
-        }
         viewModelScope.launch {
-            if (!requireVerifiedOnlineConnection()) return@launch
             repository.addContact(
                 userId = currentUserId,
                 name = cleanName,
@@ -1471,18 +1498,9 @@ class NomiChatViewModel(
     ) {
         if (_isSavingProfile.value) return
         _profileSaveError.value = null
-        if (isTransportCurrentlyOffline()) {
-            showOfflinePopup()
-            _profileSaveError.value = NetworkConnectivityObserver.NO_INTERNET_POPUP_MESSAGE
-            return
-        }
         viewModelScope.launch {
             _isSavingProfile.value = true
             try {
-                if (!requireVerifiedOnlineConnection()) {
-                    _profileSaveError.value = NetworkConnectivityObserver.NO_INTERNET_POPUP_MESSAGE
-                    return@launch
-                }
                 repository.updateProfile(
                     userId = currentUserId,
                     displayName = displayName,
@@ -1509,14 +1527,9 @@ class NomiChatViewModel(
 
     fun updateProfilePhotoFromUri(context: Context, uri: Uri) {
         if (_isUploadingPhoto.value) return
-        if (isTransportCurrentlyOffline()) {
-            showOfflinePopup()
-            return
-        }
         viewModelScope.launch {
             _isUploadingPhoto.value = true
             try {
-                if (!requireVerifiedOnlineConnection()) return@launch
                 val encoded = withContext(Dispatchers.IO) {
                     encodeAvatarDataUri(context, uri)
                 }
@@ -1540,14 +1553,9 @@ class NomiChatViewModel(
 
     fun updateProfileBannerFromUri(context: Context, uri: Uri) {
         if (_isUploadingBanner.value) return
-        if (isTransportCurrentlyOffline()) {
-            showOfflinePopup()
-            return
-        }
         viewModelScope.launch {
             _isUploadingBanner.value = true
             try {
-                if (!requireVerifiedOnlineConnection()) return@launch
                 val encoded = withContext(Dispatchers.IO) {
                     encodeBannerDataUri(context, uri)
                 }
@@ -1575,12 +1583,7 @@ class NomiChatViewModel(
         maxViewers: Long,
         showOnlineStatus: Boolean = true
     ) {
-        if (isTransportCurrentlyOffline()) {
-            showOfflinePopup()
-            return
-        }
         viewModelScope.launch {
-            if (!requireVerifiedOnlineConnection()) return@launch
             repository.updatePrivacySettings(
                 userId = currentUserId,
                 profileVisibility = visibility.key,
@@ -1601,14 +1604,9 @@ class NomiChatViewModel(
         onSuccess: () -> Unit = {}
     ) {
         if (_isChangingPassword.value) return
-        if (isTransportCurrentlyOffline()) {
-            showOfflinePopup()
-            return
-        }
         viewModelScope.launch {
             _isChangingPassword.value = true
             try {
-                if (!requireVerifiedOnlineConnection()) return@launch
                 repository.changePassword(
                     userId = currentUserId,
                     currentPassword = currentPassword,
@@ -1627,14 +1625,10 @@ class NomiChatViewModel(
 
     fun refreshAllData() {
         if (_isRefreshing.value) return
-        if (isTransportCurrentlyOffline()) {
-            showOfflinePopup()
-            return
-        }
         viewModelScope.launch {
             _isRefreshing.value = true
             try {
-                if (!requireVerifiedOnlineConnection()) return@launch
+                repository.onNetworkReconnected()
                 val uid = currentUserId
                 if (uid.isNotBlank()) {
                     repository.purgeExpiredStories(uid)
@@ -1722,14 +1716,9 @@ class NomiChatViewModel(
             _snackbarMessage.value = "Choose a photo/video or add text, stickers, or drawing."
             return
         }
-        if (isTransportCurrentlyOffline()) {
-            showOfflinePopup()
-            return
-        }
         viewModelScope.launch {
             _isPostingStory.value = true
             try {
-                if (!requireVerifiedOnlineConnection()) return@launch
                 val (encodedMedia, resolvedMediaType) = if (uri != null) {
                     withContext(Dispatchers.IO) {
                         val mime = context.contentResolver.getType(uri).orEmpty().lowercase()
@@ -1809,12 +1798,7 @@ class NomiChatViewModel(
     fun sendStoryReaction(story: StoryItem, emoji: String) {
         val cleanEmoji = emoji.trim()
         if (story.id.isBlank() || cleanEmoji.isEmpty()) return
-        if (isTransportCurrentlyOffline()) {
-            showOfflinePopup()
-            return
-        }
         viewModelScope.launch {
-            if (!requireVerifiedOnlineConnection()) return@launch
             repository.reactToStory(
                 userId = currentUserId,
                 storyId = story.id,
@@ -1830,12 +1814,7 @@ class NomiChatViewModel(
     fun replyToStory(story: StoryItem, replyText: String) {
         val clean = replyText.trim()
         if (story.id.isBlank() || clean.isEmpty()) return
-        if (isTransportCurrentlyOffline()) {
-            showOfflinePopup()
-            return
-        }
         viewModelScope.launch {
-            if (!requireVerifiedOnlineConnection()) return@launch
             repository.replyToStory(currentUserId, story, clean)
                 .onSuccess {
                     _popupMessage.value = "Reply sent to ${story.authorName}"
@@ -1876,6 +1855,31 @@ class NomiChatViewModel(
     }
 
     private fun decodeSampledBitmap(context: Context, uri: Uri, maxDim: Int): Bitmap? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val decodedFast = runCatching {
+                val source = ImageDecoder.createSource(context.contentResolver, uri)
+                ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                    val srcW = info.size.width
+                    val srcH = info.size.height
+                    if (srcW > 0 && srcH > 0) {
+                        val longest = max(srcW, srcH)
+                        if (longest > maxDim) {
+                            val scale = maxDim.toFloat() / longest.toFloat()
+                            decoder.setTargetSize(
+                                (srcW * scale).toInt().coerceAtLeast(1),
+                                (srcH * scale).toInt().coerceAtLeast(1)
+                            )
+                        }
+                    }
+                }
+            }.getOrNull()
+            if (decodedFast != null) return decodedFast
+        }
+        return decodeLegacySampledBitmap(context, uri, maxDim)
+    }
+
+    private fun decodeLegacySampledBitmap(context: Context, uri: Uri, maxDim: Int): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         context.contentResolver.openInputStream(uri)?.use { stream ->
             BitmapFactory.decodeStream(stream, null, bounds)
@@ -1923,34 +1927,9 @@ class NomiChatViewModel(
     }
 
     private fun encodeAvatarDataUri(context: Context, uri: Uri): String? {
-        val original = decodeSampledBitmap(context, uri, maxDim = 320) ?: return null
+        val original = decodeSampledBitmap(context, uri, maxDim = 280) ?: return null
         return try {
-            var maxDim = 320
-            var dataUri: String? = null
-            while (maxDim >= 160 && dataUri == null) {
-                val scale = maxDim.toFloat() / max(original.width, original.height).toFloat()
-                val targetW = if (scale < 1f) (original.width * scale).toInt().coerceAtLeast(1) else original.width
-                val targetH = if (scale < 1f) (original.height * scale).toInt().coerceAtLeast(1) else original.height
-                val scaled = if (targetW == original.width && targetH == original.height) {
-                    original
-                } else {
-                    Bitmap.createScaledBitmap(original, targetW, targetH, true)
-                }
-                var quality = 82
-                while (quality >= 50) {
-                    val baos = ByteArrayOutputStream()
-                    scaled.compress(Bitmap.CompressFormat.JPEG, quality, baos)
-                    val candidate = "data:image/jpeg;base64," + Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
-                    if (candidate.length <= 140_000) {
-                        dataUri = candidate
-                        break
-                    }
-                    quality -= 10
-                }
-                if (scaled !== original) scaled.recycle()
-                maxDim = (maxDim * 3) / 4
-            }
-            dataUri
+            compressBitmapUnderLimit(original, initialMaxDim = 280, minMaxDim = 80, maxChars = 110_000)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to encode avatar image", e)
             null
@@ -2078,39 +2057,7 @@ class NomiChatViewModel(
     }
 
     private fun encodeBitmapToDataUri(original: Bitmap): String? {
-        return try {
-            var maxDim = 720
-            var quality = 74
-            var dataUri: String? = null
-            while (maxDim >= 320) {
-                val scale = maxDim.toFloat() / max(original.width, original.height).toFloat()
-                val targetW = if (scale < 1f) (original.width * scale).toInt().coerceAtLeast(1) else original.width
-                val targetH = if (scale < 1f) (original.height * scale).toInt().coerceAtLeast(1) else original.height
-                val scaled = if (targetW == original.width && targetH == original.height) {
-                    original
-                } else {
-                    Bitmap.createScaledBitmap(original, targetW, targetH, true)
-                }
-                while (quality >= 45) {
-                    val baos = ByteArrayOutputStream()
-                    scaled.compress(Bitmap.CompressFormat.JPEG, quality, baos)
-                    val candidate = "data:image/jpeg;base64," + Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
-                    if (candidate.length <= 220_000) {
-                        dataUri = candidate
-                        break
-                    }
-                    quality -= 12
-                }
-                if (scaled !== original) scaled.recycle()
-                if (dataUri != null) break
-                maxDim = (maxDim * 3) / 4
-                quality = 68
-            }
-            dataUri
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to encode bitmap media", e)
-            null
-        }
+        return compressBitmapUnderLimit(original, initialMaxDim = 720, minMaxDim = 140, maxChars = 200_000)
     }
 
     private fun resolveDisplayFileName(context: Context, uri: Uri): String {
@@ -2129,11 +2076,28 @@ class NomiChatViewModel(
     }
 
     private fun encodeBannerDataUri(context: Context, uri: Uri): String? {
-        val original = decodeSampledBitmap(context, uri, maxDim = 720) ?: return null
+        val original = decodeSampledBitmap(context, uri, maxDim = 560) ?: return null
         return try {
-            var maxDim = 720
-            var dataUri: String? = null
-            while (maxDim >= 280 && dataUri == null) {
+            compressBitmapUnderLimit(original, initialMaxDim = 560, minMaxDim = 120, maxChars = 120_000)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to encode banner image", e)
+            null
+        } finally {
+            if (!original.isRecycled) original.recycle()
+        }
+    }
+
+    private fun compressBitmapUnderLimit(
+        original: Bitmap,
+        initialMaxDim: Int,
+        minMaxDim: Int,
+        maxChars: Int
+    ): String? {
+        return try {
+            var maxDim = initialMaxDim
+            var bestCandidate: String? = null
+            val baos = ByteArrayOutputStream(32_768)
+            while (maxDim >= minMaxDim) {
                 val scale = maxDim.toFloat() / max(original.width, original.height).toFloat()
                 val targetW = if (scale < 1f) (original.width * scale).toInt().coerceAtLeast(1) else original.width
                 val targetH = if (scale < 1f) (original.height * scale).toInt().coerceAtLeast(1) else original.height
@@ -2142,26 +2106,25 @@ class NomiChatViewModel(
                 } else {
                     Bitmap.createScaledBitmap(original, targetW, targetH, true)
                 }
-                var quality = 80
-                while (quality >= 42) {
-                    val baos = ByteArrayOutputStream()
+                var quality = 78
+                while (quality >= 24) {
+                    baos.reset()
                     scaled.compress(Bitmap.CompressFormat.JPEG, quality, baos)
                     val candidate = "data:image/jpeg;base64," + Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
-                    if (candidate.length <= 140_000) {
-                        dataUri = candidate
-                        break
+                    bestCandidate = candidate
+                    if (candidate.length <= maxChars) {
+                        if (scaled !== original) scaled.recycle()
+                        return candidate
                     }
-                    quality -= 10
+                    quality -= 18
                 }
                 if (scaled !== original) scaled.recycle()
-                maxDim = (maxDim * 3) / 4
+                maxDim = (maxDim * 2) / 3
             }
-            dataUri
+            bestCandidate?.takeIf { it.length <= maxChars + 20_000 }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to encode banner image", e)
+            Log.e(TAG, "Failed to compress bitmap media", e)
             null
-        } finally {
-            if (!original.isRecycled) original.recycle()
         }
     }
 
@@ -2173,5 +2136,6 @@ class NomiChatViewModel(
         const val MAX_STORY_VIDEO_RAW_BYTES = 650_000
         const val MAX_STORY_VIDEO_TRIM_BYTES = 600_000L
         const val MAX_STORY_MEDIA_DATA_CHARS = 900_000
+        val USERNAME_FORMAT_REGEX = Regex("^[a-z0-9_.-]+$")
     }
 }

@@ -121,6 +121,7 @@ import com.example.data.model.ChatMessage
 import com.example.data.model.ChatThemeStyle
 import com.example.data.model.ChatThread
 import com.example.ui.components.AvatarCircle
+import com.example.ui.components.resolveImageModel
 import com.example.ui.theme.CallBgDark
 import com.example.ui.theme.CallBgLight
 import com.example.ui.theme.CallEndRed
@@ -314,11 +315,8 @@ fun MessageBubble(
 
     var showMessageMenu by remember { mutableStateOf(false) }
 
-    val decodedImageBytes = remember(msg.messageType, msg.mediaData) {
-        if (msg.messageType == "image" && !msg.mediaData.isNullOrBlank() && msg.mediaData.startsWith("data:image")) {
-            val b64 = msg.mediaData.substringAfter("base64,", "")
-            runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull()
-        } else null
+    val imageModel = remember(msg.messageType, msg.mediaData) {
+        if (msg.messageType == "image") resolveImageModel(msg.mediaData) else null
     }
 
     Row(
@@ -515,9 +513,9 @@ fun MessageBubble(
                     }
 
                     "image" -> {
-                        if (decodedImageBytes != null) {
+                        if (imageModel != null) {
                             AsyncImage(
-                                model = decodedImageBytes,
+                                model = imageModel,
                                 contentDescription = "Photo message",
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier
@@ -1660,10 +1658,7 @@ fun ImageMessagePreviewDialog(
     mediaData: String,
     onDismiss: () -> Unit
 ) {
-    val bytes = remember(mediaData) {
-        val b64 = mediaData.substringAfter("base64,", "")
-        runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull()
-    }
+    val imageModel = remember(mediaData) { resolveImageModel(mediaData) }
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             modifier = Modifier
@@ -1672,9 +1667,9 @@ fun ImageMessagePreviewDialog(
             color = Color.Black
         ) {
             Box(modifier = Modifier.fillMaxWidth()) {
-                if (bytes != null) {
+                if (imageModel != null) {
                     AsyncImage(
-                        model = bytes,
+                        model = imageModel,
                         contentDescription = "Full image preview",
                         contentScale = ContentScale.Fit,
                         modifier = Modifier
