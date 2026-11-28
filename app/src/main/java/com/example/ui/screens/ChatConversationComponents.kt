@@ -48,7 +48,6 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
-import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
@@ -86,6 +85,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -114,6 +114,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
+import coil.request.CachePolicy
+import coil.request.ImageRequest
 import com.example.R
 import com.example.audio.VoicePlaybackUiState
 import com.example.audio.VoiceRecordingUiState
@@ -121,6 +123,8 @@ import com.example.data.model.ChatMessage
 import com.example.data.model.ChatThemeStyle
 import com.example.data.model.ChatThread
 import com.example.ui.components.AvatarCircle
+import com.example.ui.components.MessageReceiptIcon
+import com.example.ui.components.computeImageCacheKey
 import com.example.ui.components.resolveImageModel
 import com.example.ui.theme.CallBgDark
 import com.example.ui.theme.CallBgLight
@@ -514,16 +518,31 @@ fun MessageBubble(
 
                     "image" -> {
                         if (imageModel != null) {
-                            AsyncImage(
-                                model = imageModel,
-                                contentDescription = "Photo message",
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(min = 130.dp, max = 240.dp)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .clickable { msg.mediaData?.let(onPreviewImage) }
-                            )
+                            val imgContext = LocalContext.current
+                            val msgImageCacheKey = remember(msg.id, msg.mediaData) {
+                                computeImageCacheKey("msg_img_${msg.id}", msg.mediaData)
+                            }
+                            val msgImageRequest = remember(msgImageCacheKey, imageModel) {
+                                ImageRequest.Builder(imgContext)
+                                    .data(imageModel)
+                                    .memoryCacheKey(msgImageCacheKey)
+                                    .diskCacheKey(msgImageCacheKey)
+                                    .diskCachePolicy(if (imageModel is ByteArray) CachePolicy.DISABLED else CachePolicy.ENABLED)
+                                    .crossfade(false)
+                                    .build()
+                            }
+                            key(msgImageCacheKey) {
+                                AsyncImage(
+                                    model = msgImageRequest,
+                                    contentDescription = "Photo message",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = 130.dp, max = 240.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .clickable { msg.mediaData?.let(onPreviewImage) }
+                                )
+                            }
                             if (msg.text.isNotBlank() && msg.text != "📷 Photo") {
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Text(
@@ -624,11 +643,13 @@ fun MessageBubble(
                         color = secondaryTextColor
                     )
                     if (isMe) {
-                        Icon(
-                            imageVector = Icons.Default.DoneAll,
-                            contentDescription = "Delivered",
-                            tint = Color(0xFF1E9BF0),
-                            modifier = Modifier.size(14.dp)
+                        MessageReceiptIcon(
+                            receiptStatus = msg.receiptStatus,
+                            mutedTint = secondaryTextColor,
+                            readTint = if (bubbleColor.luminance() < 0.45f) Color(0xFF53BDEB) else Color(0xFF1E9BF0),
+                            modifier = Modifier
+                                .size(15.dp)
+                                .testTag("message_receipt_${msg.id}")
                         )
                     }
                 }
@@ -1668,14 +1689,29 @@ fun ImageMessagePreviewDialog(
         ) {
             Box(modifier = Modifier.fillMaxWidth()) {
                 if (imageModel != null) {
-                    AsyncImage(
-                        model = imageModel,
-                        contentDescription = "Full image preview",
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 240.dp, max = 520.dp)
-                    )
+                    val previewContext = LocalContext.current
+                    val previewCacheKey = remember(mediaData) {
+                        computeImageCacheKey("msg_preview", mediaData)
+                    }
+                    val previewRequest = remember(previewCacheKey, imageModel) {
+                        ImageRequest.Builder(previewContext)
+                            .data(imageModel)
+                            .memoryCacheKey(previewCacheKey)
+                            .diskCacheKey(previewCacheKey)
+                            .diskCachePolicy(if (imageModel is ByteArray) CachePolicy.DISABLED else CachePolicy.ENABLED)
+                            .crossfade(false)
+                            .build()
+                    }
+                    key(previewCacheKey) {
+                        AsyncImage(
+                            model = previewRequest,
+                            contentDescription = "Full image preview",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 240.dp, max = 520.dp)
+                        )
+                    }
                 }
                 IconButton(
                     onClick = onDismiss,

@@ -70,6 +70,7 @@ import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -100,6 +101,7 @@ import com.example.data.model.ThemeMode
 import com.example.data.model.UserProfile
 import com.example.data.network.NetworkStatus
 import com.example.ui.components.AvatarCircle
+import com.example.ui.components.computeImageCacheKey
 import com.example.ui.components.resolveImageModel
 import com.example.ui.theme.EmeraldBright
 import com.example.ui.theme.EmeraldDark
@@ -853,20 +855,26 @@ private fun ProfileBannerCard(
         ) {
             if (bannerModel != null) {
                 val bannerContext = LocalContext.current
-                val bannerRequest = remember(bannerData, bannerModel) {
+                val bannerCacheKey = remember(bannerData) {
+                    computeImageCacheKey("profile_banner", bannerData)
+                }
+                val bannerRequest = remember(bannerCacheKey, bannerModel) {
                     ImageRequest.Builder(bannerContext)
                         .data(bannerModel)
-                        .memoryCacheKey("profile_banner_${bannerData?.length}_${bannerData?.hashCode()}")
+                        .memoryCacheKey(bannerCacheKey)
+                        .diskCacheKey(bannerCacheKey)
                         .diskCachePolicy(if (bannerModel is ByteArray) CachePolicy.DISABLED else CachePolicy.ENABLED)
                         .crossfade(false)
                         .build()
                 }
-                AsyncImage(
-                    model = bannerRequest,
-                    contentDescription = "Profile banner image",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
+                key(bannerCacheKey) {
+                    AsyncImage(
+                        model = bannerRequest,
+                        contentDescription = "Profile banner image",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
                 Box(
                     modifier = Modifier
                         .fillMaxSize()

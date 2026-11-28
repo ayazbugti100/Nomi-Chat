@@ -10,6 +10,18 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function isUsernameUid(uid) {
+      return uid is string &&
+             uid.size() >= 16 &&
+             uid.size() <= 64 &&
+             uid.matches('^usr_[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Google accounts must strictly match Firebase Auth UID; pure username+password accounts use persistent usr_ UIDs.
+    function isActorUid(uid) {
+      return (isSignedIn() && request.auth.uid == uid) || isUsernameUid(uid);
+    }
+
     function isAdmin() {
       return isSignedIn() &&
              ('email' in request.auth.token) &&
@@ -50,7 +62,22 @@ service cloud.firestore {
              data.accountStatus in ['active', 'banned'] &&
              data.reportCount is int && data.reportCount >= 0 && data.reportCount <= 1000 &&
              (!('bannedByAdmin' in data) || data.bannedByAdmin is bool) &&
-             (!('deletedContactIds' in data) || (data.deletedContactIds is list && data.deletedContactIds.size() <= 500));
+             (!('deletedContactIds' in data) || (data.deletedContactIds is list && data.deletedContactIds.size() <= 500)) &&
+             (!('themeMode' in data) || (data.themeMode is string && data.themeMode.size() <= 20)) &&
+             (!('notificationsEnabled' in data) || data.notificationsEnabled is bool) &&
+             (!('smartAiEnabled' in data) || data.smartAiEnabled is bool) &&
+             (!('appLockPinHash' in data) || (data.appLockPinHash is string && data.appLockPinHash.size() <= 128));
+    }
+
+    function isValidUsernameAccount(data) {
+      return isUsernameUid(data.userId) &&
+             data.username is string && data.username.size() >= 2 && data.username.size() <= 40 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60 &&
+             data.dob is string && data.dob.size() >= 4 && data.dob.size() <= 20 &&
+             data.passwordSalt is string && data.passwordSalt.size() >= 16 && data.passwordSalt.size() <= 128 &&
+             data.passwordHash is string && data.passwordHash.size() == 64 &&
+             data.accountStatus in ['active', 'banned'] &&
+             (!('bannedByAdmin' in data) || data.bannedByAdmin is bool);
     }
 
     function isValidDirectoryEntry(data) {
@@ -114,6 +141,8 @@ service cloud.firestore {
              data.lastMessageText is string && data.lastMessageText.size() <= 1000 &&
              data.lastMessageFromMe is bool &&
              data.lastMessageTimeLabel is string && data.lastMessageTimeLabel.size() <= 30 &&
+             (!('lastMessageReceiptStatus' in data) || data.lastMessageReceiptStatus in ['sent', 'delivered', 'read']) &&
+             (!('lastMessageId' in data) || (data.lastMessageId is string && data.lastMessageId.size() <= 128)) &&
              data.pinned is bool &&
              (!('locked' in data) || data.locked is bool) &&
              (!('blocked' in data) || data.blocked is bool) &&
@@ -144,6 +173,9 @@ service cloud.firestore {
              (!('replyToText' in data) || (data.replyToText is string && data.replyToText.size() <= 200)) &&
              (!('replyToSender' in data) || (data.replyToSender is string && data.replyToSender.size() <= 60)) &&
              (!('replyToMessageId' in data) || (data.replyToMessageId is string && data.replyToMessageId.size() <= 128)) &&
+             (!('receiptStatus' in data) || data.receiptStatus in ['sent', 'delivered', 'read']) &&
+             (!('senderMessageId' in data) || (data.senderMessageId is string && data.senderMessageId.size() <= 128)) &&
+             (!('senderContactId' in data) || (data.senderContactId is string && data.senderContactId.size() <= 128)) &&
              data.timeLabel is string && data.timeLabel.size() >= 1 && data.timeLabel.size() <= 30 &&
              data.aiGenerated is bool;
     }
@@ -192,17 +224,71 @@ service cloud.firestore {
              data.accountStatus in ['active', 'banned'];
     }
 
-    match /users/{userId} {
-      allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+    match /username_accounts/{username} {
+      allow get: if isValidId(username);
       allow list: if isAdmin();
 
-      allow create: if isSignedIn() &&
-                       isValidId(userId) &&
-                       request.auth.uid == userId &&
-                       incoming().userId == request.auth.uid &&
+      allow create: if isValidId(username) &&
+                       incoming().username == username &&
+                       isUsernameUid(incoming().userId) &&
+                       incoming().accountStatus == 'active' &&
+                       (!('bannedByAdmin' in incoming()) || incoming().bannedByAdmin == false) &&
+                       incoming().keys().hasAll([
+                         'userId', 'username', 'displayName', 'dob',
+                         'passwordSalt', 'passwordHash', 'accountStatus',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'username', 'displayName', 'dob',
+                         'passwordSalt', 'passwordHash', 'accountStatus', 'bannedByAdmin',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       isValidUsernameAccount(incoming()) &&
+                       getAfter(/databases/$(database)/documents/users/$(incoming().userId)).data.username == username;
+
+      allow update: if isValidId(username) &&
+                       isValidUsernameAccount(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().username == existing().username &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       (
+                         (isAdmin() &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'accountStatus', 'bannedByAdmin', 'updatedAt'
+                          ])) ||
+                         (incoming().accountStatus == existing().accountStatus &&
+                          incoming().get('bannedByAdmin', false) == existing().get('bannedByAdmin', false) &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'displayName', 'dob', 'passwordSalt', 'passwordHash', 'updatedAt'
+                          ]))
+                       );
+
+      allow delete: if isValidId(username) &&
+                       (
+                         isAdmin() ||
+                         (getAfter(/databases/$(database)/documents/users/$(existing().userId)).data.username != username)
+                       );
+    }
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) &&
+                    (
+                      isAdmin() ||
+                      (isSignedIn() && request.auth.uid == userId) ||
+                      (isUsernameUid(userId) && (resource == null || existing().provider == 'username'))
+                    );
+      allow list: if isAdmin();
+
+      allow create: if isValidId(userId) &&
+                       isActorUid(userId) &&
+                       incoming().userId == userId &&
                        incoming().accountStatus == 'active' &&
                        incoming().reportCount == 0 &&
                        incoming().verified == isAdmin() &&
+                       (isUsernameUid(userId) ? (incoming().provider == 'username' && incoming().verified == false) : true) &&
                        incoming().keys().hasAll([
                          'userId', 'displayName', 'username', 'bio', 'dob', 'provider',
                          'online', 'verified', 'premiumUnlocked',
@@ -212,21 +298,23 @@ service cloud.firestore {
                          'userId', 'displayName', 'username', 'email', 'bio', 'dob', 'provider', 'photoData', 'bannerData',
                          'profileVisibility', 'allowedViewerUids', 'maxProfileViewers',
                          'online', 'showOnlineStatus', 'verified', 'premiumUnlocked',
-                         'accountStatus', 'reportCount', 'createdAt', 'updatedAt'
+                         'accountStatus', 'reportCount',
+                         'themeMode', 'notificationsEnabled', 'smartAiEnabled', 'appLockPinHash',
+                         'createdAt', 'updatedAt'
                        ]) &&
                        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                        isValidUserProfile(incoming());
 
-       allow update: if isValidId(userId) &&
+      allow update: if isValidId(userId) &&
                        isValidUserProfile(incoming()) &&
                        incoming().userId == existing().userId &&
                        incoming().provider == existing().provider &&
                        incoming().createdAt == existing().createdAt &&
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                        (
-                         (isSignedIn() &&
-                          request.auth.uid == userId &&
+                         (isActorUid(userId) &&
+                          (isUsernameUid(userId) ? existing().provider == 'username' : true) &&
                           incoming().accountStatus == existing().accountStatus &&
                           incoming().reportCount == existing().reportCount &&
                           incoming().get('bannedByAdmin', false) == existing().get('bannedByAdmin', false) &&
@@ -234,7 +322,9 @@ service cloud.firestore {
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'displayName', 'username', 'email', 'bio', 'dob', 'photoData', 'bannerData',
                             'profileVisibility', 'allowedViewerUids', 'maxProfileViewers',
-                            'online', 'showOnlineStatus', 'verified', 'premiumUnlocked', 'deletedContactIds', 'updatedAt'
+                            'online', 'showOnlineStatus', 'verified', 'premiumUnlocked', 'deletedContactIds',
+                            'themeMode', 'notificationsEnabled', 'smartAiEnabled', 'appLockPinHash',
+                            'updatedAt'
                           ])) ||
                          (isAdmin() &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
@@ -242,17 +332,18 @@ service cloud.firestore {
                           ]))
                        );
 
-      allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+      allow delete: if isValidId(userId) &&
+                       isActorUid(userId) &&
+                       (isSignedIn() || existing().provider == 'username');
 
       match /contacts/{contactId} {
-        allow get: if isSignedIn() && isValidId(userId) && isValidId(contactId) && request.auth.uid == userId;
-        allow list: if isSignedIn() && request.auth.uid == userId;
+        allow get: if isValidId(userId) && isValidId(contactId) && isActorUid(userId);
+        allow list: if isValidId(userId) && isActorUid(userId);
 
-        allow create: if isSignedIn() &&
-                         isValidId(userId) &&
+        allow create: if isValidId(userId) &&
                          isValidId(contactId) &&
-                         request.auth.uid == userId &&
-                         incoming().userId == request.auth.uid &&
+                         isActorUid(userId) &&
+                         incoming().userId == userId &&
                          incoming().keys().hasAll([
                            'userId', 'name', 'username', 'phone', 'threadType',
                            'online', 'typing', 'unreadCount', 'lastMessageText',
@@ -263,7 +354,8 @@ service cloud.firestore {
                          incoming().keys().hasOnly([
                            'userId', 'name', 'username', 'phone', 'threadType', 'bio', 'photoData', 'bannerData',
                            'online', 'typing', 'unreadCount', 'lastMessageText',
-                           'lastMessageFromMe', 'lastMessageTimeLabel', 'pinned',
+                           'lastMessageFromMe', 'lastMessageTimeLabel',
+                           'lastMessageReceiptStatus', 'lastMessageId', 'pinned',
                            'locked', 'blocked', 'archived', 'muted', 'disappearingSeconds', 'chatTheme',
                            'customRenamed', 'peerUid', 'isRegisteredPeer',
                            'accountStatus', 'reportCount', 'reportedBy',
@@ -273,10 +365,9 @@ service cloud.firestore {
                          incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                          isValidContact(incoming());
 
-        allow update: if isSignedIn() &&
-                         isValidId(userId) &&
+        allow update: if isValidId(userId) &&
                          isValidId(contactId) &&
-                         request.auth.uid == userId &&
+                         isActorUid(userId) &&
                          isValidContact(incoming()) &&
                          incoming().userId == existing().userId &&
                          incoming().createdAt == existing().createdAt &&
@@ -284,28 +375,27 @@ service cloud.firestore {
                          incoming().diff(existing()).affectedKeys().hasOnly([
                            'name', 'username', 'phone', 'threadType', 'bio', 'photoData', 'bannerData', 'online', 'typing',
                            'unreadCount', 'lastMessageText', 'lastMessageFromMe',
-                           'lastMessageTimeLabel', 'pinned', 'locked', 'blocked', 'archived',
+                           'lastMessageTimeLabel', 'lastMessageReceiptStatus', 'lastMessageId',
+                           'pinned', 'locked', 'blocked', 'archived',
                            'muted', 'disappearingSeconds', 'chatTheme',
                            'customRenamed', 'peerUid', 'isRegisteredPeer',
                            'accountStatus', 'reportCount', 'reportedBy', 'updatedAt'
                          ]);
 
-        allow delete: if isSignedIn() && isValidId(userId) && isValidId(contactId) && request.auth.uid == userId;
+        allow delete: if isValidId(userId) && isValidId(contactId) && isActorUid(userId);
 
         match /messages/{messageId} {
-          allow get: if isSignedIn() &&
-                        isValidId(userId) &&
+          allow get: if isValidId(userId) &&
                         isValidId(contactId) &&
                         isValidId(messageId) &&
-                        request.auth.uid == userId;
-          allow list: if isSignedIn() && request.auth.uid == userId;
+                        isActorUid(userId);
+          allow list: if isValidId(userId) && isActorUid(userId);
 
-          allow create: if isSignedIn() &&
-                           isValidId(userId) &&
+          allow create: if isValidId(userId) &&
                            isValidId(contactId) &&
                            isValidId(messageId) &&
-                           request.auth.uid == userId &&
-                           incoming().userId == request.auth.uid &&
+                           isActorUid(userId) &&
+                           incoming().userId == userId &&
                            incoming().contactId == contactId &&
                            incoming().keys().hasAll([
                              'userId', 'contactId', 'sender', 'text',
@@ -315,31 +405,47 @@ service cloud.firestore {
                              'userId', 'contactId', 'sender', 'text',
                              'messageType', 'mediaData', 'durationSec', 'expiresAtMs',
                              'replyToText', 'replyToSender', 'replyToMessageId',
+                             'receiptStatus', 'senderMessageId', 'senderContactId',
                              'timeLabel', 'aiGenerated', 'createdAt'
                            ]) &&
                            incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
                            isValidMessage(incoming()) &&
                            existsAfter(/databases/$(database)/documents/users/$(userId)/contacts/$(contactId));
 
-          allow update: if false;
-
-          allow delete: if isSignedIn() &&
-                           isValidId(userId) &&
+          allow update: if isValidId(userId) &&
                            isValidId(contactId) &&
                            isValidId(messageId) &&
-                           request.auth.uid == userId;
+                           isActorUid(userId) &&
+                           isValidMessage(incoming()) &&
+                           incoming().userId == existing().userId &&
+                           incoming().contactId == existing().contactId &&
+                           incoming().sender == existing().sender &&
+                           incoming().text == existing().text &&
+                           incoming().timeLabel == existing().timeLabel &&
+                           incoming().aiGenerated == existing().aiGenerated &&
+                           incoming().createdAt == existing().createdAt &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['receiptStatus']) &&
+                           (
+                             existing().get('receiptStatus', 'sent') == 'sent' ||
+                             (existing().get('receiptStatus', 'sent') == 'delivered' && incoming().receiptStatus in ['delivered', 'read']) ||
+                             (existing().get('receiptStatus', 'sent') == 'read' && incoming().receiptStatus == 'read')
+                           );
+
+          allow delete: if isValidId(userId) &&
+                           isValidId(contactId) &&
+                           isValidId(messageId) &&
+                           isActorUid(userId);
         }
       }
 
       match /credentials/{username} {
-        allow get: if isSignedIn() && isValidId(userId) && isValidId(username) && request.auth.uid == userId;
+        allow get: if isValidId(userId) && isValidId(username) && isActorUid(userId);
         allow list: if false;
 
-        allow create: if isSignedIn() &&
-                         isValidId(userId) &&
+        allow create: if isValidId(userId) &&
                          isValidId(username) &&
-                         request.auth.uid == userId &&
-                         incoming().userId == request.auth.uid &&
+                         isActorUid(userId) &&
+                         incoming().userId == userId &&
                          incoming().username == username &&
                          incoming().accountStatus == 'active' &&
                          incoming().keys().hasAll([
@@ -356,10 +462,9 @@ service cloud.firestore {
                          incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                          isValidCredentialRecord(incoming());
 
-        allow update: if isSignedIn() &&
-                         isValidId(userId) &&
+        allow update: if isValidId(userId) &&
                          isValidId(username) &&
-                         request.auth.uid == userId &&
+                         isActorUid(userId) &&
                          isValidCredentialRecord(incoming()) &&
                          incoming().userId == existing().userId &&
                          incoming().username == existing().username &&
@@ -369,21 +474,20 @@ service cloud.firestore {
                            'displayName', 'dob', 'passwordSalt', 'passwordHash', 'accountStatus', 'updatedAt'
                          ]);
 
-        allow delete: if isSignedIn() && isValidId(userId) && isValidId(username) && request.auth.uid == userId;
+        allow delete: if isValidId(userId) && isValidId(username) && isActorUid(userId);
       }
     }
 
     match /usernames/{username} {
-      allow get: if isSignedIn() && isValidId(username);
+      allow get: if isValidId(username);
       allow list: if false;
 
-      allow create: if isSignedIn() &&
-                       isValidId(username) &&
+      allow create: if isValidId(username) &&
                        incoming().username is string &&
                        incoming().username.size() >= 2 &&
                        incoming().username.size() <= 40 &&
                        incoming().username == username &&
-                       incoming().ownerUid == request.auth.uid &&
+                       isActorUid(incoming().ownerUid) &&
                        incoming().status == 'active' &&
                        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
@@ -394,8 +498,7 @@ service cloud.firestore {
                          'username', 'ownerUid', 'status', 'createdAt', 'updatedAt'
                        ]);
 
-      allow update: if isSignedIn() &&
-                       isValidId(username) &&
+      allow update: if isValidId(username) &&
                        incoming().username == existing().username &&
                        incoming().createdAt == existing().createdAt &&
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
@@ -404,24 +507,23 @@ service cloud.firestore {
                        ]) &&
                        (
                          (existing().status == 'active' &&
-                          existing().ownerUid == request.auth.uid &&
+                          isActorUid(existing().ownerUid) &&
                           incoming().status == 'retired' &&
                           incoming().ownerUid == '') ||
                          (existing().status == 'retired' &&
                           existing().ownerUid == '' &&
                           incoming().status == 'active' &&
-                          incoming().ownerUid == request.auth.uid)
+                          isActorUid(incoming().ownerUid))
                        );
 
       allow delete: if false;
     }
 
     match /directory/{username} {
-      allow get: if isSignedIn() && isValidId(username);
-      allow list: if isAdmin() || (isSignedIn() && request.query.limit != null && request.query.limit <= 30);
+      allow get: if isValidId(username);
+      allow list: if isAdmin() || (request.query.limit != null && request.query.limit <= 30);
 
-      allow create: if isSignedIn() &&
-                       isValidId(username) &&
+      allow create: if isValidId(username) &&
                        incoming().username == username &&
                        incoming().keys().hasAll([
                          'username', 'displayName', 'accountStatus',
@@ -438,12 +540,13 @@ service cloud.firestore {
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                        isValidDirectoryEntry(incoming()) &&
                        (
-                         (incoming().reportCount == 0 && incoming().ownerUid == request.auth.uid) ||
-                         (incoming().reportCount == 1 && request.auth.uid in incoming().reportedByUids)
+                         (incoming().reportCount == 0 && isActorUid(incoming().ownerUid)) ||
+                         (incoming().reportCount == 1 &&
+                          incoming().reportedByUids.size() == 1 &&
+                          isActorUid(incoming().reportedByUids[0]))
                        );
 
-      allow update: if isSignedIn() &&
-                       isValidId(username) &&
+      allow update: if isValidId(username) &&
                        isValidDirectoryEntry(incoming()) &&
                        incoming().username == existing().username &&
                        incoming().createdAt == existing().createdAt &&
@@ -451,21 +554,27 @@ service cloud.firestore {
                        (
                          // Owner updating display name, bio, photo, banner, privacy rules, or presence without altering moderation state
                          ('ownerUid' in existing() &&
-                          existing().ownerUid == request.auth.uid &&
+                          isActorUid(existing().ownerUid) &&
                           (incoming().get('verified', false) == existing().get('verified', false) || (isAdmin() && incoming().get('verified', false) == true)) &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'displayName', 'bio', 'photoData', 'bannerData',
                             'profileVisibility', 'allowedViewerUids', 'maxProfileViewers',
                             'online', 'showOnlineStatus', 'verified', 'updatedAt'
                           ])) ||
-                         // Any signed-in reporter appending their own unique UID once
-                         (!(request.auth.uid in existing().reportedByUids) &&
-                          request.auth.uid in incoming().reportedByUids &&
-                          incoming().reportedByUids.hasAll(existing().reportedByUids) &&
+                         // Reporter appending their own unique UID once
+                         (incoming().reportedByUids.hasAll(existing().reportedByUids) &&
                           incoming().reportedByUids.size() == existing().reportedByUids.size() + 1 &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
                             'reportedByUids', 'reportCount', 'accountStatus', 'updatedAt'
-                          ])) ||
+                          ]) &&
+                          (
+                            (isSignedIn() &&
+                             !(request.auth.uid in existing().reportedByUids) &&
+                             request.auth.uid in incoming().reportedByUids) ||
+                            (!isSignedIn() &&
+                             isUsernameUid(incoming().reportedByUids[existing().reportedByUids.size()]) &&
+                             !(incoming().reportedByUids[existing().reportedByUids.size()] in existing().reportedByUids))
+                          )) ||
                          // Verified admin directly banning or recovering accounts
                          (isAdmin() &&
                           incoming().diff(existing()).affectedKeys().hasOnly([
@@ -473,20 +582,18 @@ service cloud.firestore {
                           ]))
                        );
 
-      allow delete: if isSignedIn() &&
-                       isValidId(username) &&
+      allow delete: if isValidId(username) &&
                        ('ownerUid' in existing()) &&
-                       existing().ownerUid == request.auth.uid;
+                       isActorUid(existing().ownerUid);
     }
 
     match /public_profiles/{userId} {
-      allow get: if isSignedIn() && isValidId(userId);
-      allow list: if isSignedIn() && request.query.limit != null && request.query.limit <= 30;
+      allow get: if isValidId(userId);
+      allow list: if request.query.limit != null && request.query.limit <= 30;
 
-      allow create: if isSignedIn() &&
-                       isValidId(userId) &&
-                       request.auth.uid == userId &&
-                       incoming().ownerUid == request.auth.uid &&
+      allow create: if isValidId(userId) &&
+                       isActorUid(userId) &&
+                       incoming().ownerUid == userId &&
                        incoming().accountStatus == 'active' &&
                        (!('bannedByAdmin' in incoming()) || incoming().bannedByAdmin == false) &&
                        (!('verified' in incoming()) || incoming().verified == isAdmin()) &&
@@ -502,14 +609,13 @@ service cloud.firestore {
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                        isValidPublicProfile(incoming());
 
-      allow update: if isSignedIn() &&
-                       isValidId(userId) &&
+      allow update: if isValidId(userId) &&
                        isValidPublicProfile(incoming()) &&
                        incoming().ownerUid == existing().ownerUid &&
                        incoming().createdAt == existing().createdAt &&
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                        (
-                         (request.auth.uid == userId &&
+                         (isActorUid(userId) &&
                           incoming().accountStatus == existing().accountStatus &&
                           incoming().get('bannedByAdmin', false) == existing().get('bannedByAdmin', false) &&
                           (incoming().get('verified', false) == existing().get('verified', false) || (isAdmin() && incoming().get('verified', false) == true)) &&
@@ -524,7 +630,7 @@ service cloud.firestore {
                           ]))
                        );
 
-      allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+      allow delete: if isValidId(userId) && isActorUid(userId);
     }
 
     match /admin_config/{configId} {
@@ -550,16 +656,21 @@ service cloud.firestore {
     match /moderation_alerts/{alertId} {
       allow get, list: if isAdmin();
 
-      allow create: if isSignedIn() &&
-                       isValidId(alertId) &&
-                       incoming().reporterUid == request.auth.uid &&
+      allow create: if isValidId(alertId) &&
+                       isActorUid(incoming().reporterUid) &&
                        incoming().status == 'pending' &&
+                       (!('alertType' in incoming()) || incoming().alertType in ['report', 'appeal']) &&
                        incoming().reportedUid is string && incoming().reportedUid.size() <= 128 &&
                        incoming().reportedUsername is string && incoming().reportedUsername.size() >= 1 && incoming().reportedUsername.size() <= 40 &&
                        incoming().reportedDisplayName is string && incoming().reportedDisplayName.size() >= 1 && incoming().reportedDisplayName.size() <= 60 &&
                        incoming().reporterUsername is string && incoming().reporterUsername.size() >= 1 && incoming().reporterUsername.size() <= 40 &&
                        (!('reporterEmail' in incoming()) || (incoming().reporterEmail is string && incoming().reporterEmail.size() <= 128)) &&
                        incoming().reason is string && incoming().reason.size() >= 1 && incoming().reason.size() <= 100 &&
+                       (!('appealMessage' in incoming()) || (incoming().appealMessage is string && incoming().appealMessage.size() <= 600)) &&
+                       (!('aiRecommendation' in incoming()) || incoming().aiRecommendation in ['', 'RESTORE', 'KEEP_BANNED']) &&
+                       (!('aiRiskLevel' in incoming()) || incoming().aiRiskLevel in ['', 'LOW', 'MEDIUM', 'HIGH']) &&
+                       (!('aiAnalysis' in incoming()) || (incoming().aiAnalysis is string && incoming().aiAnalysis.size() <= 400)) &&
+                       (!('aiPrompt' in incoming()) || (incoming().aiPrompt is string && incoming().aiPrompt.size() <= 300)) &&
                        incoming().createdAtMs is int && incoming().createdAtMs > 0 &&
                        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
@@ -569,9 +680,10 @@ service cloud.firestore {
                          'createdAtMs', 'createdAt', 'updatedAt'
                        ]) &&
                        incoming().keys().hasOnly([
-                         'reportedUid', 'reportedUsername', 'reportedDisplayName',
+                         'alertType', 'reportedUid', 'reportedUsername', 'reportedDisplayName',
                          'reporterUid', 'reporterUsername', 'reporterEmail',
-                         'reason', 'status', 'adminEmail', 'createdAtMs', 'resolvedAtMs',
+                         'reason', 'appealMessage', 'aiRecommendation', 'aiRiskLevel',
+                         'aiAnalysis', 'aiPrompt', 'status', 'adminEmail', 'createdAtMs', 'resolvedAtMs',
                          'createdAt', 'updatedAt'
                        ]);
 
@@ -592,11 +704,11 @@ service cloud.firestore {
     }
 
     match /stories/{storyId} {
-      allow get, list: if isSignedIn();
+      allow get: if isValidId(storyId);
+      allow list: if isSignedIn() || (request.query.limit != null && request.query.limit <= 100);
 
-      allow create: if isSignedIn() &&
-                       isValidId(storyId) &&
-                       incoming().userId == request.auth.uid &&
+      allow create: if isValidId(storyId) &&
+                       isActorUid(incoming().userId) &&
                        incoming().keys().hasAll([
                          'userId', 'authorName', 'authorUsername', 'mediaData',
                          'caption', 'createdAtMs', 'expiresAtMs', 'createdAt'
@@ -613,51 +725,73 @@ service cloud.firestore {
                        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
                        isValidStory(incoming());
 
-      allow update: if isSignedIn() &&
-                       isValidId(storyId) &&
+      allow update: if isValidId(storyId) &&
                        isValidStory(incoming()) &&
                        incoming().diff(existing()).affectedKeys().hasOnly(['viewedByUids', 'likedByUids']) &&
                        (
-                         incoming().get('viewedByUids', []) == existing().get('viewedByUids', []) ||
-                         (
-                           (request.auth.uid in incoming().get('viewedByUids', [])) &&
-                           incoming().get('viewedByUids', []).hasAll(existing().get('viewedByUids', [])) &&
-                           incoming().get('viewedByUids', []).size() <= existing().get('viewedByUids', []).size() + 1
-                         )
-                       ) &&
-                       (
-                         incoming().get('likedByUids', []) == existing().get('likedByUids', []) ||
-                         (
-                           !(request.auth.uid in existing().get('likedByUids', [])) &&
-                           (request.auth.uid in incoming().get('likedByUids', [])) &&
-                           incoming().get('likedByUids', []).hasAll(existing().get('likedByUids', [])) &&
-                           incoming().get('likedByUids', []).size() == existing().get('likedByUids', []).size() + 1
-                         ) ||
-                         (
-                           (request.auth.uid in existing().get('likedByUids', [])) &&
-                           !(request.auth.uid in incoming().get('likedByUids', [])) &&
-                           existing().get('likedByUids', []).hasAll(incoming().get('likedByUids', [])) &&
-                           existing().get('likedByUids', []).size() == incoming().get('likedByUids', []).size() + 1
-                         )
+                         (isSignedIn() &&
+                          (
+                            incoming().get('viewedByUids', []) == existing().get('viewedByUids', []) ||
+                            (
+                              (request.auth.uid in incoming().get('viewedByUids', [])) &&
+                              incoming().get('viewedByUids', []).hasAll(existing().get('viewedByUids', [])) &&
+                              incoming().get('viewedByUids', []).size() <= existing().get('viewedByUids', []).size() + 1
+                            )
+                          ) &&
+                          (
+                            incoming().get('likedByUids', []) == existing().get('likedByUids', []) ||
+                            (
+                              !(request.auth.uid in existing().get('likedByUids', [])) &&
+                              (request.auth.uid in incoming().get('likedByUids', [])) &&
+                              incoming().get('likedByUids', []).hasAll(existing().get('likedByUids', [])) &&
+                              incoming().get('likedByUids', []).size() == existing().get('likedByUids', []).size() + 1
+                            ) ||
+                            (
+                              (request.auth.uid in existing().get('likedByUids', [])) &&
+                              !(request.auth.uid in incoming().get('likedByUids', [])) &&
+                              existing().get('likedByUids', []).hasAll(incoming().get('likedByUids', [])) &&
+                              existing().get('likedByUids', []).size() == incoming().get('likedByUids', []).size() + 1
+                            )
+                          )) ||
+                         (!isSignedIn() &&
+                          (
+                            incoming().get('viewedByUids', []) == existing().get('viewedByUids', []) ||
+                            (
+                              incoming().get('viewedByUids', []).hasAll(existing().get('viewedByUids', [])) &&
+                              incoming().get('viewedByUids', []).size() == existing().get('viewedByUids', []).size() + 1 &&
+                              isUsernameUid(incoming().get('viewedByUids', [])[existing().get('viewedByUids', []).size()]) &&
+                              !(incoming().get('viewedByUids', [])[existing().get('viewedByUids', []).size()] in existing().get('viewedByUids', []))
+                            )
+                          ) &&
+                          (
+                            incoming().get('likedByUids', []) == existing().get('likedByUids', []) ||
+                            (
+                              incoming().get('likedByUids', []).hasAll(existing().get('likedByUids', [])) &&
+                              incoming().get('likedByUids', []).size() == existing().get('likedByUids', []).size() + 1 &&
+                              isUsernameUid(incoming().get('likedByUids', [])[existing().get('likedByUids', []).size()]) &&
+                              !(incoming().get('likedByUids', [])[existing().get('likedByUids', []).size()] in existing().get('likedByUids', []))
+                            ) ||
+                            (
+                              existing().get('likedByUids', []).hasAll(incoming().get('likedByUids', [])) &&
+                              existing().get('likedByUids', []).size() == incoming().get('likedByUids', []).size() + 1
+                            )
+                          ))
                        );
 
-      allow delete: if isSignedIn() &&
-                       isValidId(storyId) &&
-                       existing().userId == request.auth.uid;
+      allow delete: if isValidId(storyId) && isActorUid(existing().userId);
 
       match /views/{viewerId} {
-        allow get: if isSignedIn() && isValidId(storyId) && isValidId(viewerId) &&
-                      (viewerId == request.auth.uid ||
-                       get(/databases/$(database)/documents/stories/$(storyId)).data.userId == request.auth.uid);
+        allow get: if isValidId(storyId) && isValidId(viewerId) &&
+                      (isActorUid(viewerId) ||
+                       isActorUid(get(/databases/$(database)/documents/stories/$(storyId)).data.userId));
 
-        allow list: if isSignedIn() && isValidId(storyId) &&
-                       get(/databases/$(database)/documents/stories/$(storyId)).data.userId == request.auth.uid;
+        allow list: if isValidId(storyId) &&
+                       isActorUid(get(/databases/$(database)/documents/stories/$(storyId)).data.userId);
 
-        allow create, update: if isSignedIn() &&
-                                 isValidId(storyId) &&
+        allow create, update: if isValidId(storyId) &&
                                  isValidId(viewerId) &&
-                                 viewerId == request.auth.uid &&
-                                 incoming().viewerUid == request.auth.uid &&
+                                 isActorUid(viewerId) &&
+                                 incoming().viewerUid == viewerId &&
                                  incoming().keys().hasAll([
                                    'viewerUid', 'viewerName', 'viewerUsername',
                                    'liked', 'reactionEmoji', 'viewedAtMs', 'updatedAt'
@@ -669,20 +803,20 @@ service cloud.firestore {
                                  incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                                  isValidStoryView(incoming());
 
-        allow delete: if isSignedIn() && isValidId(storyId) && isValidId(viewerId) &&
-                         (viewerId == request.auth.uid ||
-                          get(/databases/$(database)/documents/stories/$(storyId)).data.userId == request.auth.uid);
+        allow delete: if isValidId(storyId) && isValidId(viewerId) &&
+                         (isActorUid(viewerId) ||
+                          isActorUid(get(/databases/$(database)/documents/stories/$(storyId)).data.userId));
       }
     }
 
     match /direct_messages/{messageId} {
-      allow get: if isSignedIn() && isValidId(messageId) &&
-                    (existing().fromUid == request.auth.uid || existing().toUid == request.auth.uid);
-      allow list: if isSignedIn() && resource.data.toUid == request.auth.uid;
+      allow get: if isValidId(messageId) &&
+                    (isActorUid(existing().fromUid) || isActorUid(existing().toUid));
+      allow list: if (isSignedIn() && resource.data.toUid == request.auth.uid) ||
+                     (!isSignedIn() && isUsernameUid(resource.data.toUid));
 
-      allow create: if isSignedIn() &&
-                       isValidId(messageId) &&
-                       incoming().fromUid == request.auth.uid &&
+      allow create: if isValidId(messageId) &&
+                       isActorUid(incoming().fromUid) &&
                        incoming().toUid is string && incoming().toUid.size() >= 1 && incoming().toUid.size() <= 128 &&
                        incoming().fromUsername is string && incoming().fromUsername.size() >= 1 && incoming().fromUsername.size() <= 40 &&
                        incoming().fromDisplayName is string && incoming().fromDisplayName.size() >= 1 && incoming().fromDisplayName.size() <= 60 &&
@@ -694,6 +828,8 @@ service cloud.firestore {
                        (!('replyToText' in incoming()) || (incoming().replyToText is string && incoming().replyToText.size() <= 200)) &&
                        (!('replyToSender' in incoming()) || (incoming().replyToSender is string && incoming().replyToSender.size() <= 60)) &&
                        (!('replyToMessageId' in incoming()) || (incoming().replyToMessageId is string && incoming().replyToMessageId.size() <= 128)) &&
+                       (!('senderMessageId' in incoming()) || (incoming().senderMessageId is string && incoming().senderMessageId.size() <= 128)) &&
+                       (!('senderContactId' in incoming()) || (incoming().senderContactId is string && incoming().senderContactId.size() <= 128)) &&
                        incoming().timeLabel is string && incoming().timeLabel.size() >= 1 && incoming().timeLabel.size() <= 30 &&
                        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
                        incoming().keys().hasAll([
@@ -704,14 +840,38 @@ service cloud.firestore {
                          'fromUid', 'toUid', 'fromUsername', 'fromDisplayName',
                          'toUsername', 'text', 'messageType', 'mediaData', 'durationSec',
                          'replyToText', 'replyToSender', 'replyToMessageId',
+                         'senderMessageId', 'senderContactId',
                          'timeLabel', 'createdAt'
                        ]);
 
       allow update: if false;
 
-      allow delete: if isSignedIn() &&
-                       isValidId(messageId) &&
-                       existing().toUid == request.auth.uid;
+      allow delete: if isValidId(messageId) && isActorUid(existing().toUid);
+    }
+
+    match /message_receipts/{receiptId} {
+      allow get: if isValidId(receiptId) &&
+                    (isActorUid(existing().fromUid) || isActorUid(existing().toUid));
+      allow list: if (isSignedIn() && resource.data.toUid == request.auth.uid) ||
+                     (!isSignedIn() && isUsernameUid(resource.data.toUid));
+
+      allow create: if isValidId(receiptId) &&
+                       isActorUid(incoming().fromUid) &&
+                       incoming().toUid is string && incoming().toUid.size() >= 1 && incoming().toUid.size() <= 128 &&
+                       incoming().senderContactId is string && isValidId(incoming().senderContactId) &&
+                       incoming().senderMessageId is string && isValidId(incoming().senderMessageId) &&
+                       incoming().status in ['delivered', 'read'] &&
+                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                       incoming().keys().hasAll([
+                         'fromUid', 'toUid', 'senderContactId', 'senderMessageId', 'status', 'createdAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'fromUid', 'toUid', 'senderContactId', 'senderMessageId', 'status', 'createdAt'
+                       ]);
+
+      allow update: if false;
+
+      allow delete: if isValidId(receiptId) && isActorUid(existing().toUid);
     }
   }
 }

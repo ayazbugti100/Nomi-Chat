@@ -26,6 +26,8 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Campaign
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.WorkspacePremium
@@ -39,6 +41,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,6 +66,7 @@ import coil.compose.AsyncImage
 import coil.request.CachePolicy
 import coil.request.ImageRequest
 import com.example.data.model.MainBottomTab
+import com.example.data.model.MessageReceiptStatus
 import com.example.ui.theme.EmeraldBright
 import com.example.ui.theme.EmeraldDark
 import com.example.ui.theme.EmeraldDeep
@@ -72,6 +76,42 @@ import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.GoldCrown
 import com.example.ui.theme.LoginGreenStart
 import com.example.ui.theme.MintLight
+
+fun computeImageCacheKey(
+    prefix: String,
+    raw: String?,
+    versionTag: String? = null
+): String {
+    val trimmed = raw?.trim().orEmpty()
+    var hash = -0x340d631b7bdddcdbL // 64-bit FNV-1a offset basis (0xcbf29ce484222325UL)
+    val prime = 0x100000001b3L
+    for (i in trimmed.indices) {
+        hash = (hash xor trimmed[i].code.toLong()) * prime
+    }
+    val versionPart = versionTag?.takeIf { it.isNotBlank() }?.let { "_$it" }.orEmpty()
+    return "${prefix}_${trimmed.length}_${hash.toString(16)}$versionPart"
+}
+
+@Composable
+fun MessageReceiptIcon(
+    receiptStatus: String,
+    mutedTint: Color,
+    readTint: Color,
+    modifier: Modifier = Modifier
+) {
+    val status = MessageReceiptStatus.fromKey(receiptStatus)
+    val (icon, tint, description) = when (status) {
+        MessageReceiptStatus.SENT -> Triple(Icons.Default.Check, mutedTint, "Sent")
+        MessageReceiptStatus.DELIVERED -> Triple(Icons.Default.DoneAll, mutedTint, "Delivered")
+        MessageReceiptStatus.READ -> Triple(Icons.Default.DoneAll, readTint, "Read")
+    }
+    Icon(
+        imageVector = icon,
+        contentDescription = description,
+        tint = tint,
+        modifier = modifier
+    )
+}
 
 fun resolveImageModel(raw: String?): Any? {
     val trimmed = raw?.trim().orEmpty()
@@ -116,20 +156,26 @@ fun EmeraldWaveHeader(
     ) {
         if (bannerModel != null) {
             val bannerContext = LocalContext.current
-            val bannerRequest = remember(bannerData, bannerModel) {
+            val bannerCacheKey = remember(bannerData) {
+                computeImageCacheKey("header_banner", bannerData)
+            }
+            val bannerRequest = remember(bannerCacheKey, bannerModel) {
                 ImageRequest.Builder(bannerContext)
                     .data(bannerModel)
-                    .memoryCacheKey("header_banner_${bannerData?.length}_${bannerData?.hashCode()}")
+                    .memoryCacheKey(bannerCacheKey)
+                    .diskCacheKey(bannerCacheKey)
                     .diskCachePolicy(if (bannerModel is ByteArray) CachePolicy.DISABLED else CachePolicy.ENABLED)
                     .crossfade(false)
                     .build()
             }
-            AsyncImage(
-                model = bannerRequest,
-                contentDescription = "Profile banner background",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.matchParentSize()
-            )
+            key(bannerCacheKey) {
+                AsyncImage(
+                    model = bannerRequest,
+                    contentDescription = "Profile banner background",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.matchParentSize()
+                )
+            }
             Box(
                 modifier = Modifier
                     .matchParentSize()
@@ -259,22 +305,28 @@ fun AvatarCircle(
         ) {
             if (avatarModel != null) {
                 val avatarContext = LocalContext.current
-                val avatarRequest = remember(photoData, avatarModel) {
+                val avatarCacheKey = remember(photoData) {
+                    computeImageCacheKey("avatar", photoData)
+                }
+                val avatarRequest = remember(avatarCacheKey, avatarModel) {
                     ImageRequest.Builder(avatarContext)
                         .data(avatarModel)
-                        .memoryCacheKey("avatar_${photoData?.length}_${photoData?.hashCode()}")
+                        .memoryCacheKey(avatarCacheKey)
+                        .diskCacheKey(avatarCacheKey)
                         .diskCachePolicy(if (avatarModel is ByteArray) CachePolicy.DISABLED else CachePolicy.ENABLED)
                         .crossfade(false)
                         .build()
                 }
-                AsyncImage(
-                    model = avatarRequest,
-                    contentDescription = "$name avatar",
-                    contentScale = imageContentScale,
-                    modifier = Modifier
-                        .size(innerSize)
-                        .clip(CircleShape)
-                )
+                key(avatarCacheKey) {
+                    AsyncImage(
+                        model = avatarRequest,
+                        contentDescription = "$name avatar",
+                        contentScale = imageContentScale,
+                        modifier = Modifier
+                            .size(innerSize)
+                            .clip(CircleShape)
+                    )
+                }
             } else if (isChannel) {
                 Icon(
                     imageVector = Icons.Default.Campaign,

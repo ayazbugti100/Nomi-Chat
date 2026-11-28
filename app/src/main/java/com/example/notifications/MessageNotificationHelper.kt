@@ -114,7 +114,10 @@ object MessageNotificationHelper {
         alertId: String,
         reportedHandle: String,
         reporterHandle: String,
-        reason: String
+        reason: String,
+        alertType: String = "report",
+        aiRecommendation: String = "",
+        aiPrompt: String = ""
     ) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val granted = ContextCompat.checkSelfPermission(
@@ -142,12 +145,24 @@ object MessageNotificationHelper {
 
         val cleanReported = reportedHandle.trim().removePrefix("@").ifBlank { "user" }
         val cleanReporter = reporterHandle.trim().removePrefix("@").ifBlank { "member" }
-        val body = "Reason: $reason • Reported by @$cleanReporter. Tap to Ignore, Ban, or Recovery."
+        val isAppeal = alertType == "appeal"
+        val title = if (isAppeal) {
+            "Ban Appeal (AI Review): @$cleanReported"
+        } else {
+            "Admin Moderation Alert: @$cleanReported"
+        }
+        val body = if (isAppeal) {
+            val aiLabel = if (aiRecommendation == "RESTORE") "AI suggests Restore" else "AI suggests Keep Banned"
+            val promptPart = aiPrompt.ifBlank { "Restore/unban @$cleanReported or keep banned?" }
+            "$aiLabel • $promptPart"
+        } else {
+            "Reason: $reason • Reported by @$cleanReporter. Tap to Ignore, Ban, or Recovery."
+        }
         val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
 
         val notification = NotificationCompat.Builder(context, ADMIN_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification_chat)
-            .setContentTitle("Admin Moderation Alert: @$cleanReported")
+            .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setPriority(NotificationCompat.PRIORITY_HIGH)

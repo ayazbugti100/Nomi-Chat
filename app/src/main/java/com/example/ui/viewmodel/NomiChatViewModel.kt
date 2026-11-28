@@ -18,6 +18,9 @@ import android.util.Base64
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import coil.annotation.ExperimentalCoilApi
+import coil.imageLoader
+import com.example.data.ai.BanAppealAiEvaluation
 import com.example.data.ai.SmartReplyRepository
 import com.example.data.model.ADMIN_GMAIL
 import com.example.data.model.AdminUserRecord
@@ -26,6 +29,7 @@ import com.example.data.model.ChatPillFilter
 import com.example.data.model.ChatThread
 import com.example.data.model.DirectoryLookupResult
 import com.example.data.model.IncomingMessageAlert
+import com.example.data.model.MessageReceiptStatus
 import com.example.data.model.ModerationAlert
 import com.example.data.model.ProfileVisibilityMode
 import com.example.data.model.StoryFontStyle
@@ -181,6 +185,15 @@ class NomiChatViewModel(
     private val _isAdminActionLoading = MutableStateFlow(false)
     val isAdminActionLoading: StateFlow<Boolean> = _isAdminActionLoading.asStateFlow()
 
+    private val _isSubmittingBanAppeal = MutableStateFlow(false)
+    val isSubmittingBanAppeal: StateFlow<Boolean> = _isSubmittingBanAppeal.asStateFlow()
+
+    private val _submittedBanAppealResult = MutableStateFlow<BanAppealAiEvaluation?>(null)
+    val submittedBanAppealResult: StateFlow<BanAppealAiEvaluation?> = _submittedBanAppealResult.asStateFlow()
+
+    private val _banAppealError = MutableStateFlow<String?>(null)
+    val banAppealError: StateFlow<String?> = _banAppealError.asStateFlow()
+
     private val seenAdminAlertIds = mutableSetOf<String>()
 
     private val _searchQuery = MutableStateFlow("")
@@ -254,6 +267,8 @@ class NomiChatViewModel(
     private val storyNowTickMs = MutableStateFlow(System.currentTimeMillis())
 
     private var lastSuggestedMessageId: String? = null
+    private var lastMarkedReadSignature: String? = null
+    private var hasSyncedCloudSettings = false
 
     val preferences: StateFlow<UserAppPreferences> = preferencesRepository.preferencesFlow
         .stateIn(
@@ -269,6 +284,24 @@ class NomiChatViewModel(
                 _popupMessage.value = "Your ID is banned"
             } else if (profile != null) {
                 _isBannedAccount.value = false
+                if (!hasSyncedCloudSettings &&
+                    (profile.themeMode.isNotBlank() ||
+                        profile.notificationsEnabled != null ||
+                        profile.smartAiEnabled != null ||
+                        profile.appLockPinHash.isNotBlank())
+                ) {
+                    hasSyncedCloudSettings = true
+                    viewModelScope.launch {
+                        val current = preferencesRepository.preferencesFlow.first()
+                        val resolvedTheme = ThemeMode.entries.firstOrNull { it.name == profile.themeMode } ?: current.themeMode
+                        preferencesRepository.applyAccountSettings(
+                            themeMode = resolvedTheme,
+                            notificationsEnabled = profile.notificationsEnabled ?: current.notificationsEnabled,
+                            smartAiEnabled = profile.smartAiEnabled ?: current.smartAiEnabled,
+                            appLockPinHash = profile.appLockPinHash.ifBlank { current.appLockPinHash }
+                        )
+                    }
+                }
             }
             UiState.Success(profile)
         }
@@ -455,7 +488,7 @@ class NomiChatViewModel(
                 story.copy(
                     authorName = myProfile.displayName.ifBlank { story.authorName },
                     authorUsername = myProfile.username.ifBlank { story.authorUsername },
-                    authorPhotoData = myProfile.photoData ?: story.authorPhotoData
+                    authorPhotoData = myProfile.photoData?.takeIf { it.isNotBlank() } ?: story.authorPhotoData
                 )
             } else {
                 val matchingContact = contacts.firstOrNull { c ->
@@ -465,7 +498,7 @@ class NomiChatViewModel(
                 if (matchingContact != null) {
                     story.copy(
                         authorName = matchingContact.name.ifBlank { story.authorName },
-                        authorPhotoData = matchingContact.photoData ?: story.authorPhotoData
+                        authorPhotoData = matchingContact.photoData?.takeIf { it.isNotBlank() } ?: story.authorPhotoData
                     )
                 } else {
                     story
@@ -496,12 +529,37 @@ class NomiChatViewModel(
     init {
         ensureInitialSetup()
         observeAutoSmartSuggestions()
+        observeActiveThreadReadReceipts()
         startIncomingSyncLoop()
         observeIncomingMessageAlerts()
         observeAdminLockAndAlerts()
         observeActiveBannedGuard()
         observeNetworkRecovery()
         startStoryExpiryLoop()
+    }
+
+    private fun observeActiveThreadReadReceipts() {
+        viewModelScope.launch {
+            combine(activeContact, activeMessagesState) { contact, msgState ->
+                contact to msgState
+            }.collect { (contact, msgState) ->
+                if (contact == null || contact.isBanned) {
+                    lastMarkedReadSignature = null
+                    return@collect
+                }
+                val messages = (msgState as? UiState.Success)?.data.orEmpty()
+                val unreadIncomingCount = messages.count {
+                    it.sender == "them" && it.receiptStatus != MessageReceiptStatus.READ.key
+                }
+                if (contact.unreadCount > 0L || unreadIncomingCount > 0) {
+                    val signature = "${contact.id}:${contact.unreadCount}:$unreadIncomingCount"
+                    if (lastMarkedReadSignature != signature) {
+                        lastMarkedReadSignature = signature
+                        repository.markThreadRead(currentUserId, contact.id)
+                    }
+                }
+            }
+        }
     }
 
     private fun observeActiveBannedGuard() {
@@ -772,11 +830,13 @@ class NomiChatViewModel(
             _popupMessage.value = "Chat is locked. Tap 'Unlock chat' to open."
             return
         }
+        lastMarkedReadSignature = null
         _activeContactId.value = contactId
         _quickSuggestions.value = emptyList()
         lastSuggestedMessageId = null
         viewModelScope.launch {
-            repository.markThreadRead(currentUserId, contactId)
+            launch { repository.markThreadRead(currentUserId, contactId) }
+            launch { repository.refreshPeerProfile(currentUserId, contactId) }
         }
     }
 
@@ -1260,6 +1320,66 @@ class NomiChatViewModel(
         }
     }
 
+    fun clearBanAppealFeedback() {
+        _banAppealError.value = null
+    }
+
+    fun submitBanAppeal(appealText: String) {
+        val cleanAppeal = appealText.trim().take(500)
+        if (cleanAppeal.isBlank()) {
+            _banAppealError.value = "Please explain why your account should be restored."
+            return
+        }
+        if (isTransportCurrentlyOffline()) {
+            _banAppealError.value = NetworkConnectivityObserver.NO_INTERNET_POPUP_MESSAGE
+            return
+        }
+        val profile = (profileState.value as? UiState.Success)?.data
+        val prefs = preferences.value
+        val resolvedHandle = profile?.username?.takeIf { it.isNotBlank() }
+            ?: prefs.preferredUsername.takeIf { it.isNotBlank() }
+            ?: currentUserId.take(40)
+        val resolvedDisplayName = profile?.displayName?.takeIf { it.isNotBlank() }
+            ?: prefs.preferredDisplayName.takeIf { it.isNotBlank() }
+            ?: resolvedHandle
+        val reportCount = profile?.reportCount ?: 0L
+
+        viewModelScope.launch {
+            _isSubmittingBanAppeal.value = true
+            _banAppealError.value = null
+            try {
+                val aiResult = smartReplyRepository.evaluateBanAppeal(
+                    username = resolvedHandle,
+                    displayName = resolvedDisplayName,
+                    banReason = if (reportCount > 0L) "Reported ($reportCount reports)" else "Account moderation ban",
+                    reportCount = reportCount,
+                    appealText = cleanAppeal
+                )
+                val evaluation = aiResult.getOrElse { err ->
+                    _banAppealError.value = err.localizedMessage ?: "Unable to evaluate appeal with AI right now. Please try again."
+                    return@launch
+                }
+                repository.submitBanAppeal(
+                    userId = currentUserId,
+                    username = resolvedHandle,
+                    displayName = resolvedDisplayName,
+                    appealMessage = cleanAppeal,
+                    aiRecommendation = evaluation.recommendation,
+                    aiRiskLevel = evaluation.riskLevel,
+                    aiAnalysis = evaluation.summary,
+                    aiPrompt = evaluation.adminPrompt
+                ).onSuccess {
+                    _submittedBanAppealResult.value = evaluation
+                    _popupMessage.value = "Appeal reviewed by AI and sent to moderation team."
+                }.onFailure { err ->
+                    _banAppealError.value = err.localizedMessage ?: "Unable to send appeal right now."
+                }
+            } finally {
+                _isSubmittingBanAppeal.value = false
+            }
+        }
+    }
+
     fun adminVerifyUser(user: AdminUserRecord, verified: Boolean) {
         if (!isAdminSession.value) return
         viewModelScope.launch {
@@ -1508,8 +1628,8 @@ class NomiChatViewModel(
                     bio = bio,
                     dob = dob
                 ).onSuccess { movedToUsername ->
-                    if (!movedToUsername.isNullOrBlank() && movedToUsername != currentUserId) {
-                        preferencesRepository.saveActiveUsername(movedToUsername)
+                    if (!movedToUsername.isNullOrBlank()) {
+                        preferencesRepository.saveActiveSession(currentUserId, movedToUsername)
                     }
                     _profileSaveError.value = null
                     _snackbarMessage.value = "Profile updated"
@@ -1522,6 +1642,15 @@ class NomiChatViewModel(
             } finally {
                 _isSavingProfile.value = false
             }
+        }
+    }
+
+    @OptIn(ExperimentalCoilApi::class)
+    private fun clearCoilImageCaches(context: Context) {
+        runCatching {
+            val loader = context.imageLoader
+            loader.memoryCache?.clear()
+            loader.diskCache?.clear()
         }
     }
 
@@ -1541,6 +1670,7 @@ class NomiChatViewModel(
                     userId = currentUserId,
                     photoData = encoded
                 ).onSuccess {
+                    clearCoilImageCaches(context)
                     _snackbarMessage.value = "Profile photo updated"
                 }.onFailure { err ->
                     _snackbarMessage.value = err.localizedMessage ?: "Failed to upload photo."
@@ -1567,6 +1697,7 @@ class NomiChatViewModel(
                     userId = currentUserId,
                     bannerData = encoded
                 ).onSuccess {
+                    clearCoilImageCaches(context)
                     _popupMessage.value = "Profile banner updated"
                 }.onFailure { err ->
                     _snackbarMessage.value = err.localizedMessage ?: "Failed to upload banner."
@@ -1763,12 +1894,41 @@ class NomiChatViewModel(
     }
 
     fun observeStoryViews(storyId: String): Flow<List<StoryViewRecord>> {
-        return repository.observeStoryViews(currentUserId, storyId)
-            .catch { error ->
-                if (error is CancellationException) throw error
-                Log.w(TAG, "Error observing story views", error)
-                emit(emptyList())
+        return combine(
+            repository.observeStoryViews(currentUserId, storyId)
+                .catch { error ->
+                    if (error is CancellationException) throw error
+                    Log.w(TAG, "Error observing story views", error)
+                    emit(emptyList())
+                },
+            allContactsState,
+            profileState
+        ) { views, contactsState, profState ->
+            val contacts = (contactsState as? UiState.Success)?.data.orEmpty()
+            val myProfile = (profState as? UiState.Success)?.data
+            views.map { record ->
+                if (record.viewerUid == currentUserId && myProfile != null) {
+                    record.copy(
+                        viewerName = myProfile.displayName.ifBlank { record.viewerName },
+                        viewerUsername = myProfile.username.ifBlank { record.viewerUsername },
+                        viewerPhotoData = myProfile.photoData?.takeIf { it.isNotBlank() } ?: record.viewerPhotoData
+                    )
+                } else {
+                    val match = contacts.firstOrNull { c ->
+                        (record.viewerUid.isNotBlank() && c.peerUid == record.viewerUid) ||
+                            (record.viewerUsername.isNotBlank() && c.username.equals(record.viewerUsername, ignoreCase = true))
+                    }
+                    if (match != null) {
+                        record.copy(
+                            viewerName = match.name.ifBlank { record.viewerName },
+                            viewerPhotoData = match.photoData?.takeIf { it.isNotBlank() } ?: record.viewerPhotoData
+                        )
+                    } else {
+                        record
+                    }
+                }
             }
+        }
     }
 
     fun recordStoryView(story: StoryItem) {

@@ -25,6 +25,7 @@ data class UserAppPreferences(
     val authFlowMode: AuthFlowMode = AuthFlowMode.GOOGLE_QUICK,
     val returningIdentifier: String = "",
     val activeUsername: String = "",
+    val activeUserId: String = "",
     val appLockPinHash: String = ""
 ) {
     val isAppLockEnabled: Boolean get() = appLockPinHash.isNotBlank()
@@ -43,6 +44,7 @@ class UserPreferencesRepository(private val context: Context) {
         val AUTH_FLOW_MODE = stringPreferencesKey("auth_flow_mode")
         val RETURNING_IDENTIFIER = stringPreferencesKey("returning_identifier")
         val ACTIVE_USERNAME = stringPreferencesKey("active_username")
+        val ACTIVE_USER_ID = stringPreferencesKey("active_user_id")
         val APP_LOCK_PIN_HASH = stringPreferencesKey("app_lock_pin_hash")
     }
 
@@ -61,6 +63,7 @@ class UserPreferencesRepository(private val context: Context) {
             authFlowMode = authMode,
             returningIdentifier = prefs[Keys.RETURNING_IDENTIFIER] ?: "",
             activeUsername = prefs[Keys.ACTIVE_USERNAME] ?: "",
+            activeUserId = prefs[Keys.ACTIVE_USER_ID] ?: "",
             appLockPinHash = prefs[Keys.APP_LOCK_PIN_HASH] ?: ""
         )
     }
@@ -95,6 +98,13 @@ class UserPreferencesRepository(private val context: Context) {
 
     suspend fun saveActiveUsername(username: String) {
         dataStore.edit { prefs ->
+            prefs[Keys.ACTIVE_USERNAME] = username.trim().lowercase()
+        }
+    }
+
+    suspend fun saveActiveSession(userId: String, username: String) {
+        dataStore.edit { prefs ->
+            prefs[Keys.ACTIVE_USER_ID] = userId.trim()
             prefs[Keys.ACTIVE_USERNAME] = username.trim().lowercase()
         }
     }

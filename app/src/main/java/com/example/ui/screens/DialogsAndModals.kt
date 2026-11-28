@@ -32,8 +32,10 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.DonutLarge
+import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Shield
@@ -80,8 +82,17 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.runtime.key
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import coil.compose.AsyncImage
+import coil.request.CachePolicy
+import coil.request.ImageRequest
+import com.example.ui.components.computeImageCacheKey
+import com.example.ui.components.resolveImageModel
 import com.example.R
 import com.example.data.model.ChatThread
 import com.example.data.model.ThemeMode
@@ -1162,6 +1173,11 @@ fun AvatarPreviewDialog(
         else -> "Offline"
     }
 
+    var showPhotoLightbox by remember { mutableStateOf(false) }
+    val photoToDisplay = thread.photoData?.takeIf { it.isNotBlank() }
+        ?: thread.bannerData?.takeIf { it.isNotBlank() }
+    val imageModel = remember(photoToDisplay) { resolveImageModel(photoToDisplay) }
+
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             modifier = Modifier
@@ -1214,33 +1230,88 @@ fun AvatarPreviewDialog(
                     }
                 }
 
-                // Spacious circular profile showcase displaying the full photo cleanly with live banner backdrop
-                EmeraldWaveHeader(
-                    bannerData = thread.bannerData,
+                // Single clean rectangular photo card without front circle overlay; tap to expand full-screen
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(236.dp)
+                        .height(260.dp)
+                        .background(Color(0xFF0A241A))
+                        .testTag("avatar_preview_rectangle")
+                        .clickable {
+                            if (!photoToDisplay.isNullOrBlank()) {
+                                showPhotoLightbox = true
+                            }
+                        },
+                    contentAlignment = Alignment.Center
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(18.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        AvatarCircle(
-                            name = thread.name,
-                            photoData = thread.photoData,
-                            isGroup = isGroup,
-                            isChannel = isChannel,
-                            showOnlineDot = isOnline,
-                            hasStoryRing = hasActiveStory,
-                            storyRingSeen = storyRingSeen,
-                            size = 188.dp,
-                            borderColor = Color.White.copy(alpha = 0.85f),
-                            imageContentScale = ContentScale.Fit,
-                            imageBackgroundColor = Color(0xFF0A241A),
-                            modifier = Modifier.testTag("avatar_preview_circle")
-                        )
+                    if (imageModel != null) {
+                        val avatarContext = LocalContext.current
+                        val cacheKey = remember(photoToDisplay) {
+                            computeImageCacheKey("avatar_rect", photoToDisplay)
+                        }
+                        val imageRequest = remember(cacheKey, imageModel) {
+                            ImageRequest.Builder(avatarContext)
+                                .data(imageModel)
+                                .memoryCacheKey(cacheKey)
+                                .diskCacheKey(cacheKey)
+                                .diskCachePolicy(if (imageModel is ByteArray) CachePolicy.DISABLED else CachePolicy.ENABLED)
+                                .crossfade(false)
+                                .build()
+                        }
+                        key(cacheKey) {
+                            AsyncImage(
+                                model = imageRequest,
+                                contentDescription = "${thread.name} photo",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                        Surface(
+                            shape = CircleShape,
+                            color = Color.Black.copy(alpha = 0.55f),
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(10.dp)
+                                .size(34.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Fullscreen,
+                                contentDescription = "Expand photo full screen",
+                                tint = Color.White,
+                                modifier = Modifier
+                                    .padding(6.dp)
+                                    .size(22.dp)
+                            )
+                        }
+                    } else {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                            modifier = Modifier.padding(16.dp)
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(16.dp),
+                                color = EmeraldMid.copy(alpha = 0.35f),
+                                border = BorderStroke(1.5.dp, MintOnlineGlow.copy(alpha = 0.6f)),
+                                modifier = Modifier.size(80.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(
+                                        text = thread.name.trim().take(1).uppercase(),
+                                        style = MaterialTheme.typography.headlineLarge,
+                                        color = Color.White,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Text(
+                                text = thread.name,
+                                style = MaterialTheme.typography.titleMedium,
+                                color = Color.White,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                     }
                 }
 
@@ -1299,6 +1370,86 @@ fun AvatarPreviewDialog(
                         )
                     }
                 }
+            }
+        }
+    }
+
+    if (showPhotoLightbox && !photoToDisplay.isNullOrBlank()) {
+        Dialog(
+            onDismissRequest = { showPhotoLightbox = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.96f))
+                    .testTag("full_screen_photo_lightbox")
+                    .clickable { showPhotoLightbox = false }
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                        .align(Alignment.TopCenter),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = thread.name,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        if (thread.username.isNotBlank()) {
+                            Text(
+                                text = "@${thread.username}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MintOnlineGlow,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                    IconButton(
+                        onClick = { showPhotoLightbox = false },
+                        modifier = Modifier.testTag("close_photo_lightbox")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close full screen photo",
+                            tint = Color.White,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
+                }
+
+                val avatarContext = LocalContext.current
+                val fullCacheKey = remember(photoToDisplay) {
+                    computeImageCacheKey("full_lightbox", photoToDisplay)
+                }
+                val fullRequest = remember(fullCacheKey, imageModel) {
+                    ImageRequest.Builder(avatarContext)
+                        .data(imageModel)
+                        .memoryCacheKey(fullCacheKey)
+                        .diskCacheKey(fullCacheKey)
+                        .diskCachePolicy(if (imageModel is ByteArray) CachePolicy.DISABLED else CachePolicy.ENABLED)
+                        .crossfade(false)
+                        .build()
+                }
+
+                AsyncImage(
+                    model = fullRequest,
+                    contentDescription = "${thread.name} full photo",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 8.dp, vertical = 68.dp)
+                        .align(Alignment.Center)
+                )
             }
         }
     }

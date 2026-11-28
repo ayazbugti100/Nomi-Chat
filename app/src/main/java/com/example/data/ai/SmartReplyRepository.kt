@@ -13,6 +13,13 @@ import org.json.JSONObject
 
 private const val TAG = "SmartReplyRepo"
 
+data class BanAppealAiEvaluation(
+    val recommendation: String,
+    val riskLevel: String,
+    val summary: String,
+    val adminPrompt: String
+)
+
 class SmartReplyRepository {
 
     private val chatModel by lazy {
@@ -36,6 +43,37 @@ class SmartReplyRepository {
             generationConfig = generationConfig {
                 responseMimeType = "application/json"
                 responseSchema = suggestionsSchema
+            }
+        )
+    }
+
+    private val appealEvaluationSchema by lazy {
+        Schema.obj(
+            properties = mapOf(
+                "recommendation" to Schema.enumeration(
+                    values = listOf("RESTORE", "KEEP_BANNED"),
+                    description = "Recommended moderation decision after reading the appeal"
+                ),
+                "riskLevel" to Schema.enumeration(
+                    values = listOf("LOW", "MEDIUM", "HIGH"),
+                    description = "Abuse/safety risk level if this account is unbanned"
+                ),
+                "summary" to Schema.string(
+                    description = "Concise 1-2 sentence objective evaluation of the user's appeal."
+                ),
+                "adminPrompt" to Schema.string(
+                    description = "Direct moderation alert question asking the admin whether to restore/unban the account or keep it banned."
+                )
+            )
+        )
+    }
+
+    private val appealEvaluationModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = "gemini-3.8-flash",
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = appealEvaluationSchema
             }
         )
     }
@@ -131,6 +169,73 @@ class SmartReplyRepository {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Failed to generate quick suggestions", e)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun evaluateBanAppeal(
+        username: String,
+        displayName: String,
+        banReason: String,
+        reportCount: Long,
+        appealText: String
+    ): Result<BanAppealAiEvaluation> {
+        val cleanAppeal = appealText.trim().take(500)
+        if (cleanAppeal.isBlank()) {
+            return Result.failure(IllegalArgumentException("Please write your appeal reason before submitting."))
+        }
+        return try {
+            val cleanHandle = username.trim().removePrefix("@").ifBlank { "user" }.take(40)
+            val cleanName = displayName.trim().ifBlank { cleanHandle }.take(60)
+            val cleanReason = banReason.trim().ifBlank { "Account moderation ban" }.take(120)
+
+            val prompt = buildString {
+                appendLine("You are the real-time Trust & Safety AI Appeal Reader for Nomi Chat.")
+                appendLine("A banned user is submitting an account recovery appeal. Analyze their statement carefully for sincerity, accountability, abuse/spam indicators, or policy threats.")
+                appendLine("Account: $cleanName (@$cleanHandle)")
+                appendLine("Ban context: $cleanReason (prior reports: $reportCount)")
+                appendLine("User appeal message: \"$cleanAppeal\"")
+                appendLine("Return JSON with:")
+                appendLine("- recommendation: RESTORE or KEEP_BANNED")
+                appendLine("- riskLevel: LOW, MEDIUM, or HIGH")
+                appendLine("- summary: concise 1-2 sentence assessment for the admin")
+                appendLine("- adminPrompt: direct question asking the admin whether to restore/unban @$cleanHandle or keep the account banned.")
+            }
+
+            val response = withTimeout(60_000L) {
+                appealEvaluationModel.generateContent(prompt)
+            }
+            val jsonText = response.text ?: return Result.failure(IllegalStateException("AI appeal evaluation returned empty response."))
+            val json = JSONObject(jsonText)
+            val rawRecommendation = json.optString("recommendation", "KEEP_BANNED").trim().uppercase()
+            val recommendation = if (rawRecommendation == "RESTORE") "RESTORE" else "KEEP_BANNED"
+            val rawRisk = json.optString("riskLevel", "MEDIUM").trim().uppercase()
+            val riskLevel = when (rawRisk) {
+                "LOW", "MEDIUM", "HIGH" -> rawRisk
+                else -> "MEDIUM"
+            }
+            val summary = json.optString("summary", "").trim()
+                .ifBlank { "AI reviewed @$cleanHandle's appeal ($riskLevel risk)." }
+                .take(350)
+            val adminPrompt = json.optString("adminPrompt", "").trim()
+                .ifBlank { "Would you like to restore/unban @$cleanHandle or keep this account banned?" }
+                .take(250)
+
+            Result.success(
+                BanAppealAiEvaluation(
+                    recommendation = recommendation,
+                    riskLevel = riskLevel,
+                    summary = summary,
+                    adminPrompt = adminPrompt
+                )
+            )
+        } catch (e: TimeoutCancellationException) {
+            Log.e(TAG, "Appeal evaluation timed out", e)
+            Result.failure(IllegalStateException("AI appeal review timed out. Please try again."))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "AI appeal evaluation failed", e)
             Result.failure(e)
         }
     }

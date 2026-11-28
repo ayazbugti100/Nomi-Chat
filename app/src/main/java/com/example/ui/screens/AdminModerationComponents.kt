@@ -147,20 +147,37 @@ fun AdminModerationScreen(
     var searchQuery by remember { mutableStateOf("") }
     var userActionTargetUid by remember { mutableStateOf<String?>(null) }
 
-    val usersByUid = remember(users) {
-        users.filter { it.uid.isNotBlank() }.associateBy { it.uid }
-    }
-    val usersByUsername = remember(users) {
-        users.filter { it.username.isNotBlank() }.associateBy { it.username.lowercase() }
+    val nonAdminUsers = remember(users) {
+        users.filter { user ->
+            val email = user.email.trim().lowercase()
+            val handle = user.username.trim().lowercase()
+            email != ADMIN_GMAIL.lowercase() && handle != "ayaz_bugti"
+        }
     }
 
-    val pendingAlerts = remember(alerts) { alerts.filter { it.status == "pending" } }
+    val usersByUid = remember(nonAdminUsers) {
+        nonAdminUsers.filter { it.uid.isNotBlank() }.associateBy { it.uid }
+    }
+    val usersByUsername = remember(nonAdminUsers) {
+        nonAdminUsers.filter { it.username.isNotBlank() }.associateBy { it.username.lowercase() }
+    }
 
-    val bannedEntries = remember(users, alerts, usersByUid, usersByUsername) {
+    val pendingAlerts = remember(alerts, usersByUid) {
+        alerts.filter { alert ->
+            if (alert.status != "pending") return@filter false
+            if (alert.reporterEmail.equals(ADMIN_GMAIL, ignoreCase = true) || alert.reporterUsername.equals("ayaz_bugti", ignoreCase = true)) return@filter false
+            val reportedUser = usersByUid[alert.reportedUid] ?: usersByUsername[alert.reportedUsername.lowercase()]
+            val reportedEmail = reportedUser?.email?.lowercase().orEmpty()
+            val reportedHandle = alert.reportedUsername.lowercase()
+            reportedEmail != ADMIN_GMAIL.lowercase() && reportedHandle != "ayaz_bugti"
+        }
+    }
+
+    val bannedEntries = remember(nonAdminUsers, alerts, usersByUid, usersByUsername) {
         val alertByUid = alerts.filter { it.reportedUid.isNotBlank() }.groupBy { it.reportedUid }
         val alertByHandle = alerts.filter { it.reportedUsername.isNotBlank() }.groupBy { it.reportedUsername.lowercase() }
 
-        val fromUsers = users.filter { it.isBanned }.map { user ->
+        val fromUsers = nonAdminUsers.filter { it.isBanned }.map { user ->
             val matchingAlert = alertByUid[user.uid]?.firstOrNull { it.status == "banned" }
                 ?: alertByHandle[user.username.lowercase()]?.firstOrNull { it.status == "banned" }
                 ?: alertByUid[user.uid]?.firstOrNull()
@@ -184,7 +201,13 @@ fun AdminModerationScreen(
         val representedHandles = fromUsers.mapNotNull { it.username.lowercase().takeIf(String::isNotBlank) }.toSet()
 
         val fromAlertsOnly = alerts
-            .filter { it.status == "banned" }
+            .filter { alert ->
+                if (alert.status != "banned") return@filter false
+                if (alert.reportedUsername.equals("ayaz_bugti", ignoreCase = true)) return@filter false
+                val resolvedUser = usersByUid[alert.reportedUid] ?: usersByUsername[alert.reportedUsername.lowercase()]
+                if (resolvedUser != null && resolvedUser.email.equals(ADMIN_GMAIL, ignoreCase = true)) return@filter false
+                true
+            }
             .filter { alert ->
                 val uidTaken = alert.reportedUid.isNotBlank() && alert.reportedUid in representedUids
                 val handleTaken = alert.reportedUsername.isNotBlank() && alert.reportedUsername.lowercase() in representedHandles
@@ -236,18 +259,24 @@ fun AdminModerationScreen(
                 it.reason.contains(query, ignoreCase = true)
         }
     }
-    val filteredUsers = remember(users, query) {
-        if (query.isBlank()) users
-        else users.filter {
+    val filteredUsers = remember(nonAdminUsers, query) {
+        if (query.isBlank()) nonAdminUsers
+        else nonAdminUsers.filter {
             it.username.contains(query, ignoreCase = true) ||
                 it.displayName.contains(query, ignoreCase = true) ||
                 it.email.contains(query, ignoreCase = true) ||
                 it.uid.contains(query, ignoreCase = true)
         }
     }
-    val filteredAllAlerts = remember(alerts, query) {
-        if (query.isBlank()) alerts
-        else alerts.filter {
+    val filteredAllAlerts = remember(alerts, query, usersByUid) {
+        val nonAdminAlerts = alerts.filter { alert ->
+            if (alert.reportedUsername.equals("ayaz_bugti", ignoreCase = true)) return@filter false
+            val resolvedUser = usersByUid[alert.reportedUid] ?: usersByUsername[alert.reportedUsername.lowercase()]
+            if (resolvedUser != null && resolvedUser.email.equals(ADMIN_GMAIL, ignoreCase = true)) return@filter false
+            true
+        }
+        if (query.isBlank()) nonAdminAlerts
+        else nonAdminAlerts.filter {
             it.reportedDisplayName.contains(query, ignoreCase = true) ||
                 it.reportedUsername.contains(query, ignoreCase = true) ||
                 it.reportedUid.contains(query, ignoreCase = true) ||
@@ -1118,15 +1147,18 @@ private fun ModerationAlertCard(
             "Just now"
         }
     }
+    val isAppeal = alert.alertType == "appeal" || alert.appealMessage.isNotBlank()
     val effectiveStatus = when {
+        isAppeal && alert.status == "pending" -> "pending"
         matchedUser?.isBanned == true -> "banned"
         alert.status == "banned" && matchedUser != null && !matchedUser.isBanned -> "recovered"
         else -> alert.status
     }
-    val (statusLabel, statusBg, statusFg) = when (effectiveStatus) {
-        "banned" -> Triple("BANNED", Color(0xFFFFEBEE), ErrorRed)
-        "recovered" -> Triple("RECOVERED", MintLight, EmeraldDark)
-        "ignored" -> Triple("IGNORED", Color(0xFFECEFF1), Color(0xFF455A64))
+    val (statusLabel, statusBg, statusFg) = when {
+        isAppeal && effectiveStatus == "pending" -> Triple("APPEAL PENDING", Color(0xFFE8F5E9), EmeraldDark)
+        effectiveStatus == "banned" -> Triple("BANNED", Color(0xFFFFEBEE), ErrorRed)
+        effectiveStatus == "recovered" -> Triple("RECOVERED", MintLight, EmeraldDark)
+        effectiveStatus == "ignored" -> Triple("IGNORED", Color(0xFFECEFF1), Color(0xFF455A64))
         else -> Triple("PENDING", Color(0xFFFFF8E1), Color(0xFFB45309))
     }
     val displayName = matchedUser?.displayName?.takeIf { it.isNotBlank() }
@@ -1141,8 +1173,11 @@ private fun ModerationAlertCard(
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
         border = BorderStroke(
             1.dp,
-            if (effectiveStatus == "banned") ErrorRed.copy(alpha = 0.4f)
-            else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+            when {
+                isAppeal && effectiveStatus == "pending" -> EmeraldDark.copy(alpha = 0.45f)
+                effectiveStatus == "banned" -> ErrorRed.copy(alpha = 0.4f)
+                else -> MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+            }
         )
     ) {
         Column(
@@ -1224,13 +1259,13 @@ private fun ModerationAlertCard(
             ) {
                 Surface(
                     shape = RoundedCornerShape(8.dp),
-                    color = ErrorRed.copy(alpha = 0.10f)
+                    color = if (isAppeal) EmeraldDark.copy(alpha = 0.12f) else ErrorRed.copy(alpha = 0.10f)
                 ) {
                     Text(
-                        text = "Reason: ${alert.reason.ifBlank { "Other" }}",
+                        text = if (isAppeal) "Ban Appeal • AI Evaluated" else "Reason: ${alert.reason.ifBlank { "Other" }}",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.SemiBold,
-                        color = ErrorRed,
+                        color = if (isAppeal) EmeraldDark else ErrorRed,
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                     )
                 }
@@ -1242,11 +1277,92 @@ private fun ModerationAlertCard(
                 )
             }
 
-            Text(
-                text = "Reported by @${alert.reporterUsername.ifBlank { "user" }}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            if (isAppeal) {
+                if (alert.appealMessage.isNotBlank()) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = "User Appeal Message",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = alert.appealMessage,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                }
+
+                if (alert.aiPrompt.isNotBlank() || alert.aiAnalysis.isNotBlank() || alert.aiRecommendation.isNotBlank()) {
+                    val recommendRestore = alert.aiRecommendation == "RESTORE"
+                    val aiAccent = if (recommendRestore) EmeraldDark else ErrorRed
+                    val aiBg = if (recommendRestore) MintLight.copy(alpha = 0.65f) else Color(0xFFFFEBEE).copy(alpha = 0.75f)
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = aiBg,
+                        border = BorderStroke(1.dp, aiAccent.copy(alpha = 0.35f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = if (recommendRestore) "AI Recommendation: Restore" else "AI Recommendation: Keep Banned",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = aiAccent
+                                )
+                                if (alert.aiRiskLevel.isNotBlank()) {
+                                    Text(
+                                        text = "${alert.aiRiskLevel} RISK",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = aiAccent
+                                    )
+                                }
+                            }
+                            if (alert.aiAnalysis.isNotBlank()) {
+                                Text(
+                                    text = alert.aiAnalysis,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            if (alert.aiPrompt.isNotBlank()) {
+                                Text(
+                                    text = alert.aiPrompt,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = aiAccent
+                                )
+                            }
+                        }
+                    }
+                }
+            } else {
+                Text(
+                    text = "Reported by @${alert.reporterUsername.ifBlank { "user" }}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1286,7 +1402,11 @@ private fun ModerationAlertCard(
                         modifier = Modifier.size(15.dp)
                     )
                     Spacer(modifier = Modifier.size(4.dp))
-                    Text("Ban", maxLines = 1, style = MaterialTheme.typography.labelMedium)
+                    Text(
+                        text = if (isAppeal) "Keep Banned" else "Ban",
+                        maxLines = 1,
+                        style = MaterialTheme.typography.labelMedium
+                    )
                 }
 
                 Button(
@@ -1306,7 +1426,12 @@ private fun ModerationAlertCard(
                         modifier = Modifier.size(15.dp)
                     )
                     Spacer(modifier = Modifier.size(4.dp))
-                    Text("Recover", maxLines = 1, color = Color.White, style = MaterialTheme.typography.labelMedium)
+                    Text(
+                        text = if (isAppeal) "Restore" else "Recover",
+                        maxLines = 1,
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelMedium
+                    )
                 }
             }
         }
@@ -1323,6 +1448,7 @@ fun InAppAdminAlertBanner(
     onRecovery: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    val isAppeal = alert.alertType == "appeal" || alert.appealMessage.isNotBlank()
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -1349,11 +1475,15 @@ fun InAppAdminAlertBanner(
                     photoData = reportedPhotoData,
                     name = alert.reportedDisplayName.ifBlank { alert.reportedUsername },
                     size = 40.dp,
-                    borderColor = Color(0xFFFF8A80)
+                    borderColor = if (isAppeal) MintOnlineGlow else Color(0xFFFF8A80)
                 )
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Admin Alert: ${alert.reportedDisplayName.ifBlank { "@${alert.reportedUsername}" }} (@${alert.reportedUsername})",
+                        text = if (isAppeal) {
+                            "AI Appeal Alert: ${alert.reportedDisplayName.ifBlank { "@${alert.reportedUsername}" }} (@${alert.reportedUsername})"
+                        } else {
+                            "Admin Alert: ${alert.reportedDisplayName.ifBlank { "@${alert.reportedUsername}" }} (@${alert.reportedUsername})"
+                        },
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
                         color = Color.White,
@@ -1361,10 +1491,16 @@ fun InAppAdminAlertBanner(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = "Reason: ${alert.reason} • By @${alert.reporterUsername}",
+                        text = if (isAppeal) {
+                            val aiSuggestion = if (alert.aiRecommendation == "RESTORE") "AI: Restore" else "AI: Keep Banned"
+                            val prompt = alert.aiPrompt.ifBlank { alert.appealMessage.ifBlank { "Restore or keep banned?" } }
+                            "$aiSuggestion • $prompt"
+                        } else {
+                            "Reason: ${alert.reason} • By @${alert.reporterUsername}"
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MintLight,
-                        maxLines = 1,
+                        maxLines = if (isAppeal) 2 else 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
@@ -1401,7 +1537,12 @@ fun InAppAdminAlertBanner(
                         .height(36.dp)
                         .testTag("banner_admin_ban")
                 ) {
-                    Text("Ban", style = MaterialTheme.typography.labelMedium, color = Color.White)
+                    Text(
+                        text = if (isAppeal) "Keep Banned" else "Ban",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color.White,
+                        maxLines = 1
+                    )
                 }
                 Button(
                     onClick = onRecovery,
@@ -1412,7 +1553,250 @@ fun InAppAdminAlertBanner(
                         .height(36.dp)
                         .testTag("banner_admin_recovery")
                 ) {
-                    Text("Recover", style = MaterialTheme.typography.labelMedium, color = EmeraldDark, fontWeight = FontWeight.Bold)
+                    Text(
+                        text = if (isAppeal) "Restore" else "Recover",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = EmeraldDark,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun BanAppealSubmissionCard(
+    username: String,
+    isSubmitting: Boolean,
+    errorMessage: String?,
+    submittedEvaluation: com.example.data.ai.BanAppealAiEvaluation?,
+    onClearError: () -> Unit,
+    onSubmitAppeal: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var appealText by remember(username) { mutableStateOf("") }
+
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("ban_appeal_card"),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.2.dp, ErrorRed.copy(alpha = 0.45f)),
+        tonalElevation = 2.dp
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Shield,
+                    contentDescription = null,
+                    tint = EmeraldDark,
+                    modifier = Modifier.size(20.dp)
+                )
+                Text(
+                    text = "Submit Account Recovery Appeal",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+            Text(
+                text = "Explain why @${username.ifBlank { "your account" }} should be restored. An AI moderation reader evaluates your appeal in real time and sends a decision prompt to the admin.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            OutlinedTextField(
+                value = appealText,
+                onValueChange = {
+                    appealText = it.take(500)
+                    onClearError()
+                },
+                label = { Text("Appeal Explanation") },
+                placeholder = { Text("Explain what happened and why your account should be unbanned...") },
+                minLines = 3,
+                maxLines = 5,
+                enabled = !isSubmitting && submittedEvaluation == null,
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("ban_appeal_input")
+            )
+
+            if (!errorMessage.isNullOrBlank()) {
+                Text(
+                    text = errorMessage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ErrorRed,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.testTag("ban_appeal_error")
+                )
+            }
+
+            if (submittedEvaluation != null) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MintLight.copy(alpha = 0.7f),
+                    border = BorderStroke(1.dp, EmeraldDark.copy(alpha = 0.35f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("ban_appeal_submitted_banner")
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "Appeal Reviewed by AI & Sent to Admin",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = EmeraldDark
+                        )
+                        Text(
+                            text = submittedEvaluation.summary,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = EmeraldDeep
+                        )
+                        Text(
+                            text = "The admin has been asked whether to restore/unban your account or keep it banned.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = EmeraldDeep.copy(alpha = 0.85f)
+                        )
+                    }
+                }
+            } else {
+                Button(
+                    onClick = { onSubmitAppeal(appealText) },
+                    enabled = !isSubmitting && appealText.isNotBlank(),
+                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldDark),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("submit_ban_appeal_button")
+                ) {
+                    if (isSubmitting) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            color = Color.White,
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.size(8.dp))
+                        Text("Evaluating Appeal with AI...", color = Color.White, fontWeight = FontWeight.Bold)
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.Restore,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.size(8.dp))
+                        Text("Submit Appeal", color = Color.White, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun BannedAccountAppealScreen(
+    displayName: String,
+    username: String,
+    photoData: String?,
+    isSubmitting: Boolean,
+    errorMessage: String?,
+    submittedEvaluation: com.example.data.ai.BanAppealAiEvaluation?,
+    onClearError: () -> Unit,
+    onSubmitAppeal: (String) -> Unit,
+    onSignOutClick: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("banned_account_appeal_screen"),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.TopCenter
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .widthIn(max = 560.dp)
+                    .statusBarsPadding()
+                    .navigationBarsPadding()
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(22.dp),
+                    color = Color(0xFFFFEBEE),
+                    border = BorderStroke(1.2.dp, ErrorRed.copy(alpha = 0.45f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(18.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        AvatarCircle(
+                            photoData = photoData,
+                            name = displayName.ifBlank { username.ifBlank { "User" } },
+                            size = 64.dp,
+                            borderColor = ErrorRed
+                        )
+                        Text(
+                            text = "Your ID is banned",
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = ErrorRed
+                        )
+                        Text(
+                            text = "${displayName.ifBlank { "Account" }} (@${username.ifBlank { "user" }})",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "Chat and account access are blocked across sync until the administrator approves recovery.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                BanAppealSubmissionCard(
+                    username = username,
+                    isSubmitting = isSubmitting,
+                    errorMessage = errorMessage,
+                    submittedEvaluation = submittedEvaluation,
+                    onClearError = onClearError,
+                    onSubmitAppeal = onSubmitAppeal
+                )
+
+                Spacer(modifier = Modifier.weight(1f))
+
+                OutlinedButton(
+                    onClick = onSignOutClick,
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("banned_sign_out_button")
+                ) {
+                    Text("Sign Out", fontWeight = FontWeight.Bold)
                 }
             }
         }

@@ -85,6 +85,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -121,6 +122,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
+import coil.request.CachePolicy
+import coil.request.ImageRequest
 import com.example.data.model.ChatThread
 import com.example.data.model.StoryDrawStroke
 import com.example.data.model.StoryFontStyle
@@ -129,6 +132,7 @@ import com.example.data.model.StoryOverlayCodec
 import com.example.data.model.StoryStickerOverlay
 import com.example.data.model.StoryViewRecord
 import com.example.ui.components.AvatarCircle
+import com.example.ui.components.computeImageCacheKey
 import com.example.ui.components.resolveImageModel
 import com.example.ui.theme.EmeraldBright
 import com.example.ui.theme.EmeraldDark
@@ -264,16 +268,30 @@ fun StoryMediaRenderer(
                 )
             }
             imageModel != null -> {
-                AsyncImage(
-                    model = imageModel,
-                    contentDescription = "Story media",
-                    contentScale = contentScale,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .graphicsLayer {
-                            rotationZ = rotationDegrees.toFloat()
-                        }
-                )
+                val storyCacheKey = remember(mediaData) {
+                    computeImageCacheKey("story_media", mediaData)
+                }
+                val storyRequest = remember(storyCacheKey, imageModel) {
+                    ImageRequest.Builder(context)
+                        .data(imageModel)
+                        .memoryCacheKey(storyCacheKey)
+                        .diskCacheKey(storyCacheKey)
+                        .diskCachePolicy(if (imageModel is ByteArray) CachePolicy.DISABLED else CachePolicy.ENABLED)
+                        .crossfade(false)
+                        .build()
+                }
+                key(storyCacheKey) {
+                    AsyncImage(
+                        model = storyRequest,
+                        contentDescription = "Story media",
+                        contentScale = contentScale,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                rotationZ = rotationDegrees.toFloat()
+                            }
+                    )
+                }
             }
             else -> {
                 Box(

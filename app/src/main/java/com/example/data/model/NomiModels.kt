@@ -66,6 +66,10 @@ data class UserProfile(
     val reportCount: Long = 0L,
     val bannedByAdmin: Boolean = false,
     val deletedContactIds: List<String> = emptyList(),
+    val themeMode: String = "",
+    val notificationsEnabled: Boolean? = null,
+    val smartAiEnabled: Boolean? = null,
+    val appLockPinHash: String = "",
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
@@ -145,10 +149,40 @@ data class ChatThread(
     val accountStatus: String = "active",
     val reportCount: Long = 0L,
     val reportedBy: List<String> = emptyList(),
+    val lastMessageReceiptStatus: String = "sent",
+    val lastMessageId: String = "",
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     val isBanned: Boolean get() = accountStatus == "banned"
+}
+
+enum class MessageReceiptStatus(val key: String) {
+    SENT("sent"),
+    DELIVERED("delivered"),
+    READ("read");
+
+    companion object {
+        fun fromKey(key: String?): MessageReceiptStatus = when (key?.lowercase()) {
+            "read" -> READ
+            "delivered" -> DELIVERED
+            else -> SENT
+        }
+
+        fun rank(key: String?): Int = when (key?.lowercase()) {
+            "read" -> 3
+            "delivered" -> 2
+            else -> 1
+        }
+
+        fun maxStatus(current: String?, candidate: String?): String {
+            return if (rank(candidate) >= rank(current)) {
+                fromKey(candidate).key
+            } else {
+                fromKey(current).key
+            }
+        }
+    }
 }
 
 data class DirectoryLookupResult(
@@ -356,6 +390,9 @@ data class ChatMessage(
     val replyToMessageId: String? = null,
     val timeLabel: String = "",
     val aiGenerated: Boolean = false,
+    val receiptStatus: String = "sent",
+    val senderMessageId: String? = null,
+    val senderContactId: String? = null,
     @ServerTimestamp val createdAt: Timestamp? = null
 )
 
@@ -378,6 +415,7 @@ data class IncomingMessageAlert(
 @IgnoreExtraProperties
 data class ModerationAlert(
     @DocumentId val id: String = "",
+    val alertType: String = "report",
     val reportedUid: String = "",
     val reportedUsername: String = "",
     val reportedDisplayName: String = "",
@@ -385,6 +423,11 @@ data class ModerationAlert(
     val reporterUsername: String = "",
     val reporterEmail: String = "",
     val reason: String = "Other",
+    val appealMessage: String = "",
+    val aiRecommendation: String = "",
+    val aiRiskLevel: String = "",
+    val aiAnalysis: String = "",
+    val aiPrompt: String = "",
     val status: String = "pending",
     val adminEmail: String = "",
     val createdAtMs: Long = 0L,

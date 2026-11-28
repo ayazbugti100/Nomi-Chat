@@ -38,7 +38,6 @@ import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DonutLarge
-import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Lock
@@ -92,6 +91,7 @@ import com.example.data.network.NetworkStatus
 import com.example.ui.components.AvatarCircle
 import com.example.ui.components.EmeraldWaveHeader
 import com.example.ui.components.GoPremiumBanner
+import com.example.ui.components.MessageReceiptIcon
 import com.example.ui.theme.BadgeBlockedBg
 import com.example.ui.theme.BadgeBlockedText
 import com.example.ui.theme.BadgeLockedBg
@@ -379,11 +379,7 @@ fun ChatsScreen(
                 color = MaterialTheme.colorScheme.surface
             ) {
                 Column(modifier = Modifier.fillMaxSize()) {
-                    FilterPillsRow(
-                        selectedFilter = selectedFilter,
-                        onSelectFilter = onSelectFilter,
-                        modifier = Modifier.padding(top = 14.dp, bottom = 10.dp)
-                    )
+
 
                     AnimatedVisibility(visible = !networkStatus.isConnected) {
                         Surface(
@@ -565,88 +561,7 @@ fun ChatsScreen(
     }
 }
 
-@Composable
-private fun FilterPillsRow(
-    selectedFilter: ChatPillFilter,
-    onSelectFilter: (ChatPillFilter) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        FilterPillChip(
-            label = "Chats",
-            icon = Icons.AutoMirrored.Filled.Chat,
-            selected = selectedFilter == ChatPillFilter.CHATS,
-            testTag = "pill_chats",
-            onClick = { onSelectFilter(ChatPillFilter.CHATS) }
-        )
-        FilterPillChip(
-            label = "Groups",
-            icon = Icons.Default.Group,
-            selected = selectedFilter == ChatPillFilter.GROUPS,
-            testTag = "pill_groups",
-            onClick = { onSelectFilter(ChatPillFilter.GROUPS) }
-        )
-        FilterPillChip(
-            label = "Status",
-            icon = Icons.Default.DonutLarge,
-            selected = selectedFilter == ChatPillFilter.STATUS,
-            testTag = "pill_status",
-            onClick = { onSelectFilter(ChatPillFilter.STATUS) }
-        )
-        FilterPillChip(
-            label = "Calls",
-            icon = Icons.Default.Call,
-            selected = selectedFilter == ChatPillFilter.CALLS,
-            testTag = "pill_calls",
-            onClick = { onSelectFilter(ChatPillFilter.CALLS) }
-        )
-    }
-}
 
-@Composable
-private fun FilterPillChip(
-    label: String,
-    icon: ImageVector,
-    selected: Boolean,
-    testTag: String,
-    onClick: () -> Unit
-) {
-    val bgColor = if (selected) EmeraldDark else MaterialTheme.colorScheme.surfaceVariant
-    val fgColor = if (selected) Color.White else MaterialTheme.colorScheme.onSurface
-    Surface(
-        modifier = Modifier
-            .clip(RoundedCornerShape(22.dp))
-            .clickable(onClick = onClick)
-            .testTag(testTag),
-        shape = RoundedCornerShape(22.dp),
-        color = bgColor
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = fgColor,
-                modifier = Modifier.size(16.dp)
-            )
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelMedium,
-                color = fgColor,
-                fontWeight = FontWeight.SemiBold
-            )
-        }
-    }
-}
 
 @Composable
 fun ArchivedFolderRow(
@@ -911,11 +826,13 @@ fun ChatListRow(
                             }
                             else -> {
                                 if (thread.lastMessageFromMe) {
-                                    Icon(
-                                        imageVector = Icons.Default.DoneAll,
-                                        contentDescription = "Read",
-                                        tint = Color(0xFF1E9BF0),
-                                        modifier = Modifier.size(16.dp)
+                                    MessageReceiptIcon(
+                                        receiptStatus = thread.lastMessageReceiptStatus,
+                                        mutedTint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        readTint = Color(0xFF1E9BF0),
+                                        modifier = Modifier
+                                            .size(16.dp)
+                                            .testTag("thread_receipt_${thread.id}")
                                     )
                                 }
                                 val messageBody = thread.lastMessageText.ifBlank { "Tap to start chatting" }

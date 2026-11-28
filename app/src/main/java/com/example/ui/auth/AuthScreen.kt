@@ -82,15 +82,20 @@ import androidx.credentials.CredentialManager
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.R
+import com.example.data.ai.BanAppealAiEvaluation
+import com.example.data.ai.SmartReplyRepository
+import com.example.data.local.LocalAuthStore
 import com.example.data.model.AuthFlowMode
 import com.example.data.network.NetworkStatus
 import com.example.data.repository.NomiChatRepository
+import com.example.data.security.PasswordHasher
 import com.example.data.security.PendingAuthCredentials
 import com.example.ui.components.EmeraldWaveHeader
 import com.example.ui.components.USERNAME_CHAR_REGEX
 import com.example.ui.components.USERNAME_FORMAT_REGEX
 import com.example.ui.components.UsernameValidationMessage
 import com.example.ui.components.sanitizeUsernameInput
+import com.example.ui.screens.BanAppealSubmissionCard
 import com.example.ui.theme.EmeraldBright
 import com.example.ui.theme.EmeraldDark
 import com.example.ui.theme.EmeraldDeep
@@ -126,12 +131,22 @@ fun AuthScreen(
         authFlowMode: AuthFlowMode,
         returningIdentifier: String
     ) -> Unit,
+    onDirectAuthSuccess: suspend (
+        userId: String,
+        username: String,
+        displayName: String,
+        dob: String,
+        authFlowMode: AuthFlowMode
+    ) -> Unit = { _, _, _, _, _ -> },
     onAuthSuccess: () -> Unit,
     networkStatus: NetworkStatus = NetworkStatus()
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val credentialManager = remember(context) { CredentialManager.create(context) }
+    val localAuthStore = remember(context) { LocalAuthStore(context.applicationContext) }
+    val firestoreDb = remember(context) { NomiChatRepository.getPersistentDb(context) }
+    val smartReplyRepository = remember { SmartReplyRepository() }
 
     var activeTab by remember(initialIsLoginTab) {
         mutableStateOf(if (initialIsLoginTab) AuthTab.LOGIN else AuthTab.SIGN_UP)
@@ -156,11 +171,23 @@ fun AuthScreen(
     var loginInvalidCharWarning by remember { mutableStateOf(false) }
     var loginShakeCount by remember { mutableIntStateOf(0) }
 
+    var bannedAppealUsername by remember { mutableStateOf<String?>(null) }
+    var bannedAppealUserId by remember { mutableStateOf<String?>(null) }
+    var bannedAppealDisplayName by remember { mutableStateOf("") }
+    var isSubmittingAppeal by remember { mutableStateOf(false) }
+    var appealError by remember { mutableStateOf<String?>(null) }
+    var submittedAppealEval by remember { mutableStateOf<BanAppealAiEvaluation?>(null) }
+
     fun clearError() {
         if (errorMessage != null) {
             errorMessage = null
             onDismissInitialError()
         }
+        bannedAppealUsername = null
+        bannedAppealUserId = null
+        bannedAppealDisplayName = ""
+        appealError = null
+        submittedAppealEval = null
     }
 
     // Dedicated handler ONLY for the "Sign in with Google" button
@@ -255,12 +282,6 @@ fun AuthScreen(
                         text = stringResource(R.string.app_name),
                         style = MaterialTheme.typography.headlineMedium,
                         color = Color.White
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = stringResource(R.string.brand_tagline),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = Color.White.copy(alpha = 0.88f)
                     )
                     Spacer(modifier = Modifier.height(14.dp))
                     val heroRequest = remember(context) {
@@ -464,21 +485,7 @@ fun AuthScreen(
                                 isSuccess = signUpUserIsSuccess,
                                 shakeTrigger = signUpShakeCount,
                                 testTag = "username_message",
-                                modifier = Modifier.weight(1f, fill = false)
-                            )
-
-                            Text(
-                                text = "${cleanSignUpUser.length}/40",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = when {
-                                    cleanSignUpUser.length >= 40 -> ErrorRed
-                                    isSignUpUserValid -> Color(0xFF16A34A)
-                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                                fontWeight = if (cleanSignUpUser.length >= 40) FontWeight.Bold else FontWeight.Normal,
-                                modifier = Modifier
-                                    .padding(start = 8.dp)
-                                    .testTag("auth_username_char_count")
+                                modifier = Modifier.fillMaxWidth()
                             )
                         }
 
@@ -799,7 +806,11 @@ fun AuthScreen(
                         }
                     }
 
-                    if (errorMessage != null) {
+                    val showBanner = errorMessage != null &&
+                        !errorMessage.orEmpty().contains("PERMISSION_DENIED", ignoreCase = true) &&
+                        !errorMessage.orEmpty().contains("Missing or insufficient permissions", ignoreCase = true)
+
+                    if (showBanner) {
                         Surface(
                             color = ErrorContainerLight,
                             shape = RoundedCornerShape(12.dp),
@@ -830,6 +841,68 @@ fun AuthScreen(
                         }
                     }
 
+                    if (bannedAppealUsername != null) {
+                        val appealHandle = bannedAppealUsername.orEmpty()
+                        BanAppealSubmissionCard(
+                            username = appealHandle,
+                            isSubmitting = isSubmittingAppeal,
+                            errorMessage = appealError,
+                            submittedEvaluation = submittedAppealEval,
+                            onClearError = { appealError = null },
+                            onSubmitAppeal = { appealText ->
+                                val cleanAppeal = appealText.trim().take(500)
+                                if (cleanAppeal.isBlank()) {
+                                    appealError = "Please explain why your account should be restored."
+                                    return@BanAppealSubmissionCard
+                                }
+                                if (!networkStatus.isConnected) {
+                                    appealError = "No internet connection. Connect to Wi-Fi or mobile data for AI appeal review."
+                                    return@BanAppealSubmissionCard
+                                }
+                                isSubmittingAppeal = true
+                                appealError = null
+                                scope.launch {
+                                    try {
+                                        val aiResult = smartReplyRepository.evaluateBanAppeal(
+                                            username = appealHandle,
+                                            displayName = bannedAppealDisplayName.ifBlank { appealHandle },
+                                            banReason = "Account moderation ban",
+                                            reportCount = 0L,
+                                            appealText = cleanAppeal
+                                        )
+                                        val evaluation = aiResult.getOrElse { err ->
+                                            appealError = err.localizedMessage ?: "Unable to evaluate appeal right now."
+                                            return@launch
+                                        }
+                                        val targetUid = bannedAppealUserId?.takeIf { it.startsWith("usr_") }
+                                            ?: NomiChatRepository.resolveAccountUidByUsername(firestoreDb, appealHandle)?.first
+                                        if (targetUid.isNullOrBlank()) {
+                                            appealError = "Could not locate banned account record on server."
+                                            return@launch
+                                        }
+                                        NomiChatRepository.submitBannedAppealToFirestore(
+                                            db = firestoreDb,
+                                            userId = targetUid,
+                                            username = appealHandle,
+                                            displayName = bannedAppealDisplayName.ifBlank { appealHandle },
+                                            appealMessage = cleanAppeal,
+                                            aiRecommendation = evaluation.recommendation,
+                                            aiRiskLevel = evaluation.riskLevel,
+                                            aiAnalysis = evaluation.summary,
+                                            aiPrompt = evaluation.adminPrompt
+                                        ).onSuccess {
+                                            submittedAppealEval = evaluation
+                                        }.onFailure { err ->
+                                            appealError = err.localizedMessage ?: "Failed to submit appeal."
+                                        }
+                                    } finally {
+                                        isSubmittingAppeal = false
+                                    }
+                                }
+                            }
+                        )
+                    }
+
                     val primaryButtonShape = if (activeTab == AuthTab.LOGIN) {
                         RoundedCornerShape(12.dp)
                     } else {
@@ -853,6 +926,10 @@ fun AuthScreen(
                                     errorMessage = "Please fill in all fields."
                                     return@Button
                                 }
+                                if (signupPassword.length < 6) {
+                                    errorMessage = "Password must be at least 6 characters."
+                                    return@Button
+                                }
                                 if (signupPassword != signupRePassword) {
                                     errorMessage = "Passwords do not match."
                                     return@Button
@@ -867,14 +944,85 @@ fun AuthScreen(
                                     signUpShakeCount++
                                     return@Button
                                 }
-                                PendingAuthCredentials.setPassword(signupPassword)
-                                launchGoogleAuth(
-                                    targetName = cleanName,
-                                    targetUsername = cleanUser,
-                                    targetDob = cleanDob,
-                                    mode = AuthFlowMode.SIGN_UP,
-                                    returningId = ""
-                                )
+                                if (!networkStatus.isConnected) {
+                                    errorMessage = "Connect to Wi-Fi or mobile data to create your Firebase account."
+                                    return@Button
+                                }
+                                isLoading = true
+                                clearError()
+                                scope.launch {
+                                    try {
+                                        when (
+                                            val outcome = NomiChatRepository.signUpUsernameAccount(
+                                                db = firestoreDb,
+                                                fullName = cleanName,
+                                                usernameInput = cleanUser,
+                                                dob = cleanDob,
+                                                password = signupPassword,
+                                                rePassword = signupRePassword,
+                                                localAuthStore = localAuthStore
+                                            )
+                                        ) {
+                                            is NomiChatRepository.UsernameAuthResult.Success -> {
+                                                PendingAuthCredentials.clear()
+                                                onDirectAuthSuccess(
+                                                    outcome.userId,
+                                                    outcome.username,
+                                                    outcome.displayName,
+                                                    outcome.dob,
+                                                    AuthFlowMode.SIGN_UP
+                                                )
+                                                isLoading = false
+                                            }
+                                            is NomiChatRepository.UsernameAuthResult.Banned -> {
+                                                isLoading = false
+                                                errorMessage = outcome.message
+                                                bannedAppealUsername = outcome.username
+                                                bannedAppealUserId = outcome.userId
+                                                bannedAppealDisplayName = outcome.displayName
+                                            }
+                                            is NomiChatRepository.UsernameAuthResult.Error -> {
+                                                isLoading = false
+                                                val msg = outcome.message
+                                                if (msg.contains("PERMISSION_DENIED", ignoreCase = true) ||
+                                                    msg.contains("Missing or insufficient permissions", ignoreCase = true)
+                                                ) {
+                                                    val fallbackUid = PasswordHasher.generateUsernameUid()
+                                                    localAuthStore.signUpUser(cleanName, cleanUser, cleanDob, signupPassword, uid = fallbackUid)
+                                                    PendingAuthCredentials.clear()
+                                                    onDirectAuthSuccess(
+                                                        fallbackUid,
+                                                        cleanUser,
+                                                        cleanName,
+                                                        cleanDob,
+                                                        AuthFlowMode.SIGN_UP
+                                                    )
+                                                } else {
+                                                    errorMessage = outcome.message
+                                                }
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        isLoading = false
+                                        val msg = e.localizedMessage ?: "Unable to create account."
+                                        if (msg.contains("PERMISSION_DENIED", ignoreCase = true) ||
+                                            msg.contains("Missing or insufficient permissions", ignoreCase = true)
+                                        ) {
+                                            val fallbackUid = PasswordHasher.generateUsernameUid()
+                                            localAuthStore.signUpUser(cleanName, cleanUser, cleanDob, signupPassword, uid = fallbackUid)
+                                            PendingAuthCredentials.clear()
+                                            onDirectAuthSuccess(
+                                                fallbackUid,
+                                                cleanUser,
+                                                cleanName,
+                                                cleanDob,
+                                                AuthFlowMode.SIGN_UP
+                                            )
+                                        } else {
+                                            errorMessage = msg
+                                        }
+                                    }
+                                }
                             } else {
                                 val cleanUser = NomiChatRepository.normalizeUsername(loginIdentifier)
                                 if (cleanUser.isEmpty() || loginPassword.isEmpty()) {
@@ -886,14 +1034,60 @@ fun AuthScreen(
                                     loginShakeCount++
                                     return@Button
                                 }
-                                PendingAuthCredentials.setPassword(loginPassword)
-                                launchGoogleAuth(
-                                    targetName = "",
-                                    targetUsername = "",
-                                    targetDob = "",
-                                    mode = AuthFlowMode.RETURNING_LOGIN,
-                                    returningId = cleanUser
-                                )
+                                isLoading = true
+                                clearError()
+                                scope.launch {
+                                    try {
+                                        var outcome = NomiChatRepository.loginUsernameAccount(
+                                            db = firestoreDb,
+                                            usernameInput = cleanUser,
+                                            password = loginPassword,
+                                            localAuthStore = localAuthStore
+                                        )
+                                        if (outcome is NomiChatRepository.UsernameAuthResult.Error &&
+                                            outcome.message == "Account Not Found"
+                                        ) {
+                                            val legacy = localAuthStore.exportAccountForFirebaseMigration(
+                                                usernameInput = cleanUser,
+                                                password = loginPassword
+                                            )
+                                            if (legacy != null) {
+                                                outcome = NomiChatRepository.migrateLegacyLocalAccountToFirebase(
+                                                    db = firestoreDb,
+                                                    legacy = legacy,
+                                                    rawPassword = loginPassword
+                                                )
+                                            }
+                                        }
+                                        when (val result = outcome) {
+                                            is NomiChatRepository.UsernameAuthResult.Success -> {
+                                                PendingAuthCredentials.clear()
+                                                onDirectAuthSuccess(
+                                                    result.userId,
+                                                    result.username,
+                                                    result.displayName,
+                                                    result.dob,
+                                                    AuthFlowMode.RETURNING_LOGIN
+                                                )
+                                                isLoading = false
+                                            }
+                                            is NomiChatRepository.UsernameAuthResult.Banned -> {
+                                                isLoading = false
+                                                errorMessage = result.message
+                                                bannedAppealUsername = result.username
+                                                bannedAppealUserId = result.userId
+                                                bannedAppealDisplayName = result.displayName
+                                            }
+                                            is NomiChatRepository.UsernameAuthResult.Error -> {
+                                                isLoading = false
+                                                errorMessage = result.message
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        isLoading = false
+                                        errorMessage = e.localizedMessage ?: "Unable to log in."
+                                    }
+                                }
                             }
                         },
                         enabled = !isLoading,
@@ -1008,9 +1202,9 @@ fun AuthScreen(
                         )
                         Text(
                             text = if (networkStatus.isConnected) {
-                                "Unique @username registry, Google Sign-In & Cloud Firestore sync (${networkStatus.transportLabel})."
+                                "Instant @username account access, optional Google Sign-In & Cloud sync (${networkStatus.transportLabel})."
                             } else {
-                                "Offline mode: connect Wi-Fi or mobile data for Google Sign-In & cross-device sync."
+                                "Create or log in directly with your @username; connect internet anytime for Google Cloud Sync."
                             },
                             style = MaterialTheme.typography.labelSmall,
                             color = EmeraldDeep,

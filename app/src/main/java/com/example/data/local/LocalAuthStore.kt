@@ -6,6 +6,7 @@ import com.example.data.model.ChatMessage
 import com.example.data.model.ChatThread
 import com.example.data.model.DirectoryLookupResult
 import com.example.data.model.IncomingMessageAlert
+import com.example.data.model.MessageReceiptStatus
 import com.example.data.model.ProfileVisibilityMode
 import com.example.data.model.ReportOutcome
 import com.example.data.model.STORY_DURATION_MS
@@ -111,7 +112,8 @@ class LocalAuthStore(context: Context) {
         usernameInput: String,
         dob: String,
         password: String,
-        rePassword: String
+        rePassword: String = password,
+        uid: String? = null
     ): LocalAuthOutcome = withContext(Dispatchers.IO) {
         val name = fullName.trim().take(60)
         val user = NomiChatRepository.normalizeUsername(usernameInput).take(40)
@@ -139,7 +141,7 @@ class LocalAuthStore(context: Context) {
             val nowSec = System.currentTimeMillis() / 1000L
 
             val accountJson = JSONObject().apply {
-                put("userId", user)
+                put("userId", uid ?: user)
                 put("displayName", name)
                 put("username", user)
                 put("bio", "Dream Big... 💚")
@@ -1325,6 +1327,7 @@ class LocalAuthStore(context: Context) {
                 var targetPeerHandle = ""
                 var targetThreadType = "chat"
                 var disappearingSec = 0L
+                var targetContactIdx = -1
                 val contacts = account.optJSONArray("contacts") ?: JSONArray()
                 for (i in 0 until contacts.length()) {
                     val obj = contacts.optJSONObject(i) ?: continue
@@ -1339,11 +1342,13 @@ class LocalAuthStore(context: Context) {
                         obj.put("lastMessageText", cleanText.take(1000))
                         obj.put("lastMessageFromMe", validSender == "me")
                         obj.put("lastMessageTimeLabel", timeLabel)
+                        obj.put("lastMessageReceiptStatus", MessageReceiptStatus.SENT.key)
                         obj.put("unreadCount", nextUnread)
                         obj.put("typing", false)
                         obj.put("updatedAtSec", nowSec)
                         targetPeerHandle = obj.optString("username", "")
                         targetThreadType = obj.optString("threadType", "chat")
+                        targetContactIdx = i
                         break
                     }
                 }
@@ -1353,27 +1358,32 @@ class LocalAuthStore(context: Context) {
                     0L
                 }
 
+                val sentMsgId = "m_${UUID.randomUUID().toString().take(8)}"
+                val senderMsgJson = JSONObject().apply {
+                    put("id", sentMsgId)
+                    put("userId", usernameKey)
+                    put("contactId", contactId)
+                    put("sender", validSender)
+                    put("text", cleanText)
+                    put("messageType", cleanType)
+                    if (cleanMedia != null) put("mediaData", cleanMedia) else put("mediaData", JSONObject.NULL)
+                    put("durationSec", cleanDuration)
+                    put("expiresAtMs", expiresAtMs)
+                    put("timeLabel", timeLabel)
+                    put("aiGenerated", aiGenerated)
+                    put("receiptStatus", MessageReceiptStatus.SENT.key)
+                    put("createdAtSec", nowSec)
+                    if (!replyToText.isNullOrBlank()) put("replyToText", replyToText) else put("replyToText", JSONObject.NULL)
+                    if (!replyToSender.isNullOrBlank()) put("replyToSender", replyToSender) else put("replyToSender", JSONObject.NULL)
+                    if (!replyToMessageId.isNullOrBlank()) put("replyToMessageId", replyToMessageId) else put("replyToMessageId", JSONObject.NULL)
+                }
+                if (targetContactIdx >= 0) {
+                    contacts.optJSONObject(targetContactIdx)?.put("lastMessageId", sentMsgId)
+                }
+
                 val messagesObj = account.optJSONObject("messages") ?: JSONObject()
                 val msgArr = messagesObj.optJSONArray(contactId) ?: JSONArray()
-                msgArr.put(
-                    JSONObject().apply {
-                        put("id", "m_${UUID.randomUUID().toString().take(8)}")
-                        put("userId", usernameKey)
-                        put("contactId", contactId)
-                        put("sender", validSender)
-                        put("text", cleanText)
-                        put("messageType", cleanType)
-                        if (cleanMedia != null) put("mediaData", cleanMedia) else put("mediaData", JSONObject.NULL)
-                        put("durationSec", cleanDuration)
-                        put("expiresAtMs", expiresAtMs)
-                        put("timeLabel", timeLabel)
-                        put("aiGenerated", aiGenerated)
-                        put("createdAtSec", nowSec)
-                        if (!replyToText.isNullOrBlank()) put("replyToText", replyToText) else put("replyToText", JSONObject.NULL)
-                        if (!replyToSender.isNullOrBlank()) put("replyToSender", replyToSender) else put("replyToSender", JSONObject.NULL)
-                        if (!replyToMessageId.isNullOrBlank()) put("replyToMessageId", replyToMessageId) else put("replyToMessageId", JSONObject.NULL)
-                    }
-                )
+                msgArr.put(senderMsgJson)
                 messagesObj.put(contactId, msgArr)
                 account.put("messages", messagesObj)
                 account.put("contacts", contacts)
@@ -1394,7 +1404,7 @@ class LocalAuthStore(context: Context) {
                             val senderBanner = if (visibleToPeer && !account.isNull("bannerData")) {
                                 account.optString("bannerData").takeIf { it.isNotBlank() }
                             } else null
-                            deliverToLocalPeerUnlocked(
+                            val deliveredToPeer = deliverToLocalPeerUnlocked(
                                 peerKey = peerKey,
                                 peerAccount = peerAccount,
                                 senderHandle = account.optString("username", usernameKey),
@@ -1412,8 +1422,17 @@ class LocalAuthStore(context: Context) {
                                 nowSec = nowSec,
                                 replyToText = replyToText,
                                 replyToSender = replyToSender,
-                                replyToMessageId = replyToMessageId
+                                replyToMessageId = replyToMessageId,
+                                senderMessageId = sentMsgId,
+                                senderContactId = contactId
                             )
+                            if (deliveredToPeer) {
+                                senderMsgJson.put("receiptStatus", MessageReceiptStatus.DELIVERED.key)
+                                if (targetContactIdx >= 0) {
+                                    contacts.optJSONObject(targetContactIdx)
+                                        ?.put("lastMessageReceiptStatus", MessageReceiptStatus.DELIVERED.key)
+                                }
+                            }
                             root.put(peerKey, peerAccount)
                         }
                     }
@@ -1442,8 +1461,10 @@ class LocalAuthStore(context: Context) {
         nowSec: Long,
         replyToText: String? = null,
         replyToSender: String? = null,
-        replyToMessageId: String? = null
-    ) {
+        replyToMessageId: String? = null,
+        senderMessageId: String? = null,
+        senderContactId: String? = null
+    ): Boolean {
         val peerContacts = peerAccount.optJSONArray("contacts") ?: JSONArray()
         var peerContactObj: JSONObject? = null
         var peerContactId = ""
@@ -1458,7 +1479,7 @@ class LocalAuthStore(context: Context) {
         }
 
         if (peerContactObj?.optBoolean("blocked", false) == true) {
-            return
+            return false
         }
         val isMuted = peerContactObj?.optBoolean("muted", false) == true
         val peerDisappearingSec = (peerContactObj?.optLong("disappearingSeconds", 0L) ?: 0L).coerceAtLeast(0L)
@@ -1558,6 +1579,10 @@ class LocalAuthStore(context: Context) {
                 put("expiresAtMs", expiresAtMs)
                 put("timeLabel", timeLabel)
                 put("aiGenerated", false)
+                put("receiptStatus", MessageReceiptStatus.DELIVERED.key)
+                if (!senderMessageId.isNullOrBlank()) put("senderMessageId", senderMessageId)
+                if (!senderContactId.isNullOrBlank()) put("senderContactId", senderContactId)
+                put("senderPeerKey", senderKey)
                 put("createdAtSec", nowSec)
                 if (!replyToText.isNullOrBlank()) put("replyToText", replyToText) else put("replyToText", JSONObject.NULL)
                 if (!replyToSender.isNullOrBlank()) put("replyToSender", replyToSender) else put("replyToSender", JSONObject.NULL)
@@ -1577,6 +1602,7 @@ class LocalAuthStore(context: Context) {
                 )
             )
         }
+        return true
     }
 
     suspend fun markThreadRead(usernameKey: String, contactId: String): Result<Unit> = withContext(Dispatchers.IO) {
@@ -1590,6 +1616,46 @@ class LocalAuthStore(context: Context) {
                     if (obj.optString("id") == contactId) {
                         obj.put("unreadCount", 0L)
                         break
+                    }
+                }
+                val messagesObj = account.optJSONObject("messages")
+                val msgArr = messagesObj?.optJSONArray(contactId)
+                if (msgArr != null) {
+                    for (i in 0 until msgArr.length()) {
+                        val mObj = msgArr.optJSONObject(i) ?: continue
+                        if (mObj.optString("sender") == "them" &&
+                            mObj.optString("receiptStatus", "delivered") != MessageReceiptStatus.READ.key
+                        ) {
+                            mObj.put("receiptStatus", MessageReceiptStatus.READ.key)
+                            val sKey = mObj.optString("senderPeerKey", "")
+                            val sContactId = mObj.optString("senderContactId", "")
+                            val sMsgId = mObj.optString("senderMessageId", "")
+                            if (sKey.isNotBlank() && sContactId.isNotBlank() && sMsgId.isNotBlank()) {
+                                val senderAcc = root.optJSONObject(sKey)
+                                val senderMsgs = senderAcc?.optJSONObject("messages")?.optJSONArray(sContactId)
+                                if (senderMsgs != null) {
+                                    for (j in 0 until senderMsgs.length()) {
+                                        val sm = senderMsgs.optJSONObject(j) ?: continue
+                                        if (sm.optString("id") == sMsgId) {
+                                            sm.put("receiptStatus", MessageReceiptStatus.READ.key)
+                                            break
+                                        }
+                                    }
+                                }
+                                val senderContacts = senderAcc?.optJSONArray("contacts")
+                                if (senderContacts != null) {
+                                    for (j in 0 until senderContacts.length()) {
+                                        val sc = senderContacts.optJSONObject(j) ?: continue
+                                        if (sc.optString("id") == sContactId &&
+                                            sc.optString("lastMessageId", "") == sMsgId
+                                        ) {
+                                            sc.put("lastMessageReceiptStatus", MessageReceiptStatus.READ.key)
+                                            break
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 root.put(usernameKey, account)
@@ -1758,6 +1824,8 @@ class LocalAuthStore(context: Context) {
                         obj.put("lastMessageText", "")
                         obj.put("lastMessageFromMe", false)
                         obj.put("lastMessageTimeLabel", "")
+                        obj.put("lastMessageReceiptStatus", MessageReceiptStatus.SENT.key)
+                        obj.put("lastMessageId", "")
                         obj.put("unreadCount", 0L)
                         obj.put("updatedAtSec", System.currentTimeMillis() / 1000L)
                         break
@@ -1905,6 +1973,43 @@ class LocalAuthStore(context: Context) {
         }
     }
 
+    suspend fun submitBanAppeal(
+        usernameKey: String,
+        appealMessage: String,
+        aiRecommendation: String,
+        aiRiskLevel: String,
+        aiAnalysis: String,
+        aiPrompt: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanHandle = NomiChatRepository.normalizeUsername(usernameKey).take(40)
+            require(cleanHandle.isNotBlank()) { "Username cannot be blank." }
+            val cleanAppeal = appealMessage.trim().take(500)
+            require(cleanAppeal.isNotBlank()) { "Appeal message cannot be blank." }
+            mutex.withLock {
+                val root = readRootUnlocked()
+                val accountKey = findAccountKeyByUsernameUnlocked(root, cleanHandle) ?: cleanHandle
+                val account = root.optJSONObject(accountKey) ?: return@withLock
+                val appeals = account.optJSONArray("appeals") ?: JSONArray()
+                appeals.put(
+                    JSONObject().apply {
+                        put("id", UUID.randomUUID().toString())
+                        put("appealMessage", cleanAppeal)
+                        put("aiRecommendation", aiRecommendation)
+                        put("aiRiskLevel", aiRiskLevel)
+                        put("aiAnalysis", aiAnalysis.take(350))
+                        put("aiPrompt", aiPrompt.take(250))
+                        put("status", "pending")
+                        put("createdAtMs", System.currentTimeMillis())
+                    }
+                )
+                account.put("appeals", appeals)
+                root.put(accountKey, account)
+                writeRootUnlocked(root)
+            }
+        }
+    }
+
     private fun canAccountShowProfileTo(
         ownerAccount: JSONObject,
         viewerKey: String,
@@ -1994,6 +2099,8 @@ class LocalAuthStore(context: Context) {
             accountStatus = obj.optString("accountStatus", "active"),
             reportCount = obj.optLong("reportCount", 0L),
             reportedBy = reporters,
+            lastMessageReceiptStatus = obj.optString("lastMessageReceiptStatus", MessageReceiptStatus.SENT.key),
+            lastMessageId = obj.optString("lastMessageId", ""),
             createdAt = Timestamp(obj.optLong("createdAtSec", 0L), 0),
             updatedAt = Timestamp(obj.optLong("updatedAtSec", 0L), 0)
         )
@@ -2069,6 +2176,9 @@ class LocalAuthStore(context: Context) {
             replyToMessageId = rawReplyMsgId,
             timeLabel = obj.optString("timeLabel", ""),
             aiGenerated = obj.optBoolean("aiGenerated", false),
+            receiptStatus = obj.optString("receiptStatus", MessageReceiptStatus.SENT.key),
+            senderMessageId = if (obj.isNull("senderMessageId")) null else obj.optString("senderMessageId").takeIf { it.isNotBlank() },
+            senderContactId = if (obj.isNull("senderContactId")) null else obj.optString("senderContactId").takeIf { it.isNotBlank() },
             createdAt = Timestamp(obj.optLong("createdAtSec", 0L), 0)
         )
     }
@@ -2096,6 +2206,219 @@ class LocalAuthStore(context: Context) {
                 root.put(usernameKey, account)
                 writeRootUnlocked(root)
             }
+        }
+    }
+
+    suspend fun getAccountContactsAndMessages(
+        usernameInput: String
+    ): Pair<List<ChatThread>, Map<String, List<ChatMessage>>> = withContext(Dispatchers.IO) {
+        val clean = NomiChatRepository.normalizeUsername(usernameInput).take(40)
+        if (clean.isBlank()) return@withContext Pair(emptyList(), emptyMap())
+        mutex.withLock {
+            val root = readRootUnlocked()
+            val key = findAccountKeyByUsernameUnlocked(root, clean) ?: return@withContext Pair(emptyList(), emptyMap())
+            val account = root.optJSONObject(key) ?: return@withContext Pair(emptyList(), emptyMap())
+
+            val contactsList = mutableListOf<ChatThread>()
+            val contactsArr = account.optJSONArray("contacts")
+            if (contactsArr != null) {
+                for (i in 0 until contactsArr.length()) {
+                    val cObj = contactsArr.optJSONObject(i) ?: continue
+                    contactsList.add(jsonToChatThread(cObj))
+                }
+            }
+
+            val messagesMap = mutableMapOf<String, List<ChatMessage>>()
+            val messagesObj = account.optJSONObject("messages")
+            if (messagesObj != null) {
+                val keys = messagesObj.keys()
+                while (keys.hasNext()) {
+                    val cId = keys.next()
+                    val mArr = messagesObj.optJSONArray(cId) ?: continue
+                    val mList = mutableListOf<ChatMessage>()
+                    for (i in 0 until mArr.length()) {
+                        val mObj = mArr.optJSONObject(i) ?: continue
+                        mList.add(jsonToChatMessage(mObj))
+                    }
+                    messagesMap[cId] = mList
+                }
+            }
+
+            Pair(contactsList, messagesMap)
+        }
+    }
+
+    suspend fun importContactsAndMessages(
+        usernameInput: String,
+        contacts: List<ChatThread>,
+        messagesMap: Map<String, List<ChatMessage>>
+    ) = withContext(Dispatchers.IO) {
+        val clean = NomiChatRepository.normalizeUsername(usernameInput).take(40)
+        if (clean.isBlank()) return@withContext
+        mutex.withLock {
+            val root = readRootUnlocked()
+            val key = findAccountKeyByUsernameUnlocked(root, clean) ?: clean
+            val account = root.optJSONObject(key) ?: JSONObject().apply {
+                put("userId", clean)
+                put("username", clean)
+                put("displayName", clean)
+                put("accountStatus", "active")
+            }
+
+            val existingContactsArr = account.optJSONArray("contacts") ?: JSONArray()
+            val contactMap = mutableMapOf<String, JSONObject>()
+            for (i in 0 until existingContactsArr.length()) {
+                val c = existingContactsArr.optJSONObject(i) ?: continue
+                val id = c.optString("id")
+                if (id.isNotBlank()) contactMap[id] = c
+            }
+            for (c in contacts) {
+                contactMap[c.id] = chatThreadToJson(c)
+            }
+            val newContactsArr = JSONArray()
+            contactMap.values.forEach { newContactsArr.put(it) }
+            account.put("contacts", newContactsArr)
+
+            val existingMessagesObj = account.optJSONObject("messages") ?: JSONObject()
+            for ((contactId, msgList) in messagesMap) {
+                val existingMsgArr = existingMessagesObj.optJSONArray(contactId) ?: JSONArray()
+                val msgMap = mutableMapOf<String, JSONObject>()
+                for (i in 0 until existingMsgArr.length()) {
+                    val m = existingMsgArr.optJSONObject(i) ?: continue
+                    val id = m.optString("id")
+                    if (id.isNotBlank()) msgMap[id] = m
+                }
+                for (m in msgList) {
+                    msgMap[m.id] = chatMessageToJson(m)
+                }
+                val newMsgArr = JSONArray()
+                val sortedList = msgMap.values.toList().sortedBy { it.optLong("createdAtSec", 0L) }
+                sortedList.forEach { newMsgArr.put(it) }
+                existingMessagesObj.put(contactId, newMsgArr)
+            }
+            account.put("messages", existingMessagesObj)
+
+            root.put(key, account)
+            writeRootUnlocked(root)
+        }
+    }
+
+    private fun chatThreadToJson(thread: ChatThread): JSONObject {
+        return JSONObject().apply {
+            put("id", thread.id)
+            put("userId", thread.userId)
+            put("name", thread.name)
+            put("username", thread.username)
+            put("phone", thread.phone)
+            put("threadType", thread.threadType)
+            put("bio", thread.bio)
+            if (!thread.photoData.isNullOrBlank()) put("photoData", thread.photoData) else put("photoData", JSONObject.NULL)
+            if (!thread.bannerData.isNullOrBlank()) put("bannerData", thread.bannerData) else put("bannerData", JSONObject.NULL)
+            put("online", thread.online)
+            put("typing", thread.typing)
+            put("unreadCount", thread.unreadCount)
+            put("lastMessageText", thread.lastMessageText)
+            put("lastMessageFromMe", thread.lastMessageFromMe)
+            put("lastMessageTimeLabel", thread.lastMessageTimeLabel)
+            put("pinned", thread.pinned)
+            put("locked", thread.locked)
+            put("blocked", thread.blocked)
+            put("archived", thread.archived)
+            put("muted", thread.muted)
+            put("disappearingSeconds", thread.disappearingSeconds)
+            put("chatTheme", thread.chatTheme)
+            put("customRenamed", thread.customRenamed)
+            put("peerUid", thread.peerUid)
+            put("isRegisteredPeer", thread.isRegisteredPeer)
+            put("accountStatus", thread.accountStatus)
+            put("reportCount", thread.reportCount)
+            val repArr = JSONArray()
+            thread.reportedBy.forEach { repArr.put(it) }
+            put("reportedBy", repArr)
+            put("lastMessageReceiptStatus", thread.lastMessageReceiptStatus)
+            put("lastMessageId", thread.lastMessageId)
+            put("createdAtSec", thread.createdAt?.seconds ?: (System.currentTimeMillis() / 1000L))
+            put("updatedAtSec", thread.updatedAt?.seconds ?: (System.currentTimeMillis() / 1000L))
+        }
+    }
+
+    private fun chatMessageToJson(msg: ChatMessage): JSONObject {
+        return JSONObject().apply {
+            put("id", msg.id)
+            put("userId", msg.userId)
+            put("contactId", msg.contactId)
+            put("sender", msg.sender)
+            put("text", msg.text)
+            put("messageType", msg.messageType)
+            if (!msg.mediaData.isNullOrBlank()) put("mediaData", msg.mediaData) else put("mediaData", JSONObject.NULL)
+            put("durationSec", msg.durationSec)
+            put("expiresAtMs", msg.expiresAtMs)
+            put("timeLabel", msg.timeLabel)
+            put("aiGenerated", msg.aiGenerated)
+            put("receiptStatus", msg.receiptStatus)
+            if (!msg.replyToText.isNullOrBlank()) put("replyToText", msg.replyToText) else put("replyToText", JSONObject.NULL)
+            if (!msg.replyToSender.isNullOrBlank()) put("replyToSender", msg.replyToSender) else put("replyToSender", JSONObject.NULL)
+            if (!msg.replyToMessageId.isNullOrBlank()) put("replyToMessageId", msg.replyToMessageId) else put("replyToMessageId", JSONObject.NULL)
+            if (!msg.senderMessageId.isNullOrBlank()) put("senderMessageId", msg.senderMessageId) else put("senderMessageId", JSONObject.NULL)
+            if (!msg.senderContactId.isNullOrBlank()) put("senderContactId", msg.senderContactId) else put("senderContactId", JSONObject.NULL)
+            put("createdAtSec", msg.createdAt?.seconds ?: (System.currentTimeMillis() / 1000L))
+        }
+    }
+
+    suspend fun exportAccountForFirebaseMigration(
+        usernameInput: String,
+        password: String
+    ): com.example.data.repository.NomiChatRepository.LegacyMigrationPayload? = withContext(Dispatchers.IO) {
+        val clean = NomiChatRepository.normalizeUsername(usernameInput).take(40)
+        if (clean.length < 2 || password.isEmpty()) return@withContext null
+        mutex.withLock {
+            val root = readRootUnlocked()
+            val key = findAccountKeyByUsernameUnlocked(root, clean) ?: return@withContext null
+            val account = root.optJSONObject(key) ?: return@withContext null
+            val salt = account.optString("passwordSalt", "")
+            val hash = account.optString("passwordHash", "")
+            if (!PasswordHasher.verifyPassword(password, salt, hash)) return@withContext null
+            val photo = if (account.isNull("photoData")) null else account.optString("photoData").takeIf { it.isNotBlank() }
+            val banner = if (account.isNull("bannerData")) null else account.optString("bannerData").takeIf { it.isNotBlank() }
+
+            val contactsList = mutableListOf<ChatThread>()
+            val contactsArr = account.optJSONArray("contacts")
+            if (contactsArr != null) {
+                for (i in 0 until contactsArr.length()) {
+                    val cObj = contactsArr.optJSONObject(i) ?: continue
+                    contactsList.add(jsonToChatThread(cObj))
+                }
+            }
+
+            val messagesMap = mutableMapOf<String, List<ChatMessage>>()
+            val messagesObj = account.optJSONObject("messages")
+            if (messagesObj != null) {
+                val keys = messagesObj.keys()
+                while (keys.hasNext()) {
+                    val cId = keys.next()
+                    val mArr = messagesObj.optJSONArray(cId) ?: continue
+                    val mList = mutableListOf<ChatMessage>()
+                    for (i in 0 until mArr.length()) {
+                        val mObj = mArr.optJSONObject(i) ?: continue
+                        mList.add(jsonToChatMessage(mObj))
+                    }
+                    messagesMap[cId] = mList
+                }
+            }
+
+            com.example.data.repository.NomiChatRepository.LegacyMigrationPayload(
+                username = NomiChatRepository.normalizeUsername(account.optString("username", clean)),
+                displayName = account.optString("displayName", clean),
+                dob = account.optString("dob", "2000-01-01"),
+                bio = account.optString("bio", "Dream Big... 💚"),
+                photoData = photo,
+                bannerData = banner,
+                passwordSalt = salt,
+                passwordHash = hash,
+                accountStatus = account.optString("accountStatus", "active"),
+                contacts = contactsList,
+                messages = messagesMap
+            )
         }
     }
 
@@ -2341,4 +2664,22 @@ class LocalNomiRepository(private val store: LocalAuthStore) : NomiDataSource {
         reporterUsername: String,
         reason: String
     ): Result<ReportOutcome> = store.reportUserAccount(userId, contact, reporterUsername)
+
+    override suspend fun submitBanAppeal(
+        userId: String,
+        username: String,
+        displayName: String,
+        appealMessage: String,
+        aiRecommendation: String,
+        aiRiskLevel: String,
+        aiAnalysis: String,
+        aiPrompt: String
+    ): Result<Unit> = store.submitBanAppeal(
+        usernameKey = username.ifBlank { userId },
+        appealMessage = appealMessage,
+        aiRecommendation = aiRecommendation,
+        aiRiskLevel = aiRiskLevel,
+        aiAnalysis = aiAnalysis,
+        aiPrompt = aiPrompt
+    )
 }

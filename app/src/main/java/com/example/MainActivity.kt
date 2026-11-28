@@ -74,6 +74,9 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.example.data.ai.SmartReplyRepository
+import com.example.data.local.LocalAuthOutcome
+import com.example.data.local.LocalAuthStore
+import com.example.data.local.LocalNomiRepository
 import com.example.data.model.AuthFlowMode
 import com.example.data.model.ChatPillFilter
 import com.example.data.model.IncomingMessageAlert
@@ -99,6 +102,7 @@ import com.example.ui.screens.AppLockSetupDialog
 import com.example.ui.screens.AppearanceDialog
 import com.example.ui.screens.ArchivedChatsScreen
 import com.example.ui.screens.AvatarPreviewDialog
+import com.example.ui.screens.BannedAccountAppealScreen
 import com.example.ui.screens.ChangePasswordDialog
 import com.example.ui.screens.ChatsScreen
 import com.example.ui.screens.ContactProfileDialog
@@ -228,6 +232,51 @@ fun AppNavigation(
 
     val prefs = prefsOrNull
     val user = currentUser
+    val activeUserId = prefs?.activeUserId.orEmpty()
+    val activeUsername = prefs?.activeUsername.orEmpty()
+    val hasPersistedUsernameSession = user == null && activeUserId.startsWith("usr_") && activeUsername.isNotBlank()
+    var activeUsernameSession by remember(activeUserId, activeUsername) {
+        mutableStateOf(
+            if (hasPersistedUsernameSession) activeUserId to activeUsername else null
+        )
+    }
+
+    LaunchedEffect(user, activeUserId, activeUsername) {
+        if (user == null && activeUserId.startsWith("usr_") && activeUsername.isNotBlank()) {
+            activeUsernameSession = activeUserId to activeUsername
+            val db = NomiChatRepository.getPersistentDb(appContext)
+            when (val outcome = NomiChatRepository.validateUsernameSession(db, activeUserId, activeUsername)) {
+                is NomiChatRepository.UsernameAuthResult.Success -> {
+                    activeUsernameSession = outcome.userId to outcome.username
+                    if (outcome.username != activeUsername) {
+                        preferencesRepository.saveActiveSession(outcome.userId, outcome.username)
+                    }
+                }
+                is NomiChatRepository.UsernameAuthResult.Banned -> {
+                    // Keep shell attached so BannedAccountAppealScreen renders immediately with appeal submission
+                    activeUsernameSession = outcome.userId to outcome.username
+                }
+                is NomiChatRepository.UsernameAuthResult.Error -> {
+                    activeUsernameSession = null
+                    preferencesRepository.saveActiveSession("", "")
+                    globalAuthError = outcome.message
+                }
+            }
+        } else if (user == null && activeUserId.isBlank() && activeUsername.isNotBlank()) {
+            // Migrate legacy local-only activeUsername session if it already exists on Firebase, else prompt login
+            val db = NomiChatRepository.getPersistentDb(appContext)
+            val resolved = NomiChatRepository.resolveAccountUidByUsername(db, activeUsername)
+            if (resolved != null) {
+                preferencesRepository.saveActiveSession(resolved.first, activeUsername)
+                activeUsernameSession = resolved.first to activeUsername
+            } else {
+                preferencesRepository.saveActiveSession("", "")
+                activeUsernameSession = null
+            }
+        } else {
+            activeUsernameSession = null
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         when {
@@ -249,14 +298,7 @@ fun AppNavigation(
                         factory = viewModelFactory {
                             initializer {
                                 val app = checkNotNull(this[APPLICATION_KEY])
-                                val databaseId = app.getString(R.string.firestore_database_id)
-                                val db = FirebaseFirestore.getInstance(databaseId).apply {
-                                    runCatching {
-                                        firestoreSettings = FirebaseFirestoreSettings.Builder()
-                                            .setLocalCacheSettings(PersistentCacheSettings.newBuilder().build())
-                                            .build()
-                                    }
-                                }
+                                val db = NomiChatRepository.getPersistentDb(app)
                                 NomiChatViewModel(
                                     repository = NomiChatRepository(db),
                                     smartReplyRepository = SmartReplyRepository(),
@@ -285,6 +327,50 @@ fun AppNavigation(
                     )
                 }
             }
+            activeUsernameSession != null -> {
+                val (sessionUid, sessionHandle) = activeUsernameSession!!
+                key("username_$sessionUid") {
+                    val viewModel: NomiChatViewModel = viewModel(
+                        key = "username_$sessionUid",
+                        factory = viewModelFactory {
+                            initializer {
+                                val app = checkNotNull(this[APPLICATION_KEY])
+                                val db = NomiChatRepository.getPersistentDb(app)
+                                NomiChatViewModel(
+                                    repository = NomiChatRepository(
+                                        db = db,
+                                        sessionUserId = sessionUid,
+                                        sessionUsername = sessionHandle
+                                    ),
+                                    smartReplyRepository = SmartReplyRepository(),
+                                    preferencesRepository = UserPreferencesRepository(app),
+                                    currentUserId = sessionUid,
+                                    networkObserver = networkObserver
+                                )
+                            }
+                        }
+                    )
+                    NomiChatMainShell(
+                        viewModel = viewModel,
+                        preferencesRepository = preferencesRepository,
+                        currentThemeMode = themeMode,
+                        bottomTab = bottomTab,
+                        pendingNotificationContactId = pendingNotificationContactId,
+                        onConsumedNotificationContactId = onConsumedNotificationContactId,
+                        pendingOpenAdminAlerts = pendingOpenAdminAlerts,
+                        onConsumedOpenAdminAlerts = onConsumedOpenAdminAlerts,
+                        onSelectBottomTab = { bottomTab = it },
+                        onResetToAuth = {
+                            activeUsernameSession = null
+                            bottomTab = MainBottomTab.CHATS
+                        },
+                        onShowGlobalPopup = { message -> globalPopupMessage = message },
+                        onAuthRejected = { reason -> globalAuthError = reason },
+                        activeGlobalPopupMessage = globalPopupMessage,
+                        onDialogShowsPopup = { suppressRootPopup = it }
+                    )
+                }
+            }
             else -> {
                 AuthScreen(
                     initialErrorMessage = globalAuthError,
@@ -298,6 +384,19 @@ fun AppNavigation(
                             authFlowMode = mode,
                             returningIdentifier = returningId
                         )
+                    },
+                    onDirectAuthSuccess = { directUserId, directUsername, directName, directDob, mode ->
+                        preferencesRepository.savePreferredSignInIdentity(
+                            displayName = directName,
+                            username = directUsername,
+                            dob = directDob,
+                            authFlowMode = mode,
+                            returningIdentifier = if (mode == AuthFlowMode.RETURNING_LOGIN) directUsername else ""
+                        )
+                        preferencesRepository.saveActiveSession(directUserId, directUsername)
+                        activeUsernameSession = directUserId to directUsername
+                        globalAuthError = null
+                        bottomTab = MainBottomTab.CHATS
                     },
                     onAuthSuccess = {
                         globalAuthError = null
@@ -391,7 +490,10 @@ private fun NomiChatMainShell(
                     alertId = adminAlert.id,
                     reportedHandle = adminAlert.reportedUsername,
                     reporterHandle = adminAlert.reporterUsername,
-                    reason = adminAlert.reason
+                    reason = adminAlert.reason,
+                    alertType = adminAlert.alertType,
+                    aiRecommendation = adminAlert.aiRecommendation,
+                    aiPrompt = adminAlert.aiPrompt
                 )
             }
         }
@@ -440,6 +542,9 @@ private fun NomiChatMainShell(
     val isAdminActionLoading by viewModel.isAdminActionLoading.collectAsStateWithLifecycle()
     val pendingModerationCount by viewModel.pendingModerationCount.collectAsStateWithLifecycle()
     val inAppAdminBanner by viewModel.inAppAdminBanner.collectAsStateWithLifecycle()
+    val isSubmittingBanAppeal by viewModel.isSubmittingBanAppeal.collectAsStateWithLifecycle()
+    val submittedBanAppealResult by viewModel.submittedBanAppealResult.collectAsStateWithLifecycle()
+    val banAppealError by viewModel.banAppealError.collectAsStateWithLifecycle()
 
     val rawAllThreads by viewModel.allThreadsState.collectAsStateWithLifecycle()
     val archivedChats by viewModel.archivedChatsState.collectAsStateWithLifecycle()
@@ -553,19 +658,37 @@ private fun NomiChatMainShell(
         }
     }
 
-    LaunchedEffect(isBannedAccount) {
-        if (isBannedAccount) {
-            onAuthRejected("Your ID is banned")
-            onShowGlobalPopup("Your ID is banned")
-            onResetToAuth()
-            preferencesRepository.saveActiveUsername("")
-            if (Firebase.auth.currentUser != null) {
-                signOutUser(
-                    credentialManager = credentialManager,
-                    scope = scope
-                )
+    if (isBannedAccount) {
+        val currentProfile = (profileState as? UiState.Success)?.data
+        BannedAccountAppealScreen(
+            displayName = currentProfile?.displayName?.takeIf { it.isNotBlank() }
+                ?: prefs.preferredDisplayName.ifBlank { "Account" },
+            username = currentProfile?.username?.takeIf { it.isNotBlank() }
+                ?: prefs.preferredUsername.ifBlank { prefs.activeUsername },
+            photoData = currentProfile?.photoData,
+            isSubmitting = isSubmittingBanAppeal,
+            errorMessage = banAppealError,
+            submittedEvaluation = submittedBanAppealResult,
+            onClearError = viewModel::clearBanAppealFeedback,
+            onSubmitAppeal = viewModel::submitBanAppeal,
+            onSignOutClick = {
+                viewModel.prepareImmediateLogout()
+                PendingAuthCredentials.clear()
+                onAuthRejected("Your ID is banned")
+                onResetToAuth()
+                CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+                    runCatching { preferencesRepository.clearPendingSignInFlow() }
+                    runCatching { preferencesRepository.saveActiveSession("", "") }
+                }
+                if (Firebase.auth.currentUser != null) {
+                    signOutUser(
+                        credentialManager = credentialManager,
+                        scope = scope
+                    )
+                }
             }
-        }
+        )
+        return
     }
 
     LaunchedEffect(authRejectionMessage) {
@@ -574,7 +697,7 @@ private fun NomiChatMainShell(
             onAuthRejected(reason)
             viewModel.clearAuthRejection()
             onResetToAuth()
-            preferencesRepository.saveActiveUsername("")
+            preferencesRepository.saveActiveSession("", "")
             if (Firebase.auth.currentUser != null) {
                 signOutUser(
                     credentialManager = credentialManager,
@@ -765,7 +888,7 @@ private fun NomiChatMainShell(
                             onResetToAuth()
                             CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
                                 runCatching { preferencesRepository.clearPendingSignInFlow() }
-                                runCatching { preferencesRepository.saveActiveUsername("") }
+                                runCatching { preferencesRepository.saveActiveSession("", "") }
                             }
                             signOutUser(
                                 credentialManager = credentialManager,

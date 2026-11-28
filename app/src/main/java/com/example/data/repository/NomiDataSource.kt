@@ -110,6 +110,8 @@ interface NomiDataSource {
 
     suspend fun refreshUserData(userId: String): Result<Unit> = Result.success(Unit)
 
+    suspend fun refreshPeerProfile(userId: String, contactId: String) {}
+
     suspend fun syncAccountSettings(
         userId: String,
         themeMode: ThemeMode? = null,
@@ -220,5 +222,16 @@ interface NomiDataSource {
     suspend fun adminBanUser(uid: String, username: String): Result<Unit> = Result.success(Unit)
 
     suspend fun adminUnbanUser(uid: String, username: String): Result<Unit> = Result.success(Unit)
+
+    suspend fun submitBanAppeal(
+        userId: String,
+        username: String,
+        displayName: String,
+        appealMessage: String,
+        aiRecommendation: String,
+        aiRiskLevel: String,
+        aiAnalysis: String,
+        aiPrompt: String
+    ): Result<Unit> = Result.success(Unit)
 }
 

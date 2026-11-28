@@ -38,12 +38,13 @@ beforeEach(async () => {
   }
 });
 
-test("Unauthenticated users cannot read or write profiles, directory, contacts, or messages", async () => {
+test("Unauthenticated users cannot read or write Google profiles, contacts, username_accounts list, or messages", async () => {
   const unauthDb = testEnv.unauthenticatedContext().firestore();
   const past = new Date(Date.now() - 1000);
 
   await assertFails(unauthDb.collection("users").doc(ALICE_UID).get());
-  await assertFails(unauthDb.collection("directory").doc("ayazbugti786").get());
+  await assertFails(unauthDb.collection("directory").get());
+  await assertFails(unauthDb.collection("username_accounts").get());
   await assertFails(unauthDb.collection("users").doc(ALICE_UID).collection("contacts").get());
   await assertFails(
     unauthDb.collection("users").doc(ALICE_UID).set({
@@ -53,6 +54,24 @@ test("Unauthenticated users cannot read or write profiles, directory, contacts, 
       bio: "Bio",
       dob: "2000-01-01",
       provider: "username",
+      online: true,
+      verified: false,
+      premiumUnlocked: false,
+      accountStatus: "active",
+      reportCount: 0,
+      createdAt: past,
+      updatedAt: past,
+    })
+  );
+  // Cannot spoof Google provider or verified flag on usr_ account without Firebase Auth
+  await assertFails(
+    unauthDb.collection("users").doc("usr_0123456789abcdef01234567").set({
+      userId: "usr_0123456789abcdef01234567",
+      displayName: "Hacker",
+      username: "hacker",
+      bio: "Bio",
+      dob: "2000-01-01",
+      provider: "google",
       online: true,
       verified: false,
       premiumUnlocked: false,
@@ -400,7 +419,7 @@ test("Directory supports owner photoData sync and Stories enforce 24h validity a
     })
   );
 
-  await assertFails(unauthDb.collection("stories").doc("story_1").get());
+  await assertFails(unauthDb.collection("stories").get()); // unbounded list scraping fails
   await assertSucceeds(bobDb.collection("stories").doc("story_1").get());
   await assertFails(bobDb.collection("stories").doc("story_1").delete());
   await assertSucceeds(aliceDb.collection("stories").doc("story_1").delete());
@@ -1023,9 +1042,18 @@ test("Username reservations enforce uniqueness, allow reclaiming retired unowned
   const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
   const created = new Date(Date.now() - 5000);
 
-  // Unauthenticated cannot read or write /usernames
-  await assertFails(unauthDb.collection("usernames").doc("alice_old").get());
+  // List scraping fails and unauthenticated writes without usr_ UID fail
+  await assertFails(unauthDb.collection("usernames").get());
   await assertFails(aliceDb.collection("usernames").get()); // list scraping blocked
+  await assertFails(
+    unauthDb.collection("usernames").doc("alice_old").set({
+      username: "alice_old",
+      ownerUid: ALICE_UID,
+      status: "active",
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
 
   // Alice claims alice_old
   await assertSucceeds(
@@ -1126,8 +1154,8 @@ test("Public profiles allow authenticated single-doc get, block list scraping, a
     })
   );
 
-  // Unauthenticated reads fail; authenticated get succeeds; list scraping fails
-  await assertFails(unauthDb.collection("public_profiles").doc(ALICE_UID).get());
+  // Unauthenticated list scraping and unauthenticated Google UID writes fail; single-doc lookup succeeds for peer sync
+  await assertFails(unauthDb.collection("public_profiles").get());
   await assertSucceeds(bobDb.collection("public_profiles").doc(ALICE_UID).get());
   await assertFails(bobDb.collection("public_profiles").get());
 
@@ -1706,6 +1734,452 @@ test("Bounded chunked queries (limit <= 30) work on public_profiles and director
   await assertFails(bobDb.collection("directory").limit(31).get());
 });
 
+test("Message read receipts enforce monotonic status progression, owner-only updates, and secure message_receipts relay", async () => {
+  const created = new Date(Date.now() - 8000);
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
 
+  // Alice creates a contact thread with initial receipt status
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).collection("contacts").doc("c_bob").set({
+      userId: ALICE_UID,
+      name: "Bob",
+      username: "bob_user",
+      phone: "",
+      threadType: "chat",
+      online: true,
+      typing: false,
+      unreadCount: 0,
+      lastMessageText: "Hello Bob",
+      lastMessageFromMe: true,
+      lastMessageTimeLabel: "8:00 PM",
+      lastMessageReceiptStatus: "sent",
+      lastMessageId: "msg_1",
+      pinned: false,
+      peerUid: BOB_UID,
+      isRegisteredPeer: true,
+      accountStatus: "active",
+      reportCount: 0,
+      reportedBy: [],
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  // Alice writes outgoing message with receiptStatus = "sent"
+  const msgRef = aliceDb
+    .collection("users")
+    .doc(ALICE_UID)
+    .collection("contacts")
+    .doc("c_bob")
+    .collection("messages")
+    .doc("msg_1");
+
+  await assertSucceeds(
+    msgRef.set({
+      userId: ALICE_UID,
+      contactId: "c_bob",
+      sender: "me",
+      text: "Hello Bob",
+      messageType: "text",
+      receiptStatus: "sent",
+      timeLabel: "8:00 PM",
+      aiGenerated: false,
+      createdAt: created,
+    })
+  );
+
+  // Alice sends direct_message relay including senderMessageId & senderContactId
+  await assertSucceeds(
+    aliceDb.collection("direct_messages").doc("relay_1").set({
+      fromUid: ALICE_UID,
+      toUid: BOB_UID,
+      fromUsername: "alice_user",
+      fromDisplayName: "Alice",
+      toUsername: "bob_user",
+      text: "Hello Bob",
+      messageType: "text",
+      senderMessageId: "msg_1",
+      senderContactId: "c_bob",
+      timeLabel: "8:00 PM",
+      createdAt: new Date(Date.now() - 6000),
+    })
+  );
+
+  // Bob writes delivered & read receipts addressed to Alice
+  await assertSucceeds(
+    bobDb.collection("message_receipts").doc("rcpt_delivered_1").set({
+      fromUid: BOB_UID,
+      toUid: ALICE_UID,
+      senderContactId: "c_bob",
+      senderMessageId: "msg_1",
+      status: "delivered",
+      createdAt: new Date(Date.now() - 5000),
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("message_receipts").doc("rcpt_read_1").set({
+      fromUid: BOB_UID,
+      toUid: ALICE_UID,
+      senderContactId: "c_bob",
+      senderMessageId: "msg_1",
+      status: "read",
+      createdAt: new Date(Date.now() - 4000),
+    })
+  );
+
+  // Spoofed fromUid or invalid status ("sent") in message_receipts fails
+  await assertFails(
+    bobDb.collection("message_receipts").doc("rcpt_spoof").set({
+      fromUid: ALICE_UID,
+      toUid: ALICE_UID,
+      senderContactId: "c_bob",
+      senderMessageId: "msg_1",
+      status: "read",
+      createdAt: new Date(Date.now() - 4000),
+    })
+  );
+  await assertFails(
+    bobDb.collection("message_receipts").doc("rcpt_bad_status").set({
+      fromUid: BOB_UID,
+      toUid: ALICE_UID,
+      senderContactId: "c_bob",
+      senderMessageId: "msg_1",
+      status: "sent",
+      createdAt: new Date(Date.now() - 4000),
+    })
+  );
+
+  // Alice queries her incoming receipts; Bob cannot list Alice's receipts or update/delete them
+  await assertSucceeds(
+    aliceDb.collection("message_receipts").where("toUid", "==", ALICE_UID).get()
+  );
+  await assertFails(
+    bobDb.collection("message_receipts").where("toUid", "==", ALICE_UID).get()
+  );
+  await assertFails(
+    bobDb.collection("message_receipts").doc("rcpt_read_1").update({ status: "delivered" })
+  );
+  await assertFails(
+    bobDb.collection("message_receipts").doc("rcpt_read_1").delete()
+  );
+
+  // Alice monotonically upgrades receiptStatus: sent -> delivered -> read
+  await assertSucceeds(msgRef.update({ receiptStatus: "delivered" }));
+  await assertSucceeds(msgRef.update({ receiptStatus: "read" }));
+
+  // Alice updates contact thread's lastMessageReceiptStatus
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).collection("contacts").doc("c_bob").update({
+      lastMessageReceiptStatus: "read",
+      updatedAt: new Date(Date.now() - 1000),
+    })
+  );
+
+  // Regressing receiptStatus ("read" -> "delivered") or mutating message text fails
+  await assertFails(msgRef.update({ receiptStatus: "delivered" }));
+  await assertFails(msgRef.update({ receiptStatus: "sent" }));
+  await assertFails(msgRef.update({ receiptStatus: "read", text: "Tampered" }));
+
+  // Cross-user update on Alice's message fails
+  await assertFails(
+    bobDb
+      .collection("users")
+      .doc(ALICE_UID)
+      .collection("contacts")
+      .doc("c_bob")
+      .collection("messages")
+      .doc("msg_1")
+      .update({ receiptStatus: "read" })
+  );
+
+  // Alice deletes processed receipt once consumed
+  await assertSucceeds(
+    aliceDb.collection("message_receipts").doc("rcpt_delivered_1").delete()
+  );
+  await assertSucceeds(
+    aliceDb.collection("message_receipts").doc("rcpt_read_1").delete()
+  );
+});
+
+test("Banned users can submit AI-evaluated appeal alerts and only verified admin can read or resolve them", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, {
+    email: "alice@example.com",
+    email_verified: true,
+  }).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID, {
+    email: "bob@example.com",
+    email_verified: true,
+  }).firestore();
+  const adminDb = testEnv.authenticatedContext("admin_uid_001", {
+    email: "ayazbugti100@gmail.com",
+    email_verified: true,
+  }).firestore();
+  const created = new Date(Date.now() - 5000);
+
+  // Alice submits a valid AI-evaluated appeal alert
+  await assertSucceeds(
+    aliceDb.collection("moderation_alerts").doc("appeal_alice_1").set({
+      alertType: "appeal",
+      reportedUid: ALICE_UID,
+      reportedUsername: "alice_user",
+      reportedDisplayName: "Alice",
+      reporterUid: ALICE_UID,
+      reporterUsername: "alice_user",
+      reporterEmail: "alice@example.com",
+      reason: "Ban Appeal",
+      appealMessage: "My account was reported by mistake during a misunderstanding. I will follow all rules.",
+      aiRecommendation: "RESTORE",
+      aiRiskLevel: "LOW",
+      aiAnalysis: "Sincere apology with low repeat-abuse risk.",
+      aiPrompt: "Do you want to restore/unban @alice_user or keep this account banned?",
+      status: "pending",
+      createdAtMs: Date.now() - 2000,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  // Invalid aiRecommendation, oversized appealMessage, or spoofed reporterUid must fail
+  await assertFails(
+    aliceDb.collection("moderation_alerts").doc("appeal_bad_rec").set({
+      alertType: "appeal",
+      reportedUid: ALICE_UID,
+      reportedUsername: "alice_user",
+      reportedDisplayName: "Alice",
+      reporterUid: ALICE_UID,
+      reporterUsername: "alice_user",
+      reason: "Ban Appeal",
+      appealMessage: "Please restore my account",
+      aiRecommendation: "AUTO_UNBAN",
+      aiRiskLevel: "LOW",
+      status: "pending",
+      createdAtMs: Date.now() - 1000,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+  await assertFails(
+    aliceDb.collection("moderation_alerts").doc("appeal_too_long").set({
+      alertType: "appeal",
+      reportedUid: ALICE_UID,
+      reportedUsername: "alice_user",
+      reportedDisplayName: "Alice",
+      reporterUid: ALICE_UID,
+      reporterUsername: "alice_user",
+      reason: "Ban Appeal",
+      appealMessage: "a".repeat(601),
+      aiRecommendation: "KEEP_BANNED",
+      aiRiskLevel: "HIGH",
+      status: "pending",
+      createdAtMs: Date.now() - 1000,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+  await assertFails(
+    bobDb.collection("moderation_alerts").doc("appeal_spoof").set({
+      alertType: "appeal",
+      reportedUid: ALICE_UID,
+      reportedUsername: "alice_user",
+      reportedDisplayName: "Alice",
+      reporterUid: ALICE_UID,
+      reporterUsername: "alice_user",
+      reason: "Ban Appeal",
+      appealMessage: "Please unban",
+      status: "pending",
+      createdAtMs: Date.now() - 1000,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  // Non-admins cannot read or resolve alerts
+  await assertFails(aliceDb.collection("moderation_alerts").doc("appeal_alice_1").get());
+  await assertFails(
+    aliceDb.collection("moderation_alerts").doc("appeal_alice_1").update({
+      status: "recovered",
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+
+  // Verified admin can read and choose either Restore (recovered) or Keep Banned (banned)
+  await assertSucceeds(adminDb.collection("moderation_alerts").doc("appeal_alice_1").get());
+  await assertSucceeds(
+    adminDb.collection("moderation_alerts").doc("appeal_alice_1").update({
+      status: "recovered",
+      adminEmail: "ayazbugti100@gmail.com",
+      resolvedAtMs: Date.now(),
+      updatedAt: new Date(Date.now() - 400),
+    })
+  );
+  await assertSucceeds(
+    adminDb.collection("moderation_alerts").doc("appeal_alice_1").update({
+      status: "banned",
+      adminEmail: "ayazbugti100@gmail.com",
+      resolvedAtMs: Date.now(),
+      updatedAt: new Date(Date.now() - 300),
+    })
+  );
+});
+
+test("Pure Username+Password usr_ accounts persist long-term in /username_accounts, sync settings, block scraping/admin tampering, and support admin ban/recovery", async () => {
+  const MAYA_UID = "usr_0123456789abcdef01234567";
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID, {
+    email: "bob@example.com",
+    email_verified: true,
+  }).firestore();
+  const adminDb = testEnv.authenticatedContext("admin_uid_002", {
+    email: "ayazbugti100@gmail.com",
+    email_verified: true,
+  }).firestore();
+  const created = new Date(Date.now() - 5000);
+  const hash64 = "a".repeat(64);
+  const saltV2 = "v2_0123456789abcdef0123456789abcdef";
+
+  // Creating /username_accounts standalone without matching /users/{usr_} profile fails
+  await assertFails(
+    unauthDb.collection("username_accounts").doc("maya_nomi").set({
+      userId: MAYA_UID,
+      username: "maya_nomi",
+      displayName: "Maya Khan",
+      dob: "2001-05-15",
+      passwordSalt: saltV2,
+      passwordHash: hash64,
+      accountStatus: "active",
+      bannedByAdmin: false,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  // Atomic batch creation for Username+Password account succeeds
+  const signupBatch = unauthDb.batch();
+  signupBatch.set(unauthDb.collection("users").doc(MAYA_UID), {
+    userId: MAYA_UID,
+    displayName: "Maya Khan",
+    username: "maya_nomi",
+    bio: "Dream Big...",
+    dob: "2001-05-15",
+    provider: "username",
+    online: true,
+    verified: false,
+    premiumUnlocked: true,
+    accountStatus: "active",
+    reportCount: 0,
+    createdAt: created,
+    updatedAt: created,
+  });
+  signupBatch.set(unauthDb.collection("username_accounts").doc("maya_nomi"), {
+    userId: MAYA_UID,
+    username: "maya_nomi",
+    displayName: "Maya Khan",
+    dob: "2001-05-15",
+    passwordSalt: saltV2,
+    passwordHash: hash64,
+    accountStatus: "active",
+    bannedByAdmin: false,
+    createdAt: created,
+    updatedAt: created,
+  });
+  signupBatch.set(unauthDb.collection("usernames").doc("maya_nomi"), {
+    username: "maya_nomi",
+    ownerUid: MAYA_UID,
+    status: "active",
+    createdAt: created,
+    updatedAt: created,
+  });
+  signupBatch.set(unauthDb.collection("directory").doc("maya_nomi"), {
+    ownerUid: MAYA_UID,
+    username: "maya_nomi",
+    displayName: "Maya Khan",
+    provider: "username",
+    online: true,
+    verified: false,
+    accountStatus: "active",
+    reportCount: 0,
+    reportedByUids: [],
+    bannedByAdmin: false,
+    createdAt: created,
+    updatedAt: created,
+  });
+  signupBatch.set(unauthDb.collection("public_profiles").doc(MAYA_UID), {
+    ownerUid: MAYA_UID,
+    username: "maya_nomi",
+    displayName: "Maya Khan",
+    provider: "username",
+    online: true,
+    verified: false,
+    accountStatus: "active",
+    bannedByAdmin: false,
+    createdAt: created,
+    updatedAt: created,
+  });
+  await assertSucceeds(signupBatch.commit());
+
+  // Returning login can fetch exact handle doc; bulk listing fails for non-admins
+  await assertSucceeds(unauthDb.collection("username_accounts").doc("maya_nomi").get());
+  await assertFails(unauthDb.collection("username_accounts").get());
+  await assertFails(bobDb.collection("username_accounts").get());
+  await assertSucceeds(adminDb.collection("username_accounts").get());
+
+  // Settings sync and password change succeed for Maya; self-ban/self-verify fail
+  await assertSucceeds(
+    unauthDb.collection("users").doc(MAYA_UID).update({
+      themeMode: "DARK",
+      notificationsEnabled: false,
+      smartAiEnabled: true,
+      appLockPinHash: "b".repeat(64),
+      updatedAt: new Date(Date.now() - 2000),
+    })
+  );
+  await assertFails(
+    unauthDb.collection("users").doc(MAYA_UID).update({
+      verified: true,
+      updatedAt: new Date(Date.now() - 1500),
+    })
+  );
+  await assertFails(
+    unauthDb.collection("username_accounts").doc("maya_nomi").update({
+      accountStatus: "banned",
+      updatedAt: new Date(Date.now() - 1500),
+    })
+  );
+
+  // Maya can submit a moderation appeal directly if needed, and verified Admin can ban & recover her account
+  await assertSucceeds(
+    adminDb.collection("username_accounts").doc("maya_nomi").update({
+      accountStatus: "banned",
+      bannedByAdmin: true,
+      updatedAt: new Date(Date.now() - 1000),
+    })
+  );
+  await assertSucceeds(
+    unauthDb.collection("moderation_alerts").doc("appeal_maya_1").set({
+      alertType: "appeal",
+      reportedUid: MAYA_UID,
+      reportedUsername: "maya_nomi",
+      reportedDisplayName: "Maya Khan",
+      reporterUid: MAYA_UID,
+      reporterUsername: "maya_nomi",
+      reason: "Ban Appeal",
+      appealMessage: "Please restore my username account.",
+      aiRecommendation: "RESTORE",
+      aiRiskLevel: "LOW",
+      status: "pending",
+      createdAtMs: Date.now() - 800,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+  await assertSucceeds(
+    adminDb.collection("username_accounts").doc("maya_nomi").update({
+      accountStatus: "active",
+      bannedByAdmin: false,
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+});
 
 
