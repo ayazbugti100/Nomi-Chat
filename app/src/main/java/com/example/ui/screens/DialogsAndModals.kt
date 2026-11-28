@@ -9,6 +9,9 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -426,14 +429,26 @@ fun AddContactDialog(
                                 .testTag("add_contact_username_input")
                         )
 
+                        val findInteractionSource = remember { MutableInteractionSource() }
+                        val isFindPressed by findInteractionSource.collectIsPressedAsState()
+                        val isFindHovered by findInteractionSource.collectIsHoveredAsState()
+                        val findScale = if (isFindPressed) 0.95f else 1f
+                        val findColor = if (isFindPressed || isFindHovered) EmeraldDark else EmeraldMid
+
                         Button(
                             onClick = { onSearchUsername(username) },
                             enabled = usernameSearchState !is UsernameSearchState.Loading &&
                                 isInputUsernameLengthValid &&
                                 isInputUsernameFormatValid,
-                            colors = ButtonDefaults.buttonColors(containerColor = EmeraldMid),
+                            interactionSource = findInteractionSource,
+                            colors = ButtonDefaults.buttonColors(containerColor = findColor),
                             shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.testTag("find_username_button")
+                            modifier = Modifier
+                                .graphicsLayer {
+                                    scaleX = findScale
+                                    scaleY = findScale
+                                }
+                                .testTag("find_username_button")
                         ) {
                             if (usernameSearchState is UsernameSearchState.Loading) {
                                 CircularProgressIndicator(
@@ -814,6 +829,12 @@ fun AddContactDialog(
                 pulseScale = 1f
             }
 
+            val confirmInteractionSource = remember { MutableInteractionSource() }
+            val isConfirmPressed by confirmInteractionSource.collectIsPressedAsState()
+            val isConfirmHovered by confirmInteractionSource.collectIsHoveredAsState()
+            val confirmScale = if (isConfirmPressed) 0.95f * pulseScale else pulseScale
+            val confirmColor = if (isConfirmPressed || isConfirmHovered) EmeraldDark else EmeraldMid
+
             Button(
                 onClick = {
                     if (isGroup) {
@@ -831,19 +852,20 @@ fun AddContactDialog(
                         usernameSearchState !is UsernameSearchState.NotFound &&
                         (cleanCheck.isEmpty() || USERNAME_FORMAT_REGEX.matches(cleanCheck))
                 },
+                interactionSource = confirmInteractionSource,
                 colors = if (isProcessingRequest) {
                     ButtonDefaults.buttonColors(
-                        containerColor = EmeraldMid,
-                        disabledContainerColor = EmeraldMid.copy(alpha = 0.8f),
+                        containerColor = confirmColor,
+                        disabledContainerColor = confirmColor.copy(alpha = 0.8f),
                         disabledContentColor = Color.White
                     )
                 } else {
-                    ButtonDefaults.buttonColors(containerColor = EmeraldMid)
+                    ButtonDefaults.buttonColors(containerColor = confirmColor)
                 },
                 modifier = Modifier
                     .graphicsLayer {
-                        scaleX = pulseScale
-                        scaleY = pulseScale
+                        scaleX = confirmScale
+                        scaleY = confirmScale
                         alpha = pulseAlpha
                     }
                     .testTag("add_contact_confirm_button")
